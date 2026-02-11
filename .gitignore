@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+
+# Editors
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Isaac/Omniverse logs & outputs (원하면 경로 추가)
+logs/
+outputs/
+*.log
+
+# Large binaries (필요하면 추적 제외)
+*.so
