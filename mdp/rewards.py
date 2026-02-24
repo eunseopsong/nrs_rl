@@ -307,6 +307,7 @@ def save_episode_plots_position(step: int):
     plt.savefig(os.path.join(save_dir, f"pos_tracking_{version}_ep{_episode_counter_position+1}.png"))
     plt.close()
 
+
     # 2. Reward Plot & Best Logic
     r_steps, r_values = zip(*_position_reward_history)
     r_values_arr = np.array(r_values).flatten()
@@ -336,4 +337,3 @@ def save_episode_plots_position(step: int):
     _position_tracking_history.clear()
     _position_reward_history.clear()
     _episode_counter_position += 1
-    
