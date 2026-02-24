@@ -238,6 +238,11 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
         self.viewer.eye = (3.5, 3.5, 3.5)
         self.sim.dt = 1.0 / 30.0
 
+        # ✅ [추가] PhysX GPU 버퍼 강제 확장 (Patch buffer overflow 에러 해결)
+        self.sim.physx.gpu_max_rigid_patch_count = 1024 * 1024
+        self.sim.physx.gpu_max_rigid_contact_count = 2048 * 1024
+        self.sim.physx.gpu_temp_buffer_capacity = 32 * 1024 * 1024
+
         # robot
         self.scene.robot = UR10E_W_SPINDLE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 

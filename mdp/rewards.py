@@ -48,6 +48,23 @@ _position_reward_history = []
 _episode_counter_joint = 0
 _episode_counter_position = 0
 
+# [NEW] 파라미터 탐색용 최고 보상 및 파라미터 추적 변수
+_best_joint_reward = -np.inf
+_best_joint_episode = -1
+_best_position_reward = -np.inf
+_best_position_episode = -1
+_current_episode_params = {}
+
+# -----------------------------------------------------------
+# [NEW] Parameter Injection Utility
+# -----------------------------------------------------------
+def set_current_episode_params(params: dict):
+    """
+    메인 루프(train.py 등)에서 매 에피소드 시작 시 
+    현재 테스트 중인 PID/힘 제어 파라미터를 주입하기 위한 함수.
+    """
+    global _current_episode_params
+    _current_episode_params = params
 
 # -----------------------------------------------------------
 # Utility: angle wrap correction (torch, GPU-safe)
@@ -194,10 +211,15 @@ def position_tracking_reward(env: "ManagerBasedRLEnv"):
 
 
 # -----------------------------------------------------------
-# Visualization (공통)
+# Visualization & Best Episode Tracking
 # -----------------------------------------------------------
 def save_episode_plots_joint(step: int):
     global _joint_tracking_history, _joint_reward_history, _episode_counter_joint
+    global _best_joint_reward, _best_joint_episode, _current_episode_params
+
+    # [안전 장치] 기록된 데이터가 없으면 함수 종료
+    if not _joint_tracking_history or not _joint_reward_history:
+        return
 
     save_dir = os.path.expanduser("~/nrs_rl/outputs/png/")
     reward_dir = os.path.expanduser("~/nrs_rl/outputs/rewards/")
@@ -206,9 +228,9 @@ def save_episode_plots_joint(step: int):
 
     steps, targets, currents = zip(*_joint_tracking_history)
     targets, currents = np.vstack(targets), np.vstack(currents)
-
     colors = ["r", "g", "b", "orange", "purple", "gray"]
 
+    # 1. Tracking Plot
     plt.figure(figsize=(10, 6))
     for j in range(targets.shape[1]):
         plt.plot(targets[:, j], "--", color=colors[j], label=f"Target q{j+1}")
@@ -216,25 +238,34 @@ def save_episode_plots_joint(step: int):
     plt.legend()
     plt.grid(True)
     plt.title(f"Joint Tracking ({version})")
-    plt.xlabel("Step")
-    plt.ylabel("Joint [rad]")
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, f"joint_tracking_{version}_ep{_episode_counter_joint+1}.png"))
     plt.close()
 
+    # 2. Reward Plot & Best Logic
     r_steps, r_values = zip(*_joint_reward_history)
-    r_values = np.vstack(r_values)  # (T,6)
-    total_reward = np.sum(r_values, axis=1)
+    r_values_arr = np.array(r_values)
+    
+    # [수정됨] 명시적으로 총 보상 계산 및 변수 할당
+    episode_total_reward = float(np.sum(r_values_arr))
+
+    # 최고 보상 갱신 체크 (Joint)
+    if episode_total_reward > _best_joint_reward:
+        _best_joint_reward = episode_total_reward
+        _best_joint_episode = _episode_counter_joint + 1
+        print("\n" + "★"*50)
+        print(f"🎉 [NEW BEST JOINT EPISODE] Episode {_best_joint_episode} 🎉")
+        print(f"Total Joint Reward: {episode_total_reward:.4f}")
+        print(f"Applied Params: {_current_episode_params}")
+        print("★"*50 + "\n")
 
     plt.figure(figsize=(10, 5))
-    plt.plot(r_steps, total_reward, "k", linewidth=2.0, label="Total Reward")
+    plt.plot(r_steps, r_values_arr, "k", linewidth=2.0, label="Total Reward")
     plt.legend()
     plt.grid(True)
-    plt.title(f"Joint Reward ({version})")
-    plt.xlabel("Step")
-    plt.ylabel("Reward")
+    plt.title(f"Joint Reward ({version}) - Ep Total: {episode_total_reward:.2f}")
     plt.tight_layout()
-    plt.savefig(os.path.join(reward_dir, f"r_pose_total_joint_{version}_ep{_episode_counter_joint+1}.png"))
+    plt.savefig(os.path.join(reward_dir, f"r_total_joint_{version}_ep{_episode_counter_joint+1}.png"))
     plt.close()
 
     _joint_tracking_history.clear()
@@ -244,6 +275,11 @@ def save_episode_plots_joint(step: int):
 
 def save_episode_plots_position(step: int):
     global _position_tracking_history, _position_reward_history, _episode_counter_position
+    global _best_position_reward, _best_position_episode, _current_episode_params
+
+    # [안전 장치] 기록된 데이터가 없으면 함수 종료
+    if not _position_tracking_history or not _position_reward_history:
+        return
 
     save_dir = os.path.expanduser("~/nrs_rl/outputs/png/")
     reward_dir = os.path.expanduser("~/nrs_rl/outputs/rewards/")
@@ -253,13 +289,13 @@ def save_episode_plots_position(step: int):
     steps, targets, currents = zip(*_position_tracking_history)
     targets, currents = np.vstack(targets), np.vstack(currents)
 
-    # ✅ unwrap only for roll, pitch, yaw
     targets[:, 3:6]  = np.unwrap(targets[:, 3:6], axis=0)
     currents[:, 3:6] = np.unwrap(currents[:, 3:6], axis=0)
 
     labels = ["x", "y", "z", "roll", "pitch", "yaw"]
     colors = ["r", "g", "b", "orange", "purple", "gray"]
 
+    # 1. Tracking Plot
     plt.figure(figsize=(12, 8))
     for j in range(6):
         plt.plot(targets[:, j], "--", color=colors[j], label=f"Target {labels[j]}")
@@ -267,26 +303,37 @@ def save_episode_plots_position(step: int):
     plt.legend(ncol=3)
     plt.grid(True)
     plt.title(f"EE 6D Pose Tracking ({version})")
-    plt.xlabel("Step")
-    plt.ylabel("Pose [m/rad]")
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, f"pos_tracking_{version}_ep{_episode_counter_position+1}.png"))
     plt.close()
 
+    # 2. Reward Plot & Best Logic
     r_steps, r_values = zip(*_position_reward_history)
-    r_values = np.array(r_values).flatten()
+    r_values_arr = np.array(r_values).flatten()
+    
+    # [수정됨] 명시적으로 총 보상 계산 및 변수 할당
+    episode_total_reward = float(np.sum(r_values_arr))
+
+    # 최고 보상 갱신 체크 (Position)
+    if episode_total_reward > _best_position_reward:
+        _best_position_reward = episode_total_reward
+        _best_position_episode = _episode_counter_position + 1
+        print("\n" + "🚀"*25)
+        print(f"🎉 [NEW BEST POSITION EPISODE] Episode {_best_position_episode} 🎉")
+        print(f"Total Position Reward: {episode_total_reward:.4f}")
+        print(f"Applied Params: {_current_episode_params}")
+        print("🚀"*25 + "\n")
 
     plt.figure(figsize=(10, 5))
-    plt.plot(r_steps, r_values, "g", linewidth=2.5, label="r_pose(6D pose)")
+    plt.plot(r_steps, r_values_arr, "g", linewidth=2.5, label="Total Reward(6D)")
     plt.legend()
     plt.grid(True)
-    plt.title(f"6D Pose Reward ({version})")
-    plt.xlabel("Step")
-    plt.ylabel("Reward")
+    plt.title(f"6D Pose Reward ({version}) - Ep Total: {episode_total_reward:.2f}")
     plt.tight_layout()
-    plt.savefig(os.path.join(reward_dir, f"r_pose_total_pos_{version}_ep{_episode_counter_position+1}.png"))
+    plt.savefig(os.path.join(reward_dir, f"r_total_pos_{version}_ep{_episode_counter_position+1}.png"))
     plt.close()
 
     _position_tracking_history.clear()
     _position_reward_history.clear()
     _episode_counter_position += 1
+    
