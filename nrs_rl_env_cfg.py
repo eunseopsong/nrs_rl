@@ -43,13 +43,9 @@ from isaaclab.sensors import ContactSensorCfg, CameraCfg
 # Reach manipulation utilities
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
 
-
 # -----------------------------------------------------------------------------
 # Local modules (dynamic import)  ✅ nrs_lab2 -> nrs_rl 로 수정
 # -----------------------------------------------------------------------------
-# 여기서 말하는 "local_obs/local_rewards"는 아래 경로에 존재해야 함:
-#   nrs_rl/tasks/manager_based/nrs_rl/mdp/observations.py
-#   nrs_rl/tasks/manager_based/nrs_rl/mdp/rewards.py
 local_obs = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.mdp.observations"
 )
@@ -61,9 +57,6 @@ local_rewards = importlib.import_module(
 # -----------------------------------------------------------------------------
 # Robot asset
 # -----------------------------------------------------------------------------
-# ✅ 이 import가 되려면 nrs_rl 실행 환경에서 `assets` 패키지가 PYTHONPATH에 잡혀 있어야 함.
-# (nrs_lab2에서 쓰던 그대로 유지)
-# from nrs_rl.assets.assets.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
 from nrs_rl.tasks.manager_based.nrs_rl.assets.assets.robots.ur10e_w_spindle import UR10E_W_SPINDLE_CFG
 
 
@@ -96,23 +89,17 @@ class SpindleSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # (옵션) contact sensor / camera sensor를 쓰려면 여기서 scene에 붙이면 됨.
-    # 지금은 네 코드 그대로 "import만" 해둔 상태라,
-    # 실제로 쓸 때만 아래 예시처럼 추가하면 됨.
-    #
-    # contact_forces = ContactSensorCfg(
-    #     prim_path="{ENV_REGEX_NS}/Robot/**/spindle_contact_sensor",
-    #     update_period=0.0,
-    #     history_length=1,
-    # )
-    #
-    # camera = CameraCfg(
-    #     prim_path="{ENV_REGEX_NS}/Robot/**/camera",
-    #     update_period=0.0,
-    #     height=240,
-    #     width=320,
-    # )
-
+    # -----------------------------------------------------------
+    # ✅ [26.03.01. 추가] 힘 제어를 위한 접촉 센서 활성화
+    # -----------------------------------------------------------
+    # [텐서보드 이전 원본 복구] 접촉 센서
+    # -----------------------------------------------------------
+    contact_forces = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*wrist_3_link", 
+        update_period=0.0,
+        history_length=3,
+        track_air_time=False,
+    )
 
 # -----------------------------------------------------------------------------
 # Actions
@@ -175,8 +162,6 @@ class EventCfg:
         func=local_obs.load_hdf5_joints,
         mode="reset",
         params={
-            # ✅ nrs_lab2 -> nrs_rl 로 바꾸는 게 맞으면 여기 경로도 바꿔
-            #    (데이터는 그대로 nrs_lab2 밑에 있을 수도 있으니 일단 원본 유지)
             "file_path": "/home/eunseop/nrs_lab2/datasets/joint_recording_filtered.h5",
             "dataset_key": "target_joints",
         },
@@ -198,16 +183,21 @@ class EventCfg:
 # -----------------------------------------------------------------------------
 @configclass
 class RewardsCfg:
-    # joint_tracking_reward = RewTerm(
-    #     func=local_rewards.joint_tracking_reward,
-    #     weight=1.0,
-    # )
-
     position_tracking_reward = RewTerm(
         func=local_rewards.position_tracking_reward,
         weight=1.0,
     )
 
+    force_tracking_reward = RewTerm(
+        func=local_rewards.force_tracking_reward,
+        weight=2.0, 
+        params={"target_force": 15.0}
+    )
+
+    action_smoothness = RewTerm(
+        func=local_rewards.action_smoothness_penalty,
+        weight=-0.1, 
+    )
 
 # -----------------------------------------------------------------------------
 # Terminations
@@ -218,7 +208,7 @@ class TerminationsCfg:
 
 
 # -----------------------------------------------------------------------------
-# Environment Configuration  ✅ (기존 Template task가 이 cfg를 바라보게 됨)
+# Environment Configuration
 # -----------------------------------------------------------------------------
 @configclass
 class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
@@ -238,7 +228,7 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
         self.viewer.eye = (3.5, 3.5, 3.5)
         self.sim.dt = 1.0 / 30.0
 
-        # ✅ [추가] PhysX GPU 버퍼 강제 확장 (Patch buffer overflow 에러 해결)
+        # ✅ [26.02.24. 추가] PhysX GPU 버퍼 강제 확장 (Patch buffer overflow 에러 해결)
         self.sim.physx.gpu_max_rigid_patch_count = 1024 * 1024
         self.sim.physx.gpu_max_rigid_contact_count = 2048 * 1024
         self.sim.physx.gpu_temp_buffer_capacity = 32 * 1024 * 1024

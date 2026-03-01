@@ -1,19 +1,18 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-v27: Dual Tracking Reward (Joint + Cartesian, Wrap-Safe + Unwrap Visualization)
+v28: Adaptive Polishing Intelligence (Position + Force + Smoothness)
 ----------------------------------------------------------------------------------
 - Reward Type: Exponential kernel (no tanh)
 - Goal: Joint-space + Cartesian-space 병렬 학습 + Orientation wrap-safe error 계산
         + 시각화 시 np.unwrap 적용 (roll/pitch/yaw 연속 표시)
+        + [NEW] 적응형 힘 제어 보상 (Adaptive Force Tracking)
+        + [NEW] 진동 억제 페널티 (Action Smoothness Penalty)
 
 Notes (port to nrs_rl):
     - imports: local .observations
-    - target_vel uses env dt * decimation (important if dt != 1/30)
-    - angle wrap is computed in torch (no cpu numpy conversion)
-    - output dir: ~/nrs_rl/outputs/...
+    - target_vel uses env dt * decimation
+    - angle wrap is computed in torch
 """
-
-# 2026.02.23 backup
 
 from __future__ import annotations
 from typing import TYPE_CHECKING
@@ -23,6 +22,8 @@ if TYPE_CHECKING:
 import os
 import numpy as np
 import torch
+import datetime  # ✅ [26.03.01. 추가] 시간 모듈 임포트 (폴더명 생성용)
+import atexit    # ✅ [26.03.01. 추가] 프로그램 종료 시 요약 출력을 위한 모듈
 
 import matplotlib
 matplotlib.use("Agg")
@@ -33,12 +34,19 @@ from .observations import (
     get_hdf5_target_joints,
     get_hdf5_target_positions,
     get_ee_pose,
+    get_contact_forces,  # ✅ [26.02.24. 추가] 힘 센서 데이터 가져오기
 )
 
 # -----------------------------------------------------------
 # Global
 # -----------------------------------------------------------
-version = "v27"
+version = "v28"
+
+# -----------------------------------------------------------
+# [26.03.01. 추가] 훈련 실행 시각 기반 고유 폴더명 생성 변수
+# 변경 사유: 매 훈련(Run)마다 그래프 결과가 덮어씌워지는 것을 방지하고, 실험 이력을 날짜/시간별로 독립적으로 보존하기 위함.
+# -----------------------------------------------------------
+_run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 _joint_tracking_history = []
 _joint_reward_history = []
@@ -48,23 +56,12 @@ _position_reward_history = []
 _episode_counter_joint = 0
 _episode_counter_position = 0
 
-# [NEW] 파라미터 탐색용 최고 보상 및 파라미터 추적 변수
+# [26.02.24. 추가] 파라미터 탐색용 최고 보상 및 파라미터 추적 변수
 _best_joint_reward = -np.inf
 _best_joint_episode = -1
 _best_position_reward = -np.inf
 _best_position_episode = -1
 _current_episode_params = {}
-
-# -----------------------------------------------------------
-# [NEW] Parameter Injection Utility
-# -----------------------------------------------------------
-def set_current_episode_params(params: dict):
-    """
-    메인 루프(train.py 등)에서 매 에피소드 시작 시 
-    현재 테스트 중인 PID/힘 제어 파라미터를 주입하기 위한 함수.
-    """
-    global _current_episode_params
-    _current_episode_params = params
 
 # -----------------------------------------------------------
 # Utility: angle wrap correction (torch, GPU-safe)
@@ -76,7 +73,6 @@ def angle_diff_torch(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
     two_pi = 2.0 * np.pi
     return torch.remainder(a - b + np.pi, two_pi) - np.pi
-
 
 # -----------------------------------------------------------
 # (1) Joint Tracking Reward
@@ -117,13 +113,16 @@ def joint_tracking_reward(env: "ManagerBasedRLEnv"):
     _joint_tracking_history.append((step, q_star_next[0].detach().cpu().numpy(), q[0].detach().cpu().numpy()))
     _joint_reward_history.append((step, r_pose_jointwise[0].detach().cpu().numpy()))
 
-    if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
-        episode_steps = int(env.max_episode_length)
-        if step > 0 and (step % episode_steps == episode_steps - 1):
-            save_episode_plots_joint(step)
+    # -----------------------------------------------------------
+    # [26.03.01. 수정] 그래프 저장 트리거 조건 변경 (안전 장치)
+    # 변경 사유: 에피소드 조기 종료 시 저장이 누락되는 문제를 해결하기 위해, 에피소드 길이에 의존하지 않고 300 스텝마다 강제로 저장하도록 변경.
+    # -----------------------------------------------------------
+    save_interval = 300
+    if step > 0 and (step % save_interval == 0):
+        print(f"📸 [Joint] {step} 스텝 도달! 그래프 저장을 시도합니다...")
+        save_episode_plots_joint(step)
 
     return total
-
 
 # -----------------------------------------------------------
 # (2) Position Tracking Reward (6D + velocity)
@@ -173,7 +172,7 @@ def position_tracking_reward(env: "ManagerBasedRLEnv"):
 
     r_pose_axiswise = torch.exp(-k_pose * (w * e_pose) ** 2)
     r_vel_axiswise  = torch.exp(-k_vel  * (w * e_vel) ** 2)
-
+   
     r_pose = torch.mean(r_pose_axiswise, dim=1)
     r_vel  = torch.mean(r_vel_axiswise, dim=1)
     reward = 0.9 * r_pose + 0.1 * r_vel
@@ -201,28 +200,35 @@ def position_tracking_reward(env: "ManagerBasedRLEnv"):
                 f"r_pose={mean_r_pose[i]:.4f} | r_vel={mean_r_vel[i]:.4f}"
             )
 
-    # (7) 시각화
-    if hasattr(env, "max_episode_length") and env.max_episode_length > 0:
-        episode_steps = int(env.max_episode_length)
-        if step > 0 and (step % episode_steps == episode_steps - 1):
-            save_episode_plots_position(step)
+    # -----------------------------------------------------------
+    # [26.03.01. 수정] 그래프 저장 트리거 조건 변경 (안전 장치)
+    # 변경 사유: 에피소드 조기 종료 시 저장이 누락되는 문제를 해결하기 위해, 에피소드 길이에 의존하지 않고 300 스텝마다 강제로 저장하도록 변경.
+    # -----------------------------------------------------------
+    save_interval = 300
+    if step > 0 and (step % save_interval == 0):
+        print(f"📸 [Position] {step} 스텝 도달! 그래프 저장을 시도합니다...")
+        save_episode_plots_position(step)
 
     return reward
-
 
 # -----------------------------------------------------------
 # Visualization & Best Episode Tracking
 # -----------------------------------------------------------
 def save_episode_plots_joint(step: int):
     global _joint_tracking_history, _joint_reward_history, _episode_counter_joint
-    global _best_joint_reward, _best_joint_episode, _current_episode_params
-
+    global _best_joint_reward, _best_joint_episode, _current_episode_params, _run_timestamp
+ 
     # [안전 장치] 기록된 데이터가 없으면 함수 종료
     if not _joint_tracking_history or not _joint_reward_history:
         return
 
-    save_dir = os.path.expanduser("~/nrs_rl/outputs/png/")
-    reward_dir = os.path.expanduser("~/nrs_rl/outputs/rewards/")
+    # -----------------------------------------------------------
+    # [26.03.01. 수정] 타임스탬프가 포함된 경로로 저장 디렉토리 변경
+    # 변경 사유: 이전 훈련 결과 보존을 위해 실행 시점(run_YYYYMMDD_HHMMSS) 기반의 독립된 상위 폴더 내에 png/rewards 폴더를 생성하도록 변경.
+    # -----------------------------------------------------------
+    save_dir = os.path.expanduser(f"~/nrs_rl/outputs/run_{_run_timestamp}/png/")
+    reward_dir = os.path.expanduser(f"~/nrs_rl/outputs/run_{_run_timestamp}/rewards/")
+    
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(reward_dir, exist_ok=True)
 
@@ -233,9 +239,11 @@ def save_episode_plots_joint(step: int):
     # 1. Tracking Plot
     plt.figure(figsize=(10, 6))
     for j in range(targets.shape[1]):
-        plt.plot(targets[:, j], "--", color=colors[j], label=f"Target q{j+1}")
-        plt.plot(currents[:, j], "-",  color=colors[j], label=f"Current q{j+1}")
-    plt.legend()
+        # ✅ X축(steps) 동기화 반영
+        plt.plot(steps, targets[:, j], "--", color=colors[j], label=f"Target q{j+1}")
+        plt.plot(steps, currents[:, j], "-",  color=colors[j], label=f"Current q{j+1}")
+    # ✅ 범례 위치 수정 (좌측 상단)
+    plt.legend(loc="upper left")
     plt.grid(True)
     plt.title(f"Joint Tracking ({version})")
     plt.tight_layout()
@@ -245,11 +253,11 @@ def save_episode_plots_joint(step: int):
     # 2. Reward Plot & Best Logic
     r_steps, r_values = zip(*_joint_reward_history)
     r_values_arr = np.array(r_values)
-    
+  
     # [수정됨] 명시적으로 총 보상 계산 및 변수 할당
     episode_total_reward = float(np.sum(r_values_arr))
 
-    # 최고 보상 갱신 체크 (Joint)
+    # [26.02.24. 추가] 최고 보상 갱신 체크 (Joint)
     if episode_total_reward > _best_joint_reward:
         _best_joint_reward = episode_total_reward
         _best_joint_episode = _episode_counter_joint + 1
@@ -275,14 +283,18 @@ def save_episode_plots_joint(step: int):
 
 def save_episode_plots_position(step: int):
     global _position_tracking_history, _position_reward_history, _episode_counter_position
-    global _best_position_reward, _best_position_episode, _current_episode_params
-
+    global _best_position_reward, _best_position_episode, _current_episode_params, _run_timestamp
     # [안전 장치] 기록된 데이터가 없으면 함수 종료
     if not _position_tracking_history or not _position_reward_history:
         return
 
-    save_dir = os.path.expanduser("~/nrs_rl/outputs/png/")
-    reward_dir = os.path.expanduser("~/nrs_rl/outputs/rewards/")
+    # -----------------------------------------------------------
+    # [26.03.01. 수정] 타임스탬프가 포함된 경로로 저장 디렉토리 변경
+    # 변경 사유: 위 joint 함수와 동일하게 Position 훈련 결과도 독립 보존.
+    # -----------------------------------------------------------
+    save_dir = os.path.expanduser(f"~/nrs_rl/outputs/run_{_run_timestamp}/png/")
+    reward_dir = os.path.expanduser(f"~/nrs_rl/outputs/run_{_run_timestamp}/rewards/")
+    
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(reward_dir, exist_ok=True)
 
@@ -298,15 +310,16 @@ def save_episode_plots_position(step: int):
     # 1. Tracking Plot
     plt.figure(figsize=(12, 8))
     for j in range(6):
-        plt.plot(targets[:, j], "--", color=colors[j], label=f"Target {labels[j]}")
-        plt.plot(currents[:, j], "-",  color=colors[j], label=f"Current {labels[j]}")
-    plt.legend(ncol=3)
+        # ✅ X축(steps) 동기화 반영
+        plt.plot(steps, targets[:, j], "--", color=colors[j], label=f"Target {labels[j]}")
+        plt.plot(steps, currents[:, j], "-",  color=colors[j], label=f"Current {labels[j]}")
+    # ✅ 범례 위치 수정 (좌측 상단, 3열 배치)
+    plt.legend(ncol=3, loc="upper left")
     plt.grid(True)
     plt.title(f"EE 6D Pose Tracking ({version})")
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, f"pos_tracking_{version}_ep{_episode_counter_position+1}.png"))
     plt.close()
-
 
     # 2. Reward Plot & Best Logic
     r_steps, r_values = zip(*_position_reward_history)
@@ -315,7 +328,7 @@ def save_episode_plots_position(step: int):
     # [수정됨] 명시적으로 총 보상 계산 및 변수 할당
     episode_total_reward = float(np.sum(r_values_arr))
 
-    # 최고 보상 갱신 체크 (Position)
+    # [26.02.24. 추가] 최고 보상 갱신 체크 (Position)
     if episode_total_reward > _best_position_reward:
         _best_position_reward = episode_total_reward
         _best_position_episode = _episode_counter_position + 1
@@ -337,3 +350,71 @@ def save_episode_plots_position(step: int):
     _position_tracking_history.clear()
     _position_reward_history.clear()
     _episode_counter_position += 1
+
+# -----------------------------------------------------------
+# [26.03.01. 추가] (3) Adaptive Force Tracking Reward (적응형 힘 제어)
+# 변경 사유: 로봇이 표면 굴곡을 스스로 파악하여 일정한 압력(target_force)으로 연마하도록 유도하는 보상 함수입니다.
+# 단순히 궤적을 따라가는 것을 넘어서, 실제 연마 작업에서 중요한 힘 제어 능력을 학습할 수 있도록 합니다.
+# -----------------------------------------------------------
+def force_tracking_reward(env: "ManagerBasedRLEnv", target_force: float = 15.0):
+    # 1. 센서에서 힘 데이터 가져오기
+    contact_wrench = get_contact_forces(env, sensor_name="contact_forces")
+    forces = contact_wrench[:, :3]
+    force_magnitude = torch.norm(forces, dim=-1)
+    
+    # 2. 힘 오차 및 보상 계산
+    force_error = torch.abs(force_magnitude - target_force)
+    reward = torch.exp(-0.05 * torch.square(force_error))
+
+    # 3. 콘솔 출력 (기존과 동일)
+    step = int(env.common_step_counter)
+    if step > 0 and step % 100 == 0:
+        mean_f = force_magnitude.mean().item()
+        mean_err = force_error.mean().item()
+        print(f"[Adaptive Force Step {step}] Target: {target_force}N | Mean: {mean_f:.2f}N | Err: {mean_err:.2f}N | Rwd: {reward.mean():.3f}")
+        
+    return reward
+
+# -----------------------------------------------------------
+# [26.03.01. 추가] (4) Action Smoothness Penalty (진동 억제)
+# 변경 사유: 학습 과정에서 로봇이 덜덜 떨리거나(Jittering) 과격하게 움직여 표면이 손상되는 것을 방지하기 위해, 이전 액션과의 차이에 페널티를 부여하는 보상 함수입니다.
+# -----------------------------------------------------------
+def action_smoothness_penalty(env: "ManagerBasedRLEnv"):
+    """
+    로봇이 덜덜 떨거나(Jittering) 스텝마다 갑자기 확 움직이는 것을 방지합니다.
+    이전 스텝의 명령(Action)과 현재 명령의 차이가 클수록 강한 감점을 줍니다.
+    """
+    # 에이전트가 내린 연속된 두 액션의 차이 계산
+    action_diff = env.action_manager.action - env.action_manager.prev_action
+    
+    # 차이의 제곱합을 페널티로 반환
+    penalty = torch.sum(torch.square(action_diff), dim=-1)
+    
+    return penalty
+
+# -----------------------------------------------------------
+# ✅ [26.03.01. 추가] 훈련 완전 종료 시 최종 베스트 에피소드 요약 출력
+# 변경 사유: 훈련 스크립트가 끝났을 때(Ctrl+C 중단 포함), 전체 에피소드를 통틀어 가장 폴리싱 결과가 좋았던(보상이 높았던) 회차를 화면에 한눈에 요약해 보여주기 위함.
+# -----------------------------------------------------------
+def print_final_summary():
+    print("\n\n" + "="*60)
+    print("🏆 [TRAINING FINISHED] 최종 베스트 에피소드 결과 요약 🏆")
+    print("="*60)
+    
+    if _best_joint_episode != -1:
+        print(f"🔹 [Joint Tracking] 최고 성적 회차 : 에피소드 {_best_joint_episode}")
+        print(f"   - 획득한 최고 보상(Total Reward) : {_best_joint_reward:.4f}")
+    else:
+        print("🔹 [Joint Tracking] 완료된 에피소드가 없습니다.")
+
+    if _best_position_episode != -1:
+        print(f"🔸 [Position & Force] 최고 성적 회차 : 에피소드 {_best_position_episode}")
+        print(f"   - 획득한 최고 보상(Total Reward)  : {_best_position_reward:.4f}")
+        print("   -> 가장 표면 적응(Adaptive) 폴리싱이 잘 된 회차입니다!")
+    else:
+        print("🔸 [Position & Force] 완료된 에피소드가 없습니다.")
+    
+    print("="*60 + "\n")
+
+# 파이썬 프로그램이 종료될 때 자동으로 print_final_summary()를 호출하도록 등록
+atexit.register(print_final_summary)
