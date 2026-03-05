@@ -391,30 +391,3 @@ def action_smoothness_penalty(env: "ManagerBasedRLEnv"):
     penalty = torch.sum(torch.square(action_diff), dim=-1)
     
     return penalty
-
-# -----------------------------------------------------------
-# ✅ [26.03.01. 추가] 훈련 완전 종료 시 최종 베스트 에피소드 요약 출력
-# 변경 사유: 훈련 스크립트가 끝났을 때(Ctrl+C 중단 포함), 전체 에피소드를 통틀어 가장 폴리싱 결과가 좋았던(보상이 높았던) 회차를 화면에 한눈에 요약해 보여주기 위함.
-# -----------------------------------------------------------
-def print_final_summary():
-    print("\n\n" + "="*60)
-    print("🏆 [TRAINING FINISHED] 최종 베스트 에피소드 결과 요약 🏆")
-    print("="*60)
-    
-    if _best_joint_episode != -1:
-        print(f"🔹 [Joint Tracking] 최고 성적 회차 : 에피소드 {_best_joint_episode}")
-        print(f"   - 획득한 최고 보상(Total Reward) : {_best_joint_reward:.4f}")
-    else:
-        print("🔹 [Joint Tracking] 완료된 에피소드가 없습니다.")
-
-    if _best_position_episode != -1:
-        print(f"🔸 [Position & Force] 최고 성적 회차 : 에피소드 {_best_position_episode}")
-        print(f"   - 획득한 최고 보상(Total Reward)  : {_best_position_reward:.4f}")
-        print("   -> 가장 표면 적응(Adaptive) 폴리싱이 잘 된 회차입니다!")
-    else:
-        print("🔸 [Position & Force] 완료된 에피소드가 없습니다.")
-    
-    print("="*60 + "\n")
-
-# 파이썬 프로그램이 종료될 때 자동으로 print_final_summary()를 호출하도록 등록
-atexit.register(print_final_summary)

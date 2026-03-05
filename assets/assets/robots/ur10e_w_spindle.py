@@ -24,7 +24,8 @@ from isaaclab.assets.articulation import ArticulationCfg
 # User paths and prims
 # -----------------------------------------------------------------------------
 # UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_w_spindle_2.usd"
-UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_tuning2.usd"
+# UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_tuning2.usd"
+UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_refine.usd"
 EE_FRAME_NAME = "wrist_3_link"        # end-effector frame in your USD
 
 # -----------------------------------------------------------------------------
@@ -46,8 +47,16 @@ EE_FRAME_NAME = "wrist_3_link"        # end-effector frame in your USD
 #     "wrist_2_joint": 1.679353,
 #     "wrist_3_joint": 1.124695,
 # }
+# UR10E_HOME_DICT = {
+#     "shoulder_pan_joint": 0.673993,
+#     "shoulder_lift_joint": -1.266343,
+#     "elbow_joint": -2.472206,
+#     "wrist_1_joint": -1.160399,
+#     "wrist_2_joint": 1.479353,
+#     "wrist_3_joint": 1.324695,
+# }
 UR10E_HOME_DICT = {
-    "shoulder_pan_joint": 0.673993,
+    "shoulder_pan_joint": 3.815586,
     "shoulder_lift_joint": -1.266343,
     "elbow_joint": -2.472206,
     "wrist_1_joint": -1.160399,

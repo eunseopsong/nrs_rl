@@ -43,6 +43,10 @@ from isaaclab.sensors import ContactSensorCfg, CameraCfg
 # Reach manipulation utilities
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
 
+# [26/03/05. 추가] 접촉 센서에서 힘 데이터를 가져오는 유틸 함수
+from pxr import UsdPhysics
+import omni.usd
+
 # -----------------------------------------------------------------------------
 # Local modules (dynamic import)  ✅ nrs_lab2 -> nrs_rl 로 수정
 # -----------------------------------------------------------------------------
@@ -81,7 +85,9 @@ class SpindleSceneCfg(InteractiveSceneCfg):
     workpiece = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Workpiece",
         spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/eunseop/isaac/isaac_save/concave_surface.usd",
+            # ✅ [26.03.05. Fixed by eunseop; Add the collider model to the workpiece USD]
+            # usd_path="/home/eunseop/isaac/isaac_save/concave_surface.usd",
+            usd_path="/home/eunseop/isaac/isaac_save/concave_surface_w_collider.usd",
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.0),
@@ -92,10 +98,19 @@ class SpindleSceneCfg(InteractiveSceneCfg):
     # -----------------------------------------------------------
     # ✅ [26.03.01. 추가] 힘 제어를 위한 접촉 센서 활성화
     # -----------------------------------------------------------
-    # [텐서보드 이전 원본 복구] 접촉 센서
+    # 접촉 센서
+    # -----------------------------------------------------------
+    # contact_forces = ContactSensorCfg(
+    #     prim_path="{ENV_REGEX_NS}/Robot/.*wrist_3_link",
+    #     update_period=0.0,
+    #     history_length=3,
+    #     track_air_time=False,
+    # )
+    # -----------------------------------------------------------
+    # ✅ [26.03.05. Fixed by eunseop]
     # -----------------------------------------------------------
     contact_forces = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/.*wrist_3_link", 
+        prim_path="{ENV_REGEX_NS}/Robot/Robot/wrist_3_link",
         update_period=0.0,
         history_length=3,
         track_air_time=False,
@@ -125,6 +140,12 @@ class ObservationsCfg:
         ee_pose = ObsTerm(
             func=local_obs.get_ee_pose,
             params={"asset_name": "robot"},
+        )
+
+        # ✅ [추가] 에이전트가 현재 접촉하고 있는 힘의 크기를 알 수 있도록 관측값에 추가
+        contact_forces = ObsTerm(
+            func=local_obs.get_contact_forces,
+            params={"sensor_name": "contact_forces"},
         )
 
         # HDF5 horizon trajectory
@@ -213,7 +234,8 @@ class TerminationsCfg:
 @configclass
 class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
     """Template-Nrs-Rl-v0 가 이 cfg를 가리키면 UR10e spindle env가 됨."""
-    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=1024, env_spacing=2.5)
+    # ✅ [26.03.05. Fixed by eunseop; Reduce the number of environments for preventing GPU OOM]
+    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=128, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
@@ -221,6 +243,7 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
     events: EventCfg = EventCfg()
 
     def __post_init__(self):
+
         # sim / episode
         self.decimation = 2
         self.sim.render_interval = self.decimation
@@ -234,8 +257,9 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_temp_buffer_capacity = 32 * 1024 * 1024
 
         # robot
-        self.scene.robot = UR10E_W_SPINDLE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-
+        self.scene.robot = UR10E_W_SPINDLE_CFG.replace(
+            prim_path="{ENV_REGEX_NS}/Robot"
+        )
         # action
         self.actions.arm_action = mdp.JointPositionActionCfg(
             asset_name="robot",
