@@ -391,3 +391,73 @@ def action_smoothness_penalty(env: "ManagerBasedRLEnv"):
     penalty = torch.sum(torch.square(action_diff), dim=-1)
     
     return penalty
+
+# -----------------------------------------------------------
+# [26.03.08 추가] (5) Off-Surface Penalty (표면 이탈 페널티)
+# 목적: 로봇이 연마 대상을 벗어나 허공에서 헛스윙하는 것을 강력히 방지합니다.
+# -----------------------------------------------------------
+def off_surface_penalty(env: "ManagerBasedRLEnv", contact_threshold: float = 1.0):
+    """
+    힘 센서의 측정값이 contact_threshold(기본 1.0N)보다 낮으면 
+    로봇이 표면을 이탈한 것으로 간주하고 강력한 마이너스 보상을 줍니다.
+    단, 에피소드 시작 직후(Warm-up 기간)에는 페널티를 주지 않습니다.
+    """
+    # 1. 센서에서 힘 데이터 가져오기 (N, 3)
+    contact_wrench = get_contact_forces(env, sensor_name="contact_forces")
+    forces = contact_wrench[:, :3]
+    force_magnitude = torch.norm(forces, dim=-1)
+    
+    # 2. 힘이 임계치(1.0N) 미만인지 확인 (True/False 텐서 생성)
+    is_off_surface = force_magnitude < contact_threshold
+    
+    # 3. [수정] 에피소드 초기 Warm-up 처리 (예: 5스텝 미만은 무시)
+    # env.episode_length_buf는 각 환경(env)별로 리셋 후 몇 스텝이 지났는지 기록된 텐서입니다.
+    warmup_steps = 5 
+    is_warmup = env.episode_length_buf < warmup_steps
+    
+    # 4. 페널티 계산: 이탈했더라도 Warm-up 기간 중이면 0.0을 줌
+    penalty = torch.where(
+        is_off_surface & (~is_warmup), # 이탈했고, 동시에 웜업 기간이 아닐 때만!
+        torch.tensor(-1.0, device=env.device), 
+        torch.tensor(0.0, device=env.device)
+    )
+    
+    # 5. 콘솔 확인용 (옵션)
+    step = int(env.common_step_counter)
+    if step > 0 and step % 100 == 0:
+        # 웜업을 제외하고 실제로 이탈 중인 개수만 카운트
+        actual_off_count = (is_off_surface & (~is_warmup)).sum().item()
+        if actual_off_count > 0:
+            print(f"⚠️ [경고] {actual_off_count}개의 환경이 표면을 이탈했습니다! (Warm-up 제외)")
+
+    return penalty
+
+# -----------------------------------------------------------
+# [26.03.08 추가] (6) Perpendicular Alignment Reward (수직 정렬 보상)
+# 목적: 스핀들이 표면과 완벽한 수직(법선 방향)을 유지하도록 유도합니다.
+# -----------------------------------------------------------
+def perpendicular_alignment_reward(env: "ManagerBasedRLEnv"):
+    """
+    목표 경로(HDF5)의 방향(Orientation)과 현재 로봇 스핀들의 방향 차이를
+    계산하여, 수직을 잘 유지할수록 높은 가산점을 줍니다.
+    """
+    # 현재 자세와 목표 자세 가져오기
+    ee_pose = get_ee_pose(env)
+    fut = get_hdf5_target_positions(env, horizon=2)
+    if fut.ndim == 3:
+        fut = fut.squeeze(1)
+    target_next = fut[:, 6:12]
+    
+    # Roll(회전x)과 Pitch(회전y) 각도만 추출 (Yaw는 수직 유지와 무관하므로 제외 가능)
+    # 인덱스 3: Roll, 4: Pitch
+    ee_rp = ee_pose[:, 3:5]
+    target_rp = target_next[:, 3:5]
+    
+    # 각도 오차 계산 (wrap-safe 적용)
+    rp_error = angle_diff_torch(ee_rp, target_rp)
+    
+    # 오차가 0에 가까울수록 1.0, 멀어질수록 0.0에 수렴하는 보상
+    # k값이 클수록 깐깐하게 검사합니다.
+    alignment_reward = torch.exp(-10.0 * torch.sum(torch.square(rp_error), dim=-1))
+    
+    return alignment_reward

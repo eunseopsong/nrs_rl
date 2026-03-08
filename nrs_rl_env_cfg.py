@@ -115,6 +115,37 @@ class SpindleSceneCfg(InteractiveSceneCfg):
         history_length=3,
         track_air_time=False,
     )
+    # -----------------------------------------------------------
+    # ✅ [26.03.08 . 추가] 지형 파악을 위한 Depth & Normal 카메라 센서를 로봇의 손목에 추가
+    # 표면까지의 거리 및 굴곡 정보를 스캔
+    # -----------------------------------------------------------
+
+    # camera = CameraCfg(
+    #     # 손목 링크의 하위 트리로 카메라를 생성 (경로는 USD에 맞게 조정 필요)
+    #     prim_path="{ENV_REGEX_NS}/Robot/Robot/wrist_3_link/camera",
+    #     update_period=0.0,
+    #     height=64,  # 연산량을 줄이기 위해 해상도를 작게 설정 (평균값만 쓸 것이므로 충분함)
+    #     width=64,         # observations.py에서 요구하는 데이터 타입 활성화
+    #     data_types=["distance_to_image_plane", "normals"], 
+    #     spawn=sim_utils.PinholeCameraCfg(
+    #         focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.01, 10.0)
+    #     ),
+
+    #     # 카메라가 툴 끝(Workpiece 쪽)을 바라보도록 위치와 회전(Offset) 설정
+    #     # (주의: 실제 로봇 USD 축 방향에 따라 rot 값을 조절해야 할 수 있습니다)
+
+    #     offset=CameraCfg.OffsetCfg(
+
+    #         pos=(0.0, 0.0, 0.1), # Z축으로 10cm 앞쪽
+
+    #         rot=(1.0, 0.0, 0.0, 0.0), # Quaternion (w, x, y, z)
+
+    #         convention="ros"
+
+    #     ),
+
+    # )
+
 
 # -----------------------------------------------------------------------------
 # Actions
@@ -157,11 +188,23 @@ class ObservationsCfg:
             func=local_obs.get_hdf5_target_positions,
             params={"horizon": 5},
         )
+        # -----------------------------------------------------------
+        # ✅ [26.03.08. 추가] 카메라를 통한 지형 인지 관측 (적응형 제어용)
+        # -----------------------------------------------------------
+        # 1. 툴과 표면 사이의 거리 (움푹 패였는지, 튀어나왔는지 파악)
+        # camera_distance = ObsTerm(
+        #     func=local_obs.get_camera_distance,
+        #     params={"sensor_name": "camera", "debug_interval": 100}, # 100스텝마다 콘솔에 거리 출력
+        # )
 
-        def __post_init__(self):
+        # # 2. 표면의 법선 벡터 (평평한지, 경사가 졌는지 파악)
+        # camera_normals = ObsTerm(
+        #     func=local_obs.get_camera_normals,
+        #     params={"sensor_name": "camera"},
+        # )
+        def __post_init__(self):#adk
             self.enable_corruption = True
             self.concatenate_terms = True  # dict -> tensor
-
     policy: PolicyCfg = PolicyCfg()
 
 
@@ -204,22 +247,38 @@ class EventCfg:
 # -----------------------------------------------------------------------------
 @configclass
 class RewardsCfg:
+    # 1. 기존 위치 추종 보상
     position_tracking_reward = RewTerm(
         func=local_rewards.position_tracking_reward,
         weight=1.0,
     )
 
+    # 2. 기존 힘 제어 보상
     force_tracking_reward = RewTerm(
         func=local_rewards.force_tracking_reward,
-        weight=2.0, 
+        weight=2.0,
         params={"target_force": 15.0}
     )
 
+    # 3. 기존 부드러운 움직임 페널티
     action_smoothness = RewTerm(
         func=local_rewards.action_smoothness_penalty,
-        weight=-0.1, 
+        weight=-0.1,
     )
 
+    # 4. [26.03.08. 추가] 표면 이탈 시 강력한 감점
+    # weight를 50.0으로 주어 경로를 벗어나면 총 점수가 확 깎이게 설정했습니다.
+    off_surface = RewTerm(
+        func=local_rewards.off_surface_penalty, 
+        weight=50.0
+    )   
+
+    # 5. [26.03.08. 추가] 수직 유지 시 가산점
+    # 스핀들이 표면과 90도를 잘 유지할수록 추가 점수를 줍니다.
+    perpendicular_align = RewTerm(
+        func=local_rewards.perpendicular_alignment_reward, 
+        weight=10.0
+    )
 # -----------------------------------------------------------------------------
 # Terminations
 # -----------------------------------------------------------------------------
