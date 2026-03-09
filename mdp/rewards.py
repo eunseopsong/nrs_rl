@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
+# shangus
 """
 v28: Adaptive Polishing Intelligence (Position + Force + Smoothness)
 ----------------------------------------------------------------------------------
