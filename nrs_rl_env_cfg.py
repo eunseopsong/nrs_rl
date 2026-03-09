@@ -226,7 +226,8 @@ class EventCfg:
         func=local_obs.load_hdf5_joints,
         mode="reset",
         params={
-            "file_path": "/home/eunseop/nrs_lab2/datasets/joint_recording_filtered.h5",
+            # "file_path": "/home/eunseop/nrs_lab2/datasets/joint_recording_filtered.h5",
+            "file_path": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/joint_recording_filtered.h5",
             "dataset_key": "target_joints",
         },
     )
@@ -236,7 +237,8 @@ class EventCfg:
         func=local_obs.load_hdf5_positions,
         mode="reset",
         params={
-            "file_path": "/home/eunseop/nrs_lab2/datasets/hand_g_recording.h5",
+            # "file_path": "/home/eunseop/nrs_lab2/datasets/hand_g_recording.h5",
+            "file_path": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/hand_g_recording.h5",
             "dataset_key": "target_positions",
         },
     )
