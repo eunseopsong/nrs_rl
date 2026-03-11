@@ -56,7 +56,9 @@ local_obs = importlib.import_module(
 local_rewards = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.mdp.rewards"
 )
-
+local_action = importlib.import_module(
+    "nrs_rl.tasks.manager_based.nrs_rl.mdp.action"
+)
 
 # -----------------------------------------------------------------------------
 # Robot asset
@@ -322,9 +324,7 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
             prim_path="{ENV_REGEX_NS}/Robot"
         )
         # action
-        self.actions.arm_action = mdp.JointPositionActionCfg(
+        self.actions.arm_action = ActionTerm(
+            class_type=local_action.AdmittanceControlAction,
             asset_name="robot",
-            joint_names=[".*"],
-            scale=0.2,
-            use_default_offset=True,
         )
