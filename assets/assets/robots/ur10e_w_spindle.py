@@ -100,7 +100,7 @@ UR10E_W_SPINDLE_CFG = ArticulationCfg(
     init_state=ArticulationCfg.InitialStateCfg(
         # 💡 [핵심] 기존 세팅(**UR10E_HOME_DICT)은 그대로 다 가져오되, 
         # 어깨(shoulder_pan_joint) 각도만 180도 돌린 값(2.5476)으로 덮어써라!
-        joint_pos={**UR10E_HOME_DICT, 'shoulder_pan_joint': 2.5476},
+        joint_pos=UR10E_HOME_DICT,
     ),
     actuators={
         "ur10e_arm": ImplicitActuatorCfg(
