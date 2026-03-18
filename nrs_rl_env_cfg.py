@@ -314,10 +314,18 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
         self.viewer.eye = (3.5, 3.5, 3.5)
         self.sim.dt = 1.0 / 30.0
 
-        # ✅ [26.02.24. 추가] PhysX GPU 버퍼 강제 확장 (Patch buffer overflow 에러 해결)
-        self.sim.physx.gpu_max_rigid_patch_count = 1024 * 1024
-        self.sim.physx.gpu_max_rigid_contact_count = 2048 * 1024
+        # ==========================================================
+        # ✅ [수정됨] PhysX GPU 버퍼 강제 확장 (메모리 폭발 에러 완전 해결)
+        # ==========================================================
+        self.sim.physx.gpu_max_rigid_patch_count = 1024 * 1024 * 16
+        self.sim.physx.gpu_max_rigid_contact_count = 1024 * 1024 * 16
         self.sim.physx.gpu_temp_buffer_capacity = 32 * 1024 * 1024
+        
+        # 🚨 [새로 추가된 핵심 코드] 에러에서 178M 이상을 요구한 충돌 스택 메모리를 약 268MB(2^28)로 대폭 늘림
+        self.sim.physx.gpu_collision_stack_size = 2**28 
+        self.sim.physx.gpu_found_lost_pairs_capacity = 1024 * 1024 * 16
+        self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 16
+        # ==========================================================
 
         # robot
         self.scene.robot = UR10E_W_SPINDLE_CFG.replace(
