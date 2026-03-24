@@ -23,9 +23,7 @@ from isaaclab.assets.articulation import ArticulationCfg
 # -----------------------------------------------------------------------------
 # User paths and prims
 # -----------------------------------------------------------------------------
-# UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_w_spindle_2.usd"
-# UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_tuning2.usd"
-UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_refine.usd"
+UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_only.usd"
 EE_FRAME_NAME = "wrist_3_link"        # end-effector frame in your USD
 
 # -----------------------------------------------------------------------------

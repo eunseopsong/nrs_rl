@@ -87,9 +87,8 @@ class SpindleSceneCfg(InteractiveSceneCfg):
     workpiece = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Workpiece",
         spawn=sim_utils.UsdFileCfg(
-            # ✅ [26.03.05. Fixed by eunseop; Add the collider model to the workpiece USD]
-            usd_path="/home/eunseop/isaac/isaac_save/surface/flat_surface_w_collider.usd",
-            # usd_path="/home/eunseop/isaac/isaac_save/surface/concave_surface_w_collider.usd",
+            # ✅ [26.03.24. Fixed by eunseop; Change the workpiece USD]
+            usd_path="/home/eunseop/isaac/isaac_save/surface/surface_assembly.usd",
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.0),
