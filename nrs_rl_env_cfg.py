@@ -149,12 +149,11 @@ class SpindleSceneCfg(InteractiveSceneCfg):
 
 
 # -----------------------------------------------------------------------------
-# Actions
+# Actions ✅ [26.03.25. 추가] 정의한 설정 클래스를 바로 호출)
 # -----------------------------------------------------------------------------
 @configclass
 class ActionsCfg:
-    arm_action: ActionTerm = MISSING
-
+    arm_action = local_action.AdmittanceControlActionCfg(asset_name="robot")
 
 # -----------------------------------------------------------------------------
 # Observations
@@ -330,8 +329,4 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
         self.scene.robot = UR10E_W_SPINDLE_CFG.replace(
             prim_path="{ENV_REGEX_NS}/Robot"
         )
-        # action
-        self.actions.arm_action = ActionTerm(
-            class_type=local_action.AdmittanceControlAction,
-            asset_name="robot",
-        )
+    

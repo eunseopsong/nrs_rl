@@ -1,8 +1,9 @@
 import torch
-from isaaclab.managers.action_manager import ActionTerm
+from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg  # <-- ActionTermCfg 추가
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.controllers.differential_ik import DifferentialIKController
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
+from isaaclab.utils import configclass  # <-- configclass 추가
 
 
 class AdmittanceControlAction(ActionTerm):
@@ -141,3 +142,11 @@ class AdmittanceControlAction(ActionTerm):
         q_cmd = torch.where(torch.isnan(q_cmd), q, q_cmd)
 
         self.robot.set_joint_position_target(q_cmd)
+
+# ==========================================
+# [26.03.25. 추가] Action Configuration 정의
+# ==========================================
+@configclass
+class AdmittanceControlActionCfg(ActionTermCfg):
+    class_type: type = AdmittanceControlAction
+    asset_name: str = "robot"
