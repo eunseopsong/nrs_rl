@@ -84,17 +84,17 @@ class SpindleSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=2500.0),
     )
 
-    workpiece = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/Workpiece",
-        spawn=sim_utils.UsdFileCfg(
-            # ✅ [26.03.24. Fixed by eunseop; Change the workpiece USD]
-            usd_path="/home/eunseop/isaac/isaac_save/surface/surface_assembly.usd",
-        ),
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.0),
-            rot=(1.0, 0.0, 0.0, 0.0),
-        ),
-    )
+    # workpiece = AssetBaseCfg(
+    #     prim_path="{ENV_REGEX_NS}/Workpiece",
+    #     spawn=sim_utils.UsdFileCfg(
+    #         # ✅ [26.03.24. Fixed by eunseop; Change the workpiece USD]
+    #         usd_path="/home/eunseop/isaac/isaac_save/surface/surface_assembly.usd",
+    #     ),
+    #     init_state=AssetBaseCfg.InitialStateCfg(
+    #         pos=(0.0, 0.0, 0.0),
+    #         rot=(1.0, 0.0, 0.0, 0.0),
+    #     ),
+    # )
 
     # -----------------------------------------------------------
     # ✅ [26.03.01. 추가] 힘 제어를 위한 접촉 센서 활성화
