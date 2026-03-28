@@ -99,15 +99,6 @@ class SpindleSceneCfg(InteractiveSceneCfg):
     # -----------------------------------------------------------
     # ✅ [26.03.01. 추가] 힘 제어를 위한 접촉 센서 활성화
     # -----------------------------------------------------------
-    # 접촉 센서
-    # -----------------------------------------------------------
-    # contact_forces = ContactSensorCfg(
-    #     prim_path="{ENV_REGEX_NS}/Robot/.*wrist_3_link",
-    #     update_period=0.0,
-    #     history_length=3,
-    #     track_air_time=False,
-    # )
-    # -----------------------------------------------------------
     # ✅ [26.03.05. Fixed by eunseop]
     # -----------------------------------------------------------
     contact_forces = ContactSensorCfg(
@@ -116,36 +107,6 @@ class SpindleSceneCfg(InteractiveSceneCfg):
         history_length=3,
         track_air_time=False,
     )
-    # -----------------------------------------------------------
-    # ✅ [26.03.08 . 추가] 지형 파악을 위한 Depth & Normal 카메라 센서를 로봇의 손목에 추가
-    # 표면까지의 거리 및 굴곡 정보를 스캔
-    # -----------------------------------------------------------
-
-    # camera = CameraCfg(
-    #     # 손목 링크의 하위 트리로 카메라를 생성 (경로는 USD에 맞게 조정 필요)
-    #     prim_path="{ENV_REGEX_NS}/Robot/Robot/wrist_3_link/camera",
-    #     update_period=0.0,
-    #     height=64,  # 연산량을 줄이기 위해 해상도를 작게 설정 (평균값만 쓸 것이므로 충분함)
-    #     width=64,         # observations.py에서 요구하는 데이터 타입 활성화
-    #     data_types=["distance_to_image_plane", "normals"], 
-    #     spawn=sim_utils.PinholeCameraCfg(
-    #         focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.01, 10.0)
-    #     ),
-
-    #     # 카메라가 툴 끝(Workpiece 쪽)을 바라보도록 위치와 회전(Offset) 설정
-    #     # (주의: 실제 로봇 USD 축 방향에 따라 rot 값을 조절해야 할 수 있습니다)
-
-    #     offset=CameraCfg.OffsetCfg(
-
-    #         pos=(0.0, 0.0, 0.1), # Z축으로 10cm 앞쪽
-
-    #         rot=(1.0, 0.0, 0.0, 0.0), # Quaternion (w, x, y, z)
-
-    #         convention="ros"
-
-    #     ),
-
-    # )
 
 
 # -----------------------------------------------------------------------------
@@ -153,7 +114,14 @@ class SpindleSceneCfg(InteractiveSceneCfg):
 # -----------------------------------------------------------------------------
 @configclass
 class ActionsCfg:
-    arm_action = local_action.AdmittanceControlActionCfg(asset_name="robot")
+    # -----------------------------------------------------------
+    # ✅ [26.03.28. 수정] HDF5 경로 파일을 읽어 동적 워크스페이스 설정
+    # -----------------------------------------------------------
+    arm_action = local_action.AdmittanceControlActionCfg(
+        asset_name="robot",
+        hdf5_file_path="/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/flat_g_recording.h5",
+        workspace_margin=0.05
+    )
 
 # -----------------------------------------------------------------------------
 # Observations
@@ -188,20 +156,7 @@ class ObservationsCfg:
             func=local_obs.get_hdf5_target_positions,
             params={"horizon": 5},
         )
-        # -----------------------------------------------------------
-        # ✅ [26.03.08. 추가] 카메라를 통한 지형 인지 관측 (적응형 제어용)
-        # -----------------------------------------------------------
-        # 1. 툴과 표면 사이의 거리 (움푹 패였는지, 튀어나왔는지 파악)
-        # camera_distance = ObsTerm(
-        #     func=local_obs.get_camera_distance,
-        #     params={"sensor_name": "camera", "debug_interval": 100}, # 100스텝마다 콘솔에 거리 출력
-        # )
 
-        # # 2. 표면의 법선 벡터 (평평한지, 경사가 졌는지 파악)
-        # camera_normals = ObsTerm(
-        #     func=local_obs.get_camera_normals,
-        #     params={"sensor_name": "camera"},
-        # )
         def __post_init__(self):#adk
             self.enable_corruption = True
             self.concatenate_terms = True  # dict -> tensor
@@ -226,7 +181,6 @@ class EventCfg:
         func=local_obs.load_hdf5_joints,
         mode="reset",
         params={
-            # "file_path": "/home/eunseop/nrs_lab2/datasets/joint_recording_filtered.h5",
             "file_path": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/joint_recording_filtered.h5",
             "dataset_key": "target_joints",
         },
@@ -237,7 +191,6 @@ class EventCfg:
         func=local_obs.load_hdf5_positions,
         mode="reset",
         params={
-            # "file_path": "/home/eunseop/nrs_lab2/datasets/hand_g_recording.h5",
             "file_path": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/flat_g_recording.h5",
             "dataset_key": "target_positions",
         },
@@ -249,38 +202,35 @@ class EventCfg:
 # -----------------------------------------------------------------------------
 @configclass
 class RewardsCfg:
-    # 1. 기존 위치 추종 보상
-    position_tracking_reward = RewTerm(
-        func=local_rewards.position_tracking_reward,
-        weight=1.0,
+    # -----------------------------------------------------------
+    # ✅ [26.03.28. 수정] 기존의 개별 위치/수직 보상을 지우고, 통합 퀄리티 보상으로 대체!
+    # 위치 오차 + 수직(Roll/Pitch) 유지 + 접촉 여부를 동시에 평가합니다.
+    # -----------------------------------------------------------
+    perfect_polishing_quality = RewTerm(
+        func=local_rewards.perfect_polishing_quality_reward,
+        weight=10.0, # 에이전트가 가장 최우선으로 달성해야 할 핵심 목표
     )
 
-    # 2. 기존 힘 제어 보상
+    # 2. 기존 힘 제어 보상 (15N의 목표 압력을 일정하게 유지하는 세밀한 튜닝용)
     force_tracking_reward = RewTerm(
         func=local_rewards.force_tracking_reward,
         weight=2.0,
         params={"target_force": 15.0}
     )
 
-    # 3. 기존 부드러운 움직임 페널티
+    # 3. 기존 부드러운 움직임 페널티 (덜덜거림 방지)
     action_smoothness = RewTerm(
         func=local_rewards.action_smoothness_penalty,
         weight=-0.1,
     )
 
     # 4. [26.03.08. 추가] 표면 이탈 시 강력한 감점
-    # weight를 50.0으로 주어 경로를 벗어나면 총 점수가 확 깎이게 설정했습니다.
+    # weight를 50.0으로 주어 경로를 벗어나면 총 점수가 확 깎이게 설정.
     off_surface = RewTerm(
         func=local_rewards.off_surface_penalty, 
         weight=50.0
     )   
 
-    # 5. [26.03.08. 추가] 수직 유지 시 가산점
-    # 스핀들이 표면과 90도를 잘 유지할수록 추가 점수를 줍니다.
-    perpendicular_align = RewTerm(
-        func=local_rewards.perpendicular_alignment_reward, 
-        weight=10.0
-    )
 # -----------------------------------------------------------------------------
 # Terminations
 # -----------------------------------------------------------------------------
@@ -329,4 +279,3 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
         self.scene.robot = UR10E_W_SPINDLE_CFG.replace(
             prim_path="{ENV_REGEX_NS}/Robot"
         )
-    

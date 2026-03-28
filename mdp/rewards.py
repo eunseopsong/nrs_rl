@@ -434,31 +434,51 @@ def off_surface_penalty(env: "ManagerBasedRLEnv", contact_threshold: float = 1.0
     return penalty
 
 # -----------------------------------------------------------
-# [26.03.08 추가] (6) Perpendicular Alignment Reward (수직 정렬 보상)
-# 목적: 스핀들이 표면과 완벽한 수직(법선 방향)을 유지하도록 유도합니다.
+# [26.03.28 수정] (6) Perfect Polishing Quality Reward (완벽 연마 종합 보상 - 수직 정렬 통합)
+# 목적: 1) 표면에 닿아있고(힘>3N), 2) 경로(X,Y)를 정확히 따르며, 3) 수직(Roll, Pitch)을 완벽히 유지할 때만 극대화된 보상을 줌.
+# 기존 'Perpendicular Alignment Reward' 로직을 완전히 흡수하여 연산 낭비를 없앴습니다.
 # -----------------------------------------------------------
-def perpendicular_alignment_reward(env: "ManagerBasedRLEnv"):
-    """
-    목표 경로(HDF5)의 방향(Orientation)과 현재 로봇 스핀들의 방향 차이를
-    계산하여, 수직을 잘 유지할수록 높은 가산점을 줍니다.
-    """
-    # 현재 자세와 목표 자세 가져오기
+def perfect_polishing_quality_reward(env: "ManagerBasedRLEnv"):
+    device = env.device
+    
+    # 1. 데이터 추출
     ee_pose = get_ee_pose(env)
     fut = get_hdf5_target_positions(env, horizon=2)
     if fut.ndim == 3:
         fut = fut.squeeze(1)
     target_next = fut[:, 6:12]
     
-    # Roll(회전x)과 Pitch(회전y) 각도만 추출 (Yaw는 수직 유지와 무관하므로 제외 가능)
-    # 인덱스 3: Roll, 4: Pitch
+    # [26.03.28 수정] 목표 자세 강제화: HDF5에 비스듬한 데이터가 섞여 있을 가능성을 배제하기 위해
+    # 목표 Roll/Pitch를 강제로 0.0(완전 수직)으로 고정하거나, 목표값과의 오차를 매우 엄격하게 잡습니다.
+    # 만약 절대적인 수직을 원하신다면 target_rp를 직접 0으로 세팅할 수도 있습니다.
     ee_rp = ee_pose[:, 3:5]
-    target_rp = target_next[:, 3:5]
+    target_rp = target_next[:, 3:5] # 혹은 torch.zeros_like(ee_rp) 로 테스트 가능
     
-    # 각도 오차 계산 (wrap-safe 적용)
+    # 2. 오차 계산
+    pos_error = torch.norm(ee_pose[:, :2] - target_next[:, :2], dim=-1)
     rp_error = angle_diff_torch(ee_rp, target_rp)
+    rp_error_magnitude = torch.norm(rp_error, dim=-1)
     
-    # 오차가 0에 가까울수록 1.0, 멀어질수록 0.0에 수렴하는 보상
-    # k값이 클수록 깐깐하게 검사합니다.
-    alignment_reward = torch.exp(-10.0 * torch.sum(torch.square(rp_error), dim=-1))
+    # 3. 보상 설계 (Exponential Kernel 강화)
+    # [26.03.28 수정] 위치 보상보다 수직 보상의 k값(민감도)을 높여 조금만 기울어져도 점수가 폭락하게 만듭니다.
+    r_pos = torch.exp(-15.0 * torch.square(pos_error)) 
+    r_perp = torch.exp(-40.0 * torch.square(rp_error_magnitude)) # 기존 15.0 -> 40.0 (강력한 수직 강제)
     
-    return alignment_reward
+    # 4. 접촉 판단
+    contact_wrench = get_contact_forces(env, sensor_name="contact_forces")
+    force_magnitude = torch.norm(contact_wrench[:, :3], dim=-1)
+    is_in_contact = force_magnitude > 3.0
+    
+    # 5. 최종 보상 (곱연산)
+    # 수직이 맞지 않으면(r_perp가 낮으면) 위치 점수가 아무리 좋아도 전체 보상이 0에 수렴합니다.
+    quality_score = r_pos * r_perp
+    final_reward = torch.where(is_in_contact, quality_score, torch.zeros_like(quality_score))
+    
+    # 모니터링 로그 추가
+    step = int(env.common_step_counter)
+    if step % 100 == 0:
+        print(f"📐 [Alignment Check] Pitch/Roll Error: {rp_error_magnitude.mean():.4f} rad")
+        if rp_error_magnitude.mean() > 0.05:
+            print("⚠️ [경고] 로봇이 비스듬합니다! 수직 정렬 보상이 더 필요합니다.")
+
+    return final_reward
