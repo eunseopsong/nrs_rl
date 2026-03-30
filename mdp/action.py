@@ -115,13 +115,14 @@ def orientation_error_world(cur_quat: torch.Tensor, des_quat: torch.Tensor) -> t
 # =========================================================
 class AdmittanceControlAction(ActionTerm):
     """
-    HDF5 pose path follower.
+    Multi-env HDF5 pose path follower.
 
     Behavior:
     - ignores RL action input
     - loads target EE path from HDF5: (x, y, z, roll, pitch, yaw)
-    - holds the current waypoint until robot gets close enough
-    - then advances to next waypoint
+    - every env tracks the trajectory in its own local frame
+    - current EE pose is converted from world frame to env-local frame
+    - waypoint progression is managed independently per env
     - uses Jacobian-based damped least-squares IK for UR10e 6 joints
     - supports TCP/spindle length compensation in tool-local axis
     """
@@ -156,6 +157,7 @@ class AdmittanceControlAction(ActionTerm):
         self.traj_positions = traj_full[::stride].contiguous()
         self.traj_length = self.traj_positions.shape[0]
 
+        # env-wise trajectory state
         self.path_index = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
         self.steps_at_waypoint = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
         self.path_done = torch.zeros(self._num_envs_local, dtype=torch.bool, device=self.device)
@@ -169,6 +171,7 @@ class AdmittanceControlAction(ActionTerm):
         print(f"[Action] full traj shape: {tuple(traj_full.shape)}")
         print(f"[Action] stride: {stride} -> used traj shape: {tuple(self.traj_positions.shape)}")
         print(f"[Action] EE body_name: {self.cfg.body_name}, ee_idx: {self.ee_idx}")
+        print(f"[Action] num_envs: {self._num_envs_local}")
         print(f"[Action] TCP length offset: {self.cfg.tcp_length_offset_m} m")
         print(f"[Action] TCP offset axis: {self.cfg.tcp_offset_axis}")
 
@@ -230,13 +233,24 @@ class AdmittanceControlAction(ActionTerm):
         self.des_quat[env_ids] = rpy_to_quat(des[:, 3:6])
 
     def process_actions(self, actions: torch.Tensor):
+        # RL action ignored; env-wise deterministic path follower
         self._raw_actions = torch.nan_to_num(actions.clone(), nan=0.0)
         self._processed_actions.zero_()
 
     def apply_actions(self):
-        ee_pos = self.robot.data.body_pos_w[:, self.ee_idx, :]
+        # -------------------------------------------------
+        # 1) Current EE pose
+        #    Convert world position -> env local position
+        # -------------------------------------------------
+        ee_pos_w = self.robot.data.body_pos_w[:, self.ee_idx, :]
+        env_origins = self._env.scene.env_origins
+        ee_pos = ee_pos_w - env_origins
+
         ee_quat = self.robot.data.body_quat_w[:, self.ee_idx, :]
 
+        # -------------------------------------------------
+        # 2) Current joints / Jacobian
+        # -------------------------------------------------
         q_all = self.robot.data.joint_pos
         q = q_all[:, :6]
 
@@ -244,33 +258,33 @@ class AdmittanceControlAction(ActionTerm):
         jacobian = jac_all[:, self.ee_idx - 1, :, :6]
 
         # -------------------------------------------------
-        # 1) raw target from HDF5
+        # 3) Raw target from HDF5 (same path, independent per env)
         # -------------------------------------------------
         des = self.traj_positions[self.path_index]
         raw_des_pos = des[:, 0:3].clone()
         self.des_quat = rpy_to_quat(des[:, 3:6])
 
         # -------------------------------------------------
-        # 2) spindle length / TCP offset compensation
-        #    old long spindle target -> current short spindle target
+        # 4) TCP / spindle length compensation
         # -------------------------------------------------
         offset_local = self._get_local_tcp_offset(
             length=self.cfg.tcp_length_offset_m,
             axis=self.cfg.tcp_offset_axis,
             dtype=raw_des_pos.dtype,
         )
-
         rotm = quat_to_rotmat(self.des_quat)
-        offset_world = torch.bmm(rotm, offset_local.unsqueeze(-1)).squeeze(-1)
+        offset_world_like = torch.bmm(rotm, offset_local.unsqueeze(-1)).squeeze(-1)
 
-        # final desired position
-        self.des_pos = raw_des_pos + offset_world
+        # Here target trajectory is already in env-local coordinates.
+        # Since envs differ only by translation, the same rotated offset
+        # can be added directly in each env-local frame.
+        self.des_pos = raw_des_pos + offset_world_like
 
-        # optional extra world-z trim
+        # optional extra world/local z trim
         self.des_pos[:, 2] += self.cfg.z_target_offset
 
         # -------------------------------------------------
-        # 3) IK error
+        # 5) IK error (all in env-local position + world orientation)
         # -------------------------------------------------
         pos_err = self.des_pos - ee_pos
         rot_err = orientation_error_world(ee_quat, self.des_quat)
@@ -298,7 +312,14 @@ class AdmittanceControlAction(ActionTerm):
 
         self.robot.set_joint_position_target(q_cmd_all)
 
+        # -------------------------------------------------
+        # 6) Env-wise waypoint update
+        # -------------------------------------------------
         self._update_waypoint_progress(pos_err_norm, rot_err_norm)
+
+        # -------------------------------------------------
+        # 7) Debug (env-local current pose)
+        # -------------------------------------------------
         self._debug_print_status(ee_pos, ee_quat, raw_des_pos, pos_err_norm, rot_err_norm)
 
     def _get_local_tcp_offset(self, length: float, axis: str, dtype: torch.dtype) -> torch.Tensor:
@@ -422,6 +443,7 @@ class AdmittanceControlActionCfg(ActionTermCfg):
 
     action_dim: int = 2
 
+    # IK
     dls_lambda: float = 0.10
     ik_step_size: float = 0.60
     max_dq: float = 0.08
@@ -429,24 +451,20 @@ class AdmittanceControlActionCfg(ActionTermCfg):
     max_pos_err: float = 0.05
     max_rot_err: float = 0.30
 
+    # waypoint follower
     waypoint_stride: int = 100
     waypoint_pos_tol: float = 0.02
     waypoint_rot_tol: float = 0.20
     max_steps_per_waypoint: int = 120
 
-    # -----------------------------------------------------
-    # TCP / spindle length compensation
-    # Example:
-    #   spindle shortened by 200 mm relative to old FK/H5
-    #   -> tcp_length_offset_m = 0.20
-    #   -> choose axis according to tool frame
-    # -----------------------------------------------------
+    # TCP / spindle compensation
     tcp_length_offset_m: float = 0.20
     tcp_offset_axis: str = "local_z_neg"
 
-    # optional extra world-z trim
+    # extra trim
     z_target_offset: float = 0.0
 
+    # debug
     enable_debug_print: bool = True
     debug_print_interval: int = 10
     debug_env_id: int = 0
