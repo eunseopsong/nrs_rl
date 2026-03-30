@@ -13,6 +13,9 @@ from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.utils import configclass
 
 
+# =========================================================
+# Math utils
+# =========================================================
 def normalize_quat(q: torch.Tensor) -> torch.Tensor:
     return q / torch.clamp(torch.linalg.norm(q, dim=-1, keepdim=True), min=1e-8)
 
@@ -24,6 +27,7 @@ def quat_conjugate(q: torch.Tensor) -> torch.Tensor:
 
 
 def quat_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
+    # q = [w, x, y, z]
     w1, x1, y1, z1 = q1[:, 0], q1[:, 1], q1[:, 2], q1[:, 3]
     w2, x2, y2, z2 = q2[:, 0], q2[:, 1], q2[:, 2], q2[:, 3]
 
@@ -32,6 +36,27 @@ def quat_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
     y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
     z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
     return torch.stack([w, x, y, z], dim=-1)
+
+
+def quat_to_rotmat(q: torch.Tensor) -> torch.Tensor:
+    q = normalize_quat(q)
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+
+    r = torch.zeros((q.shape[0], 3, 3), device=q.device, dtype=q.dtype)
+
+    r[:, 0, 0] = 1.0 - 2.0 * (y * y + z * z)
+    r[:, 0, 1] = 2.0 * (x * y - z * w)
+    r[:, 0, 2] = 2.0 * (x * z + y * w)
+
+    r[:, 1, 0] = 2.0 * (x * y + z * w)
+    r[:, 1, 1] = 1.0 - 2.0 * (x * x + z * z)
+    r[:, 1, 2] = 2.0 * (y * z - x * w)
+
+    r[:, 2, 0] = 2.0 * (x * z - y * w)
+    r[:, 2, 1] = 2.0 * (y * z + x * w)
+    r[:, 2, 2] = 1.0 - 2.0 * (x * x + y * y)
+
+    return r
 
 
 def rpy_to_quat(rpy: torch.Tensor) -> torch.Tensor:
@@ -46,6 +71,7 @@ def rpy_to_quat(rpy: torch.Tensor) -> torch.Tensor:
     cy = torch.cos(yaw * 0.5)
     sy = torch.sin(yaw * 0.5)
 
+    # Rz(yaw) * Ry(pitch) * Rx(roll)
     w = cy * cp * cr + sy * sp * sr
     x = cy * cp * sr - sy * sp * cr
     y = cy * sp * cr + sy * cp * sr
@@ -84,7 +110,22 @@ def orientation_error_world(cur_quat: torch.Tensor, des_quat: torch.Tensor) -> t
     return 2.0 * q_err[:, 1:4]
 
 
+# =========================================================
+# Action Term
+# =========================================================
 class AdmittanceControlAction(ActionTerm):
+    """
+    HDF5 pose path follower.
+
+    Behavior:
+    - ignores RL action input
+    - loads target EE path from HDF5: (x, y, z, roll, pitch, yaw)
+    - holds the current waypoint until robot gets close enough
+    - then advances to next waypoint
+    - uses Jacobian-based damped least-squares IK for UR10e 6 joints
+    - supports TCP/spindle length compensation in tool-local axis
+    """
+
     cfg: "AdmittanceControlActionCfg"
 
     def __init__(self, cfg, env: ManagerBasedRLEnv):
@@ -128,6 +169,8 @@ class AdmittanceControlAction(ActionTerm):
         print(f"[Action] full traj shape: {tuple(traj_full.shape)}")
         print(f"[Action] stride: {stride} -> used traj shape: {tuple(self.traj_positions.shape)}")
         print(f"[Action] EE body_name: {self.cfg.body_name}, ee_idx: {self.ee_idx}")
+        print(f"[Action] TCP length offset: {self.cfg.tcp_length_offset_m} m")
+        print(f"[Action] TCP offset axis: {self.cfg.tcp_offset_axis}")
 
     @property
     def action_dim(self):
@@ -198,13 +241,37 @@ class AdmittanceControlAction(ActionTerm):
         q = q_all[:, :6]
 
         jac_all = self.robot.root_physx_view.get_jacobians()
-        # jacobian = jac_all[:, self.ee_idx - self.cfg.jacobian_body_offset, :, :6]
         jacobian = jac_all[:, self.ee_idx - 1, :, :6]
 
+        # -------------------------------------------------
+        # 1) raw target from HDF5
+        # -------------------------------------------------
         des = self.traj_positions[self.path_index]
-        self.des_pos = des[:, 0:3]
+        raw_des_pos = des[:, 0:3].clone()
         self.des_quat = rpy_to_quat(des[:, 3:6])
 
+        # -------------------------------------------------
+        # 2) spindle length / TCP offset compensation
+        #    old long spindle target -> current short spindle target
+        # -------------------------------------------------
+        offset_local = self._get_local_tcp_offset(
+            length=self.cfg.tcp_length_offset_m,
+            axis=self.cfg.tcp_offset_axis,
+            dtype=raw_des_pos.dtype,
+        )
+
+        rotm = quat_to_rotmat(self.des_quat)
+        offset_world = torch.bmm(rotm, offset_local.unsqueeze(-1)).squeeze(-1)
+
+        # final desired position
+        self.des_pos = raw_des_pos + offset_world
+
+        # optional extra world-z trim
+        self.des_pos[:, 2] += self.cfg.z_target_offset
+
+        # -------------------------------------------------
+        # 3) IK error
+        # -------------------------------------------------
         pos_err = self.des_pos - ee_pos
         rot_err = orientation_error_world(ee_quat, self.des_quat)
 
@@ -232,7 +299,41 @@ class AdmittanceControlAction(ActionTerm):
         self.robot.set_joint_position_target(q_cmd_all)
 
         self._update_waypoint_progress(pos_err_norm, rot_err_norm)
-        self._debug_print_status(ee_pos, ee_quat, pos_err_norm, rot_err_norm)
+        self._debug_print_status(ee_pos, ee_quat, raw_des_pos, pos_err_norm, rot_err_norm)
+
+    def _get_local_tcp_offset(self, length: float, axis: str, dtype: torch.dtype) -> torch.Tensor:
+        """
+        Create tool-local offset vector for all envs.
+
+        axis options:
+          - local_x_pos / local_x_neg
+          - local_y_pos / local_y_neg
+          - local_z_pos / local_z_neg
+        """
+        offset = torch.zeros((self._num_envs_local, 3), device=self.device, dtype=dtype)
+
+        if abs(length) < 1e-9:
+            return offset
+
+        if axis == "local_x_pos":
+            offset[:, 0] = length
+        elif axis == "local_x_neg":
+            offset[:, 0] = -length
+        elif axis == "local_y_pos":
+            offset[:, 1] = length
+        elif axis == "local_y_neg":
+            offset[:, 1] = -length
+        elif axis == "local_z_pos":
+            offset[:, 2] = length
+        elif axis == "local_z_neg":
+            offset[:, 2] = -length
+        else:
+            raise ValueError(
+                f"[Action] Unsupported tcp_offset_axis='{axis}'. "
+                f"Use one of: local_x_pos, local_x_neg, local_y_pos, local_y_neg, local_z_pos, local_z_neg"
+            )
+
+        return offset
 
     def _update_waypoint_progress(self, pos_err_norm: torch.Tensor, rot_err_norm: torch.Tensor):
         reached = (pos_err_norm < self.cfg.waypoint_pos_tol) & (rot_err_norm < self.cfg.waypoint_rot_tol)
@@ -251,7 +352,7 @@ class AdmittanceControlAction(ActionTerm):
             self.steps_at_waypoint + 1,
         )
 
-    def _debug_print_status(self, ee_pos, ee_quat, pos_err_norm, rot_err_norm):
+    def _debug_print_status(self, ee_pos, ee_quat, raw_des_pos, pos_err_norm, rot_err_norm):
         if not self.cfg.enable_debug_print:
             return
 
@@ -261,13 +362,14 @@ class AdmittanceControlAction(ActionTerm):
 
         env_id = min(self.cfg.debug_env_id, self._num_envs_local - 1)
 
+        raw_target_xyz = raw_des_pos[env_id].detach().cpu()
         target_xyz = self.des_pos[env_id].detach().cpu()
         target_rpy = quat_to_rpy(self.des_quat[env_id:env_id + 1]).squeeze(0).detach().cpu()
 
         current_xyz = ee_pos[env_id].detach().cpu()
         current_rpy = quat_to_rpy(ee_quat[env_id:env_id + 1]).squeeze(0).detach().cpu()
 
-        print("\n" + "=" * 90)
+        print("\n" + "=" * 100)
         print(
             f"[Action Debug] env={env_id} | step={global_step} | "
             f"h5_index={int(self.path_index[env_id].item())}/{self.traj_length - 1} | "
@@ -275,20 +377,24 @@ class AdmittanceControlAction(ActionTerm):
             f"done={bool(self.path_done[env_id].item())}"
         )
         print(
-            "[Target Pose ] "
+            "[Raw Target   ] "
+            f"x={raw_target_xyz[0]: .6f}, y={raw_target_xyz[1]: .6f}, z={raw_target_xyz[2]: .6f}"
+        )
+        print(
+            "[Target Pose  ] "
             f"x={target_xyz[0]: .6f}, y={target_xyz[1]: .6f}, z={target_xyz[2]: .6f}, "
             f"r={target_rpy[0]: .6f}, p={target_rpy[1]: .6f}, yw={target_rpy[2]: .6f}"
         )
         print(
-            "[Current Pose] "
+            "[Current Pose ] "
             f"x={current_xyz[0]: .6f}, y={current_xyz[1]: .6f}, z={current_xyz[2]: .6f}, "
             f"r={current_rpy[0]: .6f}, p={current_rpy[1]: .6f}, yw={current_rpy[2]: .6f}"
         )
         print(
-            f"[Error       ] pos_norm={float(pos_err_norm[env_id].item()): .6f}, "
+            f"[Error        ] pos_norm={float(pos_err_norm[env_id].item()): .6f}, "
             f"rot_norm={float(rot_err_norm[env_id].item()): .6f}"
         )
-        print("=" * 90)
+        print("=" * 100)
 
     def _solve_dls_ik(self, J: torch.Tensor, e: torch.Tensor, damping: float) -> torch.Tensor:
         n = J.shape[0]
@@ -301,6 +407,9 @@ class AdmittanceControlAction(ActionTerm):
         return dq
 
 
+# =========================================================
+# Config
+# =========================================================
 @configclass
 class AdmittanceControlActionCfg(ActionTermCfg):
     class_type: type = AdmittanceControlAction
@@ -313,18 +422,30 @@ class AdmittanceControlActionCfg(ActionTermCfg):
 
     action_dim: int = 2
 
-    dls_lambda: float = 0.30
-    ik_step_size: float = 0.15
-    max_dq: float = 0.02
-    jacobian_body_offset: int = 1
+    dls_lambda: float = 0.10
+    ik_step_size: float = 0.60
+    max_dq: float = 0.08
 
-    max_pos_err: float = 0.01
-    max_rot_err: float = 0.10
+    max_pos_err: float = 0.05
+    max_rot_err: float = 0.30
 
-    waypoint_stride: int = 50
-    waypoint_pos_tol: float = 0.005
-    waypoint_rot_tol: float = 0.08
-    max_steps_per_waypoint: int = 60
+    waypoint_stride: int = 100
+    waypoint_pos_tol: float = 0.02
+    waypoint_rot_tol: float = 0.20
+    max_steps_per_waypoint: int = 120
+
+    # -----------------------------------------------------
+    # TCP / spindle length compensation
+    # Example:
+    #   spindle shortened by 200 mm relative to old FK/H5
+    #   -> tcp_length_offset_m = 0.20
+    #   -> choose axis according to tool frame
+    # -----------------------------------------------------
+    tcp_length_offset_m: float = 0.20
+    tcp_offset_axis: str = "local_z_neg"
+
+    # optional extra world-z trim
+    z_target_offset: float = 0.0
 
     enable_debug_print: bool = True
     debug_print_interval: int = 10

@@ -65,16 +65,38 @@ class ActionsCfg:
         hdf5_file_path="/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/flat_g_recording.h5",
         position_dataset_key="target_positions",
         action_dim=2,
+
+        # IK
         dls_lambda=0.10,
         ik_step_size=0.60,
         max_dq=0.08,
-        jacobian_body_offset=0,
         max_pos_err=0.05,
         max_rot_err=0.30,
+
+        # waypoint follower
         waypoint_stride=100,
         waypoint_pos_tol=0.02,
         waypoint_rot_tol=0.20,
         max_steps_per_waypoint=120,
+
+        # spindle / TCP 길이 보정
+        # 예전 FK/H5 기준 spindle보다 현재 spindle이 200 mm 짧다면 0.20
+        tcp_length_offset_m=0.20,
+
+        # 축 후보:
+        # "local_x_pos", "local_x_neg",
+        # "local_y_pos", "local_y_neg",
+        # "local_z_pos", "local_z_neg"
+        #
+        # 먼저 local_z_neg 로 시작해서,
+        # debug에서 Target/Current 방향이 반대로 가면
+        # local_z_pos 또는 local_x_pos 쪽으로 바꿔가며 확인
+        tcp_offset_axis="local_z_neg",
+
+        # world z 미세 보정이 필요하면 추가
+        z_target_offset=0.0,
+
+        # debug
         enable_debug_print=True,
         debug_print_interval=10,
         debug_env_id=0,
