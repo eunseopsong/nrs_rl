@@ -52,6 +52,17 @@ class SpindleSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=2500.0),
     )
 
+    workpiece = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Workpiece",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path="/home/eunseop/isaac/isaac_save/surface/workpiece_standard.usd",
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(0.0, 0.0, 0.0),
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
+    )
+
     contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/Robot/spindle_link",
         update_period=0.0,
@@ -168,7 +179,7 @@ class TerminationsCfg:
 
 @configclass
 class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
-    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=128, env_spacing=2.5)
+    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=64, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
