@@ -1,93 +1,137 @@
-import os
-import torch
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers
+# SPDX-License-Identifier: BSD-3-Clause
+
+from __future__ import annotations
+
 import math
-import numpy as np
+import os
 import h5py
+import torch
+
 from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.envs import ManagerBasedRLEnv
-from isaaclab.controllers.differential_ik import DifferentialIKController
-from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
 from isaaclab.utils import configclass
 
 
+def normalize_quat(q: torch.Tensor) -> torch.Tensor:
+    return q / torch.clamp(torch.linalg.norm(q, dim=-1, keepdim=True), min=1e-8)
+
+
+def quat_conjugate(q: torch.Tensor) -> torch.Tensor:
+    out = q.clone()
+    out[:, 1:] = -out[:, 1:]
+    return out
+
+
+def quat_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
+    w1, x1, y1, z1 = q1[:, 0], q1[:, 1], q1[:, 2], q1[:, 3]
+    w2, x2, y2, z2 = q2[:, 0], q2[:, 1], q2[:, 2], q2[:, 3]
+
+    w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+    x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+    y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+    z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+    return torch.stack([w, x, y, z], dim=-1)
+
+
+def rpy_to_quat(rpy: torch.Tensor) -> torch.Tensor:
+    roll = rpy[:, 0]
+    pitch = rpy[:, 1]
+    yaw = rpy[:, 2]
+
+    cr = torch.cos(roll * 0.5)
+    sr = torch.sin(roll * 0.5)
+    cp = torch.cos(pitch * 0.5)
+    sp = torch.sin(pitch * 0.5)
+    cy = torch.cos(yaw * 0.5)
+    sy = torch.sin(yaw * 0.5)
+
+    w = cy * cp * cr + sy * sp * sr
+    x = cy * cp * sr - sy * sp * cr
+    y = cy * sp * cr + sy * cp * sr
+    z = sy * cp * cr - cy * sp * sr
+    return normalize_quat(torch.stack([w, x, y, z], dim=-1))
+
+
+def quat_to_rpy(q: torch.Tensor) -> torch.Tensor:
+    q = normalize_quat(q)
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = torch.atan2(sinr_cosp, cosr_cosp)
+
+    sinp = 2.0 * (w * y - z * x)
+    sinp = torch.clamp(sinp, -1.0, 1.0)
+    pitch = torch.asin(sinp)
+
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = torch.atan2(siny_cosp, cosy_cosp)
+
+    return torch.stack([roll, pitch, yaw], dim=-1)
+
+
+def orientation_error_world(cur_quat: torch.Tensor, des_quat: torch.Tensor) -> torch.Tensor:
+    cur_quat = normalize_quat(cur_quat)
+    des_quat = normalize_quat(des_quat)
+
+    q_err = quat_multiply(des_quat, quat_conjugate(cur_quat))
+    q_err = normalize_quat(q_err)
+
+    sign = torch.where(q_err[:, 0:1] < 0.0, -1.0, 1.0)
+    q_err = q_err * sign
+    return 2.0 * q_err[:, 1:4]
+
+
 class AdmittanceControlAction(ActionTerm):
+    cfg: "AdmittanceControlActionCfg"
+
     def __init__(self, cfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
 
+        self.cfg = cfg
         self.robot = self._env.scene[cfg.asset_name]
-        self.cfg = cfg  
+        self._num_envs_local = self._env.num_envs
+        self._step_dt_local = self._env.step_dt
 
-        # --- Force control ---
-        self.target_force = self.cfg.target_force
-        self.current_target_force = torch.zeros(self.num_envs, device=self.device)
+        body_ids = self.robot.find_bodies(self.cfg.body_name)[0]
+        if len(body_ids) == 0:
+            raise ValueError(
+                f"[Action] body_name='{self.cfg.body_name}' not found. "
+                f"Available bodies: {self.robot.body_names}"
+            )
+        self.ee_idx = body_ids[0]
 
-        # --- Admittance params ---
-        self.M = self.cfg.M
-        self.D = self.cfg.D
-        self.dt = self._env.step_dt
-
-        self.adm_z_vel = torch.zeros(self.num_envs, device=self.device)
-
-        # --- Stage control ---
-        self.stage = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
-        self.stage_timer = torch.zeros(self.num_envs, device=self.device)
-
-        # --- Targets ---
-        self.target_pos_cmd = torch.zeros(self.num_envs, 3, device=self.device)
-        self.target_quat_cmd = torch.zeros(self.num_envs, 4, device=self.device)
-
-        # --- Actions ---
-        self._raw_actions = torch.zeros(self.num_envs, 2, device=self.device)
+        self._raw_actions = torch.zeros((self._num_envs_local, self.cfg.action_dim), device=self.device)
         self._processed_actions = torch.zeros_like(self._raw_actions)
 
-        # --- IK ---
-        ik_cfg = DifferentialIKControllerCfg(
-            command_type="pose",
-            use_relative_mode=False,
-            ik_method="dls"  
-        )
-        self.ik_controller = DifferentialIKController(
-            ik_cfg, num_envs=self.num_envs, device=self.device
+        traj_full = self._load_hdf5_positions(
+            self.cfg.hdf5_file_path,
+            self.cfg.position_dataset_key,
         )
 
-        self.ee_idx = self.robot.find_bodies(self.cfg.body_name)[0][0]
-        
-        # ✅ [26.03.28. 추가] 스핀들 수직 고정을 위한 목표 쿼터니언 텐서
-        self.vertical_quat_tensor = torch.tensor(self.cfg.vertical_quat, device=self.device)
+        stride = max(1, int(self.cfg.waypoint_stride))
+        self.traj_positions = traj_full[::stride].contiguous()
+        self.traj_length = self.traj_positions.shape[0]
 
-        # -----------------------------------------------------------
-        # ✅ [26.03.28. 추가] HDF5를 읽어 베이스(Local) 기준 워크스페이스 한계치 설정
-        # -----------------------------------------------------------
-        self.base_x_min, self.base_x_max = self.cfg.workspace_x_limits
-        self.base_y_min, self.base_y_max = self.cfg.workspace_y_limits
-        
-        if hasattr(self.cfg, 'hdf5_file_path') and self.cfg.hdf5_file_path:
-            if os.path.exists(self.cfg.hdf5_file_path):
-                try:
-                    with h5py.File(self.cfg.hdf5_file_path, 'r') as f:
-                        dataset_name = 'positions' if 'positions' in f else list(f.keys())[0]
-                        traj_data = f[dataset_name][:]
-                        margin = self.cfg.workspace_margin
-                        
-                        self.base_x_min = float(np.min(traj_data[:, 0])) - margin
-                        self.base_x_max = float(np.max(traj_data[:, 0])) + margin
-                        self.base_y_min = float(np.min(traj_data[:, 1])) - margin
-                        self.base_y_max = float(np.max(traj_data[:, 1])) + margin
-                        print(f"✅ [Action] HDF5 로드 완료! Local Limits: X[{self.base_x_min:.3f}, {self.base_x_max:.3f}], Y[{self.base_y_min:.3f}, {self.base_y_max:.3f}]")
-                except Exception as e:
-                    print(f"⚠️ [Action] HDF5 로드 실패. Cfg 기본 Limit 사용: {e}")
+        self.path_index = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
+        self.steps_at_waypoint = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
+        self.path_done = torch.zeros(self._num_envs_local, dtype=torch.bool, device=self.device)
 
-        # -----------------------------------------------------------
-        # ✅ [26.03.28. 추가] 각 환경별(Global) 워크스페이스를 담아둘 텐서 준비
-        # -----------------------------------------------------------
-        self.env_x_min = torch.zeros(self.num_envs, device=self.device)
-        self.env_x_max = torch.zeros(self.num_envs, device=self.device)
-        self.env_y_min = torch.zeros(self.num_envs, device=self.device)
-        self.env_y_max = torch.zeros(self.num_envs, device=self.device)
+        self.des_pos = torch.zeros((self._num_envs_local, 3), device=self.device)
+        self.des_quat = torch.zeros((self._num_envs_local, 4), device=self.device)
+        self.des_quat[:, 0] = 1.0
+
+        print(f"[Action] HDF5 file: {self.cfg.hdf5_file_path}")
+        print(f"[Action] dataset key: {self.cfg.position_dataset_key}")
+        print(f"[Action] full traj shape: {tuple(traj_full.shape)}")
+        print(f"[Action] stride: {stride} -> used traj shape: {tuple(self.traj_positions.shape)}")
+        print(f"[Action] EE body_name: {self.cfg.body_name}, ee_idx: {self.ee_idx}")
 
     @property
     def action_dim(self):
-        return 2
+        return self.cfg.action_dim
 
     @property
     def raw_actions(self):
@@ -97,159 +141,208 @@ class AdmittanceControlAction(ActionTerm):
     def processed_actions(self):
         return self._processed_actions
 
-    def process_actions(self, actions):
-        self._raw_actions = actions
-        scaled_actions = actions * self.cfg.action_scale
-        self._processed_actions = torch.nan_to_num(
-            torch.clamp(scaled_actions, min=-self.cfg.max_xy_vel, max=self.cfg.max_xy_vel),
-            nan=0.0
-        )
+    def _load_hdf5_positions(self, file_path: str, dataset_key: str) -> torch.Tensor:
+        if not file_path:
+            raise ValueError("[Action] hdf5_file_path is empty.")
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"[Action] HDF5 file not found: {file_path}")
+
+        with h5py.File(file_path, "r") as f:
+            if dataset_key in f:
+                data = f[dataset_key][:]
+            elif "target_positions" in f:
+                data = f["target_positions"][:]
+            elif "positions" in f:
+                data = f["positions"][:]
+            else:
+                keys = list(f.keys())
+                if len(keys) == 0:
+                    raise KeyError("[Action] HDF5 file has no datasets.")
+                data = f[keys[0]][:]
+
+        data = torch.tensor(data, dtype=torch.float32, device=self.device)
+
+        if data.ndim != 2:
+            raise ValueError(f"[Action] expected [T, D], got {tuple(data.shape)}")
+        if data.shape[1] < 6:
+            raise ValueError(f"[Action] expected at least 6 columns, got {data.shape[1]}")
+
+        return data[:, :6]
 
     def reset(self, env_ids=None):
         super().reset(env_ids)
+
         if env_ids is None:
-            env_ids = slice(None)
+            env_ids = torch.arange(self._num_envs_local, device=self.device)
 
-        self.stage[env_ids] = 0
-        self.stage_timer[env_ids] = 0.0
-        self.adm_z_vel[env_ids] = 0.0
-        self.current_target_force[env_ids] = 0.0
+        self._raw_actions[env_ids] = 0.0
+        self._processed_actions[env_ids] = 0.0
 
-        # ✅ [26.03.28. 추가] 에피소드 시작 시 각 로봇의 글로벌 Root 위치 측정 및 워크스페이스 고정
-        root_pos = self.robot.data.root_pos_w[env_ids]
-        
-        self.env_x_min[env_ids] = root_pos[:, 0] + self.base_x_min
-        self.env_x_max[env_ids] = root_pos[:, 0] + self.base_x_max
-        self.env_y_min[env_ids] = root_pos[:, 1] + self.base_y_min
-        self.env_y_max[env_ids] = root_pos[:, 1] + self.base_y_max
+        self.path_index[env_ids] = 0
+        self.steps_at_waypoint[env_ids] = 0
+        self.path_done[env_ids] = False
+
+        des = self.traj_positions[0].unsqueeze(0).repeat(len(env_ids), 1)
+        self.des_pos[env_ids] = des[:, 0:3]
+        self.des_quat[env_ids] = rpy_to_quat(des[:, 3:6])
+
+    def process_actions(self, actions: torch.Tensor):
+        self._raw_actions = torch.nan_to_num(actions.clone(), nan=0.0)
+        self._processed_actions.zero_()
 
     def apply_actions(self):
         ee_pos = self.robot.data.body_pos_w[:, self.ee_idx, :]
         ee_quat = self.robot.data.body_quat_w[:, self.ee_idx, :]
-        q = self.robot.data.joint_pos
-        jacobian = self.robot.root_physx_view.get_jacobians()[:, self.ee_idx - 1]
 
-        # Stage 0: 초기 자세 캡처 및 수직 강제 주입
-        mask0 = self.stage == 0
-        if mask0.any():
-            self.target_pos_cmd[mask0] = ee_pos[mask0].clone()
-            self.target_quat_cmd[mask0] = self.vertical_quat_tensor.repeat(mask0.sum(), 1)
-            self.stage[mask0] = 1
+        q_all = self.robot.data.joint_pos
+        q = q_all[:, :6]
 
-        # Stage 1: 수직 자세 도달 대기
-        mask1 = self.stage == 1
-        if mask1.any():
-            self.stage_timer[mask1] += self.dt
-            quat_dot = torch.sum(ee_quat[mask1] * self.target_quat_cmd[mask1], dim=-1)
-            angle_error = torch.acos(torch.clamp(torch.abs(quat_dot), -1.0, 1.0)) * 2.0
-            done = (angle_error < 0.1) | (self.stage_timer[mask1] > self.cfg.stage1_timeout)
-            self.stage[mask1 & done] = 2
+        jac_all = self.robot.root_physx_view.get_jacobians()
+        # jacobian = jac_all[:, self.ee_idx - self.cfg.jacobian_body_offset, :, :6]
+        jacobian = jac_all[:, self.ee_idx - 1, :, :6]
 
-        # Stage 2: Admittance 하강 제어 및 조건부 적응형 자세 보정
-        mask2 = self.stage == 2
-        if mask2.any():
-            force_step = 5.0 * self.dt
-            self.current_target_force[mask2] = torch.clamp(
-                self.current_target_force[mask2] + force_step,
-                max=self.target_force
-            )
+        des = self.traj_positions[self.path_index]
+        self.des_pos = des[:, 0:3]
+        self.des_quat = rpy_to_quat(des[:, 3:6])
 
-            contact_sensor = self._env.scene.sensors["contact_forces"]
-            # 계산의 편의를 위해 전체 환경에 대한 힘을 먼저 가져옵니다.
-            F_ext_3d_all = torch.nan_to_num(contact_sensor.data.net_forces_w[:, 0, :], nan=0.0)
-            F_ext_z_all = F_ext_3d_all[:, 2]
+        pos_err = self.des_pos - ee_pos
+        rot_err = orientation_error_world(ee_quat, self.des_quat)
 
-            F_target = self.current_target_force[mask2]
-            F_error = F_ext_z_all[mask2] - F_target
-            F_error = torch.where(torch.abs(F_error) < 1.0, torch.zeros_like(F_error), F_error)
+        pos_err_norm = torch.linalg.norm(pos_err, dim=-1)
+        rot_err_norm = torch.linalg.norm(rot_err, dim=-1)
 
-            # 1. Z축 병진 어드미턴스 (하강)
-            adm_acc = (F_error - self.D * self.adm_z_vel[mask2]) / self.M
-            self.adm_z_vel[mask2] += adm_acc * self.dt
-            self.adm_z_vel[mask2] = torch.clamp(self.adm_z_vel[mask2], -0.05, 0.05)
-            self.target_pos_cmd[mask2, 2] += self.adm_z_vel[mask2] * self.dt
+        pos_err_clamped = torch.clamp(pos_err, -self.cfg.max_pos_err, self.cfg.max_pos_err)
+        rot_err_clamped = torch.clamp(rot_err, -self.cfg.max_rot_err, self.cfg.max_rot_err)
+        err_6d = torch.cat([pos_err_clamped, rot_err_clamped], dim=-1)
 
-            # 2. X, Y 위치 제어 (RL Action)
-            self.target_pos_cmd[mask2, 0] += self._processed_actions[mask2, 0] * self.dt
-            self.target_pos_cmd[mask2, 1] += self._processed_actions[mask2, 1] * self.dt
+        dq = self._solve_dls_ik(jacobian, err_6d, self.cfg.dls_lambda)
+        dq = torch.clamp(dq, -self.cfg.max_dq, self.cfg.max_dq)
 
-            # ✅ [26.03.28. 추가] 글로벌 워크스페이스 한계치로 즉시 클리핑
-            self.target_pos_cmd[mask2, 0] = torch.clamp(self.target_pos_cmd[mask2, 0], min=self.env_x_min[mask2], max=self.env_x_max[mask2])
-            self.target_pos_cmd[mask2, 1] = torch.clamp(self.target_pos_cmd[mask2, 1], min=self.env_y_min[mask2], max=self.env_y_max[mask2])
-            
-            root_pos = self.robot.data.root_pos_w[mask2]
-            self.target_pos_cmd[mask2, 2] = torch.clamp(self.target_pos_cmd[mask2, 2], min=root_pos[:, 2] + self.cfg.z_min)
+        q_cmd_6 = q + self.cfg.ik_step_size * dq
 
-            # -----------------------------------------------------------------
-            # ✅ [26.03.28. 수정] 동적 자세 제어 (표적 USD 감지 여부에 따라 분기)
-            # -----------------------------------------------------------------
-            # 표적에 닿았는지 판별: Z축 접촉 힘이 2.0N 이상 & Cfg 기능 켜짐
-            is_contact_meaningful = F_ext_z_all > 2.0
-            
-            # 조건에 맞는 마스크 분리
-            adaptive_mask = mask2 & is_contact_meaningful & self.cfg.enable_adaptive_orientation
-            vertical_mask = mask2 & ~adaptive_mask
+        if self.cfg.joint_lower_limits is not None and self.cfg.joint_upper_limits is not None:
+            q_min = torch.tensor(self.cfg.joint_lower_limits, device=self.device, dtype=q_cmd_6.dtype).unsqueeze(0)
+            q_max = torch.tensor(self.cfg.joint_upper_limits, device=self.device, dtype=q_cmd_6.dtype).unsqueeze(0)
+            q_cmd_6 = torch.clamp(q_cmd_6, q_min, q_max)
 
-            # Case A: 표적이 없거나 허공이거나 기능이 꺼졌을 때 -> 수직 강제 고정
-            if vertical_mask.any():
-                self.target_quat_cmd[vertical_mask] = self.vertical_quat_tensor.repeat(vertical_mask.sum(), 1)
+        q_cmd_all = q_all.clone()
+        q_cmd_all[:, :6] = q_cmd_6
+        q_cmd_all = torch.where(torch.isnan(q_cmd_all), q_all, q_cmd_all)
 
-            # Case B: 표적이 감지되고 닿아있을 때 -> 적응형 회전 제어 (기울기 보정)
-            if adaptive_mask.any():
-                K_rot = self.cfg.K_rot 
-                delta_rx = -F_ext_3d_all[adaptive_mask, 1] * K_rot * self.dt 
-                delta_ry =  F_ext_3d_all[adaptive_mask, 0] * K_rot * self.dt 
-                
-                delta_quat = torch.zeros_like(self.target_quat_cmd[adaptive_mask])
-                delta_quat[:, 0] = 1.0
-                delta_quat[:, 1] = delta_rx * 0.5
-                delta_quat[:, 2] = delta_ry * 0.5
-                delta_quat = delta_quat / torch.linalg.norm(delta_quat, dim=-1, keepdim=True)
+        self.robot.set_joint_position_target(q_cmd_all)
 
-                q1_w, q1_xyz = self.target_quat_cmd[adaptive_mask, 0:1], self.target_quat_cmd[adaptive_mask, 1:]
-                q2_w, q2_xyz = delta_quat[:, 0:1], delta_quat[:, 1:]
-                
-                new_w = q1_w * q2_w - torch.sum(q1_xyz * q2_xyz, dim=-1, keepdim=True)
-                new_xyz = q1_w * q2_xyz + q2_w * q1_xyz + torch.cross(q1_xyz, q2_xyz, dim=-1)
-                
-                self.target_quat_cmd[adaptive_mask] = torch.cat([new_w, new_xyz], dim=-1)
+        self._update_waypoint_progress(pos_err_norm, rot_err_norm)
+        self._debug_print_status(ee_pos, ee_quat, pos_err_norm, rot_err_norm)
 
-        # IK solve
-        pose = torch.cat([self.target_pos_cmd, self.target_quat_cmd], dim=-1)
-        self.ik_controller.set_command(pose)
+    def _update_waypoint_progress(self, pos_err_norm: torch.Tensor, rot_err_norm: torch.Tensor):
+        reached = (pos_err_norm < self.cfg.waypoint_pos_tol) & (rot_err_norm < self.cfg.waypoint_rot_tol)
+        timeout = self.steps_at_waypoint >= self.cfg.max_steps_per_waypoint
+        advance = (reached | timeout) & (~self.path_done)
 
-        q_cmd = self.ik_controller.compute(ee_pos, ee_quat, jacobian, q)
-        q_cmd = torch.where(torch.isnan(q_cmd), q, q_cmd)
+        next_index = self.path_index + advance.long()
+        done_now = next_index >= (self.traj_length - 1)
 
-        self.robot.set_joint_position_target(q_cmd)
+        self.path_index = torch.clamp(next_index, max=self.traj_length - 1)
+        self.path_done = self.path_done | done_now
 
-# ==========================================
-# Action Configuration
-# ==========================================
+        self.steps_at_waypoint = torch.where(
+            advance,
+            torch.zeros_like(self.steps_at_waypoint),
+            self.steps_at_waypoint + 1,
+        )
+
+    def _debug_print_status(self, ee_pos, ee_quat, pos_err_norm, rot_err_norm):
+        if not self.cfg.enable_debug_print:
+            return
+
+        global_step = int(self._env.episode_length_buf[0].item())
+        if self.cfg.debug_print_interval > 0 and (global_step % self.cfg.debug_print_interval != 0):
+            return
+
+        env_id = min(self.cfg.debug_env_id, self._num_envs_local - 1)
+
+        target_xyz = self.des_pos[env_id].detach().cpu()
+        target_rpy = quat_to_rpy(self.des_quat[env_id:env_id + 1]).squeeze(0).detach().cpu()
+
+        current_xyz = ee_pos[env_id].detach().cpu()
+        current_rpy = quat_to_rpy(ee_quat[env_id:env_id + 1]).squeeze(0).detach().cpu()
+
+        print("\n" + "=" * 90)
+        print(
+            f"[Action Debug] env={env_id} | step={global_step} | "
+            f"h5_index={int(self.path_index[env_id].item())}/{self.traj_length - 1} | "
+            f"waypoint_steps={int(self.steps_at_waypoint[env_id].item())} | "
+            f"done={bool(self.path_done[env_id].item())}"
+        )
+        print(
+            "[Target Pose ] "
+            f"x={target_xyz[0]: .6f}, y={target_xyz[1]: .6f}, z={target_xyz[2]: .6f}, "
+            f"r={target_rpy[0]: .6f}, p={target_rpy[1]: .6f}, yw={target_rpy[2]: .6f}"
+        )
+        print(
+            "[Current Pose] "
+            f"x={current_xyz[0]: .6f}, y={current_xyz[1]: .6f}, z={current_xyz[2]: .6f}, "
+            f"r={current_rpy[0]: .6f}, p={current_rpy[1]: .6f}, yw={current_rpy[2]: .6f}"
+        )
+        print(
+            f"[Error       ] pos_norm={float(pos_err_norm[env_id].item()): .6f}, "
+            f"rot_norm={float(rot_err_norm[env_id].item()): .6f}"
+        )
+        print("=" * 90)
+
+    def _solve_dls_ik(self, J: torch.Tensor, e: torch.Tensor, damping: float) -> torch.Tensor:
+        n = J.shape[0]
+        I = torch.eye(6, device=J.device, dtype=J.dtype).unsqueeze(0).repeat(n, 1, 1)
+        JJt = J @ J.transpose(1, 2)
+        A = JJt + (damping ** 2) * I
+        e_col = e.unsqueeze(-1)
+        x = torch.linalg.solve(A, e_col)
+        dq = (J.transpose(1, 2) @ x).squeeze(-1)
+        return dq
+
+
 @configclass
 class AdmittanceControlActionCfg(ActionTermCfg):
     class_type: type = AdmittanceControlAction
-    asset_name: str = "robot"
-    body_name: str = "wrist_3_link" 
-    
-    # -----------------------------------------------------------
-    # ✅ [26.03.28. 추가] 적응형 제어 스위치
-    # USD 표적이 없을 때는 False, 나중에 추가하시면 True로 바꾸세요!
-    # -----------------------------------------------------------
-    enable_adaptive_orientation: bool = False 
-    
-    hdf5_file_path: str = "" 
-    workspace_margin: float = 0.05
-    
-    vertical_quat: tuple = (0.0, 1.0, 0.0, 0.0) 
-    target_force: float = 15.0
-    M: float = 1.0
-    D: float = 60.0
-    K_rot: float = 0.005
-    z_min: float = 0.1 
-    stage1_timeout: float = 2.0
 
-    workspace_x_limits: tuple = (0.2, 0.8) 
-    workspace_y_limits: tuple = (-0.5, 0.5) 
-    action_scale: float = 0.04  
-    max_xy_vel: float = 0.20    # ✅ [26.03.28. 수정] 기존 0.06 -> 0.20 (초당 최대 20cm 이동 허용)
+    asset_name: str = "robot"
+    body_name: str = "spindle_link"
+
+    hdf5_file_path: str = ""
+    position_dataset_key: str = "target_positions"
+
+    action_dim: int = 2
+
+    dls_lambda: float = 0.30
+    ik_step_size: float = 0.15
+    max_dq: float = 0.02
+    jacobian_body_offset: int = 1
+
+    max_pos_err: float = 0.01
+    max_rot_err: float = 0.10
+
+    waypoint_stride: int = 50
+    waypoint_pos_tol: float = 0.005
+    waypoint_rot_tol: float = 0.08
+    max_steps_per_waypoint: int = 60
+
+    enable_debug_print: bool = True
+    debug_print_interval: int = 10
+    debug_env_id: int = 0
+
+    joint_lower_limits: tuple | None = (
+        -2.0 * math.pi,
+        -2.0 * math.pi,
+        -math.pi,
+        -2.0 * math.pi,
+        -2.0 * math.pi,
+        -2.0 * math.pi,
+    )
+    joint_upper_limits: tuple | None = (
+        2.0 * math.pi,
+        2.0 * math.pi,
+        math.pi,
+        2.0 * math.pi,
+        2.0 * math.pi,
+        2.0 * math.pi,
+    )

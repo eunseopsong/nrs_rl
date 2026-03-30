@@ -1,19 +1,35 @@
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Configuration for UR10e with a spindle tool (local USD scene).
+"""Configuration for UR10e with spindle tool (local USD scene).
 
-- Loads the local USD: /home/eunseop/isaac/isaac_save/ur10e_w_spindle.usd
-- Spawns only the articulation prim: /World/ur10e_w_spindle_robot
-- EE (tool) frame: wrist_3_link
-- Two variants: default PD and HIGH_PD (task-space / diff-IK friendly)
+- Loads local USD:
+    /home/eunseop/isaac/isaac_save/ur10e_only_v2.usd
+- Uses the articulation defined inside the USD
+- End-effector frame for downstream control:
+    spindle_link
+
+USD structure (updated)
+-----------------------
+Expected arm joint chain:
+    shoulder_pan_joint
+    shoulder_lift_joint
+    elbow_joint
+    wrist_1_joint
+    wrist_2_joint
+    wrist_3_joint
+
+Expected link chain near the end-effector:
+    wrist_3_link
+      └── tool0_to_spindle (fixed joint)
+            └── spindle_link
 
 Notes
 -----
-* If your USD contains a full stage (PhysicsScene, lights, etc.), setting
-  `prim_path` ensures only the robot prim is imported as the articulation.
-* If joint names in the USD differ, update `UR10E_HOME_DICT` and
-  `UR10E_ARM_JOINTS` accordingly.
+* Since the USD now explicitly includes `spindle_link`, downstream action /
+  observation / IK code should use `spindle_link` as the EE frame instead of
+  `wrist_3_link`.
+* The actuator still controls only the 6 UR10e arm joints.
 """
 
 import isaaclab.sim as sim_utils
@@ -21,38 +37,14 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
 # -----------------------------------------------------------------------------
-# User paths and prims
+# User paths and EE frame
 # -----------------------------------------------------------------------------
-UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_only.usd"
-EE_FRAME_NAME = "wrist_3_link"        # end-effector frame in your USD
+UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_only_v2.usd"
+EE_FRAME_NAME = "spindle_link"
 
 # -----------------------------------------------------------------------------
 # Home pose (rad)
 # -----------------------------------------------------------------------------
-# UR10E_HOME_DICT = {
-#     "shoulder_pan_joint": 0.0,
-#     "shoulder_lift_joint": -1.57079632679,
-#     "elbow_joint": -1.57079632679,
-#     "wrist_1_joint": -1.57079632679,
-#     "wrist_2_joint": 1.57079632679,
-#     "wrist_3_joint": 0.0,
-# }
-# UR10E_HOME_DICT = {
-#     "shoulder_pan_joint": 0.373993,
-#     "shoulder_lift_joint": -1.066343,
-#     "elbow_joint": -2.472206,
-#     "wrist_1_joint": -1.460399,
-#     "wrist_2_joint": 1.679353,
-#     "wrist_3_joint": 1.124695,
-# }
-# UR10E_HOME_DICT = {
-#     "shoulder_pan_joint": 0.673993,
-#     "shoulder_lift_joint": -1.266343,
-#     "elbow_joint": -2.472206,
-#     "wrist_1_joint": -1.160399,
-#     "wrist_2_joint": 1.479353,
-#     "wrist_3_joint": 1.324695,
-# }
 UR10E_HOME_DICT = {
     "shoulder_pan_joint": -0.5939,
     "shoulder_lift_joint": -1.2795,
@@ -61,11 +53,11 @@ UR10E_HOME_DICT = {
     "wrist_2_joint": 1.5708,
     "wrist_3_joint": 0.1915,
 }
-# v20
+# v20 baseline
 
-
-
-# Actuator joint list (exact names expected in the USD)
+# -----------------------------------------------------------------------------
+# Controlled arm joints (must exactly match USD joint names)
+# -----------------------------------------------------------------------------
 UR10E_ARM_JOINTS = [
     "shoulder_pan_joint",
     "shoulder_lift_joint",
@@ -76,7 +68,7 @@ UR10E_ARM_JOINTS = [
 ]
 
 # -----------------------------------------------------------------------------
-# Base configuration
+# Base articulation configuration
 # -----------------------------------------------------------------------------
 UR10E_W_SPINDLE_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
@@ -91,13 +83,13 @@ UR10E_W_SPINDLE_CFG = ArticulationCfg(
             solver_position_iteration_count=8,
             solver_velocity_iteration_count=0,
         ),
+        # Enable if needed later for more stable contact tuning
         # collision_props=sim_utils.CollisionPropertiesCfg(
-        #     contact_offset=0.005, rest_offset=0.0
+        #     contact_offset=0.005,
+        #     rest_offset=0.0,
         # ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        # 💡 [핵심] 기존 세팅(**UR10E_HOME_DICT)은 그대로 다 가져오되, 
-        # 어깨(shoulder_pan_joint) 각도만 180도 돌린 값(2.5476)으로 덮어써라!
         joint_pos=UR10E_HOME_DICT,
     ),
     actuators={
@@ -111,18 +103,18 @@ UR10E_W_SPINDLE_CFG = ArticulationCfg(
     soft_joint_pos_limit_factor=1.0,
 )
 
-# Expose EE frame name and TCP offset for downstream controllers / tasks
+# Expose EE frame name for downstream controllers / tasks
 UR10E_W_SPINDLE_CFG.ee_frame_name = EE_FRAME_NAME
 
 # -----------------------------------------------------------------------------
-# High-PD variant (helpful for task-space/diff-IK style control)
+# High-PD variant
+# Helpful for task-space / differential IK style control
 # -----------------------------------------------------------------------------
 UR10E_W_SPINDLE_HIGH_PD_CFG = UR10E_W_SPINDLE_CFG.copy()
 UR10E_W_SPINDLE_HIGH_PD_CFG.spawn.rigid_props.disable_gravity = True
 UR10E_W_SPINDLE_HIGH_PD_CFG.actuators["ur10e_arm"].stiffness = 400.0
 UR10E_W_SPINDLE_HIGH_PD_CFG.actuators["ur10e_arm"].damping = 60.0
 UR10E_W_SPINDLE_HIGH_PD_CFG.ee_frame_name = EE_FRAME_NAME
-
 
 # -----------------------------------------------------------------------------
 # Exports
