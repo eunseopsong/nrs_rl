@@ -25,7 +25,6 @@ else:
 # ------------------------------------------------------
 # Global buffers
 # ------------------------------------------------------
-_hdf5_joints: torch.Tensor | None = None
 _hdf5_positions: torch.Tensor | None = None
 _step_idx = 0
 
@@ -98,31 +97,6 @@ def get_ee_pose(env: "ManagerBasedRLEnv", asset_name: str = "robot") -> torch.Te
 
 
 # ------------------------------------------------------
-# HDF5 loader: Joints
-# ------------------------------------------------------
-def load_hdf5_joints(
-    env: ManagerBasedRLEnv,
-    env_ids,
-    file_path: str,
-    dataset_key: str = "target_joints",
-):
-    """Load HDF5 trajectory (joint targets)."""
-    global _hdf5_joints, _step_idx
-    import h5py
-
-    with h5py.File(file_path, "r") as f:
-        if dataset_key not in f:
-            raise KeyError(
-                f"[ERROR] HDF5 (joints): '{dataset_key}' not found. Available keys: {list(f.keys())}"
-            )
-        data = f[dataset_key][:]  # [T, D]
-
-    _hdf5_joints = torch.tensor(data, dtype=torch.float32, device=env.device)
-    _step_idx = 0
-    print(f"[INFO] Loaded HDF5 joints of shape {_hdf5_joints.shape} from {file_path}")
-
-
-# ------------------------------------------------------
 # HDF5 loader: Positions
 # ------------------------------------------------------
 def load_hdf5_positions(
@@ -145,32 +119,6 @@ def load_hdf5_positions(
     _hdf5_positions = torch.tensor(data, dtype=torch.float32, device=env.device)
     _step_idx = 0
     print(f"[INFO] Loaded HDF5 positions of shape {_hdf5_positions.shape} from {file_path}")
-
-
-# ------------------------------------------------------
-# Observation: target joints (horizon-based)
-# ------------------------------------------------------
-def get_hdf5_target_joints(env: ManagerBasedRLEnv, horizon: int = 5) -> torch.Tensor:
-    """Return future joint targets flattened: (N, horizon*D)."""
-    global _hdf5_joints
-
-    if _hdf5_joints is None:
-        D = 6  # you're using first 6 joints for control/reward
-        return torch.zeros((env.num_envs, horizon * D), device=env.device, dtype=torch.float32)
-
-    T, D = _hdf5_joints.shape
-
-    # episode progress -> map into [0, T)
-    step = int(env.episode_length_buf[0].item())
-    E = int(env.max_episode_length)
-    idx = min(int((step / max(E, 1)) * T), T - 1)
-
-    future_idx = torch.arange(idx, idx + horizon, device=_hdf5_joints.device)
-    future_idx = torch.clamp(future_idx, max=T - 1)
-
-    future_targets = _hdf5_joints[future_idx].reshape(1, horizon * D)
-    return future_targets.repeat(env.num_envs, 1)
-
 
 # ------------------------------------------------------
 # Observation: target positions (horizon-based)

@@ -168,7 +168,7 @@ class TerminationsCfg:
 
 @configclass
 class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
-    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=1, env_spacing=2.5)
+    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=128, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
