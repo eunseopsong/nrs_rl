@@ -28,6 +28,9 @@ local_obs = importlib.import_module(
 local_action = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.mdp.action"
 )
+local_terms = importlib.import_module(
+    "nrs_rl.tasks.manager_based.nrs_rl.mdp.terminations"
+)
 
 from nrs_rl.tasks.manager_based.nrs_rl.assets.assets.robots.ur10e_w_spindle import (
     UR10E_W_SPINDLE_HIGH_PD_CFG,
@@ -79,21 +82,9 @@ class ActionsCfg:
         waypoint_rot_tol=0.20,
         max_steps_per_waypoint=120,
 
-        # spindle / TCP 길이 보정
-        # 예전 FK/H5 기준 spindle보다 현재 spindle이 200 mm 짧다면 0.20
+        # spindle / TCP 보정
         tcp_length_offset_m=0.20,
-
-        # 축 후보:
-        # "local_x_pos", "local_x_neg",
-        # "local_y_pos", "local_y_neg",
-        # "local_z_pos", "local_z_neg"
-        #
-        # 먼저 local_z_neg 로 시작해서,
-        # debug에서 Target/Current 방향이 반대로 가면
-        # local_z_pos 또는 local_x_pos 쪽으로 바꿔가며 확인
         tcp_offset_axis="local_z_neg",
-
-        # world z 미세 보정이 필요하면 추가
         z_target_offset=0.0,
 
         # debug
@@ -166,7 +157,13 @@ class RewardsCfg:
 
 @configclass
 class TerminationsCfg:
-    time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    trajectory_finished = DoneTerm(
+        func=local_terms.trajectory_finished,
+        params={"action_term_name": "arm_action"},
+    )
+
+    # 필요하면 안전장치로 매우 큰 timeout 하나 남겨도 됨
+    # safety_time_out = DoneTerm(func=mdp.time_out, time_out=True)
 
 
 @configclass
@@ -181,9 +178,11 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 2
         self.sim.render_interval = self.decimation
-        self.episode_length_s = 120.0
-        self.viewer.eye = (3.5, 3.5, 3.5)
 
+        # 이제 episode 종료는 h5 완료 기준이라, 시간은 넉넉히 잡아도 됨
+        self.episode_length_s = 9999.0
+
+        self.viewer.eye = (3.5, 3.5, 3.5)
         self.sim.dt = 1.0 / 60.0
 
         self.sim.physx.gpu_max_rigid_patch_count = 1024 * 1024 * 16
