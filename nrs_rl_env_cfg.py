@@ -136,6 +136,16 @@ class ObservationsCfg:
             params={"horizon": 5},
         )
 
+        ft_6axis = ObsTerm(
+            func=local_obs.get_6axis_ft_fixed_joint,
+            params={
+                "asset_name": "robot",
+                "fixed_joint_name": "tool0_to_spindle",
+                "joint_prim_relpath": "joints",
+                "verbose": False,
+            },
+        )
+
         def __post_init__(self):
             self.enable_corruption = True
             self.concatenate_terms = True
