@@ -305,12 +305,32 @@ def get_6axis_ft_fixed_joint(
         robot = cache["robot"]
         child_link_index = cache["child_link_index"]
 
-        # 핵심: root_physx_view가 아니라 robot wrapper에서 직접 읽기
-        if hasattr(robot, "get_measured_joint_forces"):
+        physx_view = getattr(robot, "root_physx_view", None)
+        if physx_view is None:
+            raise RuntimeError(
+                "[get_6axis_ft_fixed_joint] robot.root_physx_view is missing"
+            )
+
+        forces = None
+
+        # 1) Isaac Lab / PhysX tensor path (recommended here)
+        if hasattr(physx_view, "get_link_incoming_joint_force"):
+            forces = physx_view.get_link_incoming_joint_force()
+
+        # 2) fallback: robot wrapper API
+        elif hasattr(robot, "get_measured_joint_forces"):
             forces = robot.get_measured_joint_forces()
+
+        # 3) fallback: physx view API
+        elif hasattr(physx_view, "get_measured_joint_forces"):
+            forces = physx_view.get_measured_joint_forces()
+
         else:
             raise RuntimeError(
-                "[get_6axis_ft_fixed_joint] robot has no get_measured_joint_forces()"
+                "[get_6axis_ft_fixed_joint] No available FT API. "
+                "Checked: root_physx_view.get_link_incoming_joint_force(), "
+                "robot.get_measured_joint_forces(), "
+                "root_physx_view.get_measured_joint_forces()"
             )
 
         if forces is None:
@@ -321,11 +341,13 @@ def get_6axis_ft_fixed_joint(
         else:
             forces = forces.to(device=env.device, dtype=torch.float32)
 
+        # expected shapes:
+        #   (num_envs, num_links, 6)   <- most likely for get_link_incoming_joint_force()
+        #   (num_envs, num_joints, 6)  <- possible fallback API
+        #   (num_links, 6)             <- single-env
         if forces.ndim == 2:
-            # single env
             wrench = forces[child_link_index, :].unsqueeze(0)
         elif forces.ndim == 3:
-            # multi env
             wrench = forces[:, child_link_index, :]
         else:
             raise RuntimeError(
@@ -336,6 +358,9 @@ def get_6axis_ft_fixed_joint(
             raise RuntimeError(
                 f"[get_6axis_ft_fixed_joint] Expected last dim=6, got {tuple(wrench.shape)}"
             )
+
+        # debug cache update
+        local_debug.print_ft_sensor_debug(int(env.common_step_counter), wrench[0])
 
         return wrench
 
