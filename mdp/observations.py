@@ -201,13 +201,18 @@ def _resolve_env0_robot_prim_path(robot) -> str:
     return prim_path
 
 
-def _find_existing_joint_prim_path(stage, robot_prim_path_env0: str, joint_prim_relpath: str, fixed_joint_name: str) -> str:
+def _find_existing_joint_prim_path(
+    stage,
+    robot_prim_path_env0: str,
+    joint_prim_relpath: str,
+    fixed_joint_name: str,
+) -> str:
     """
     Try multiple possible prim layouts.
-    Your current USD appears to use:
-      /World/envs/env_0/Robot/Robot/joints/tool0_to_spindle
-    but some layouts use:
+
+    Common candidates:
       /World/envs/env_0/Robot/joints/tool0_to_spindle
+      /World/envs/env_0/Robot/Robot/joints/tool0_to_spindle
     """
     candidates = [
         f"{robot_prim_path_env0}/{joint_prim_relpath}/{fixed_joint_name}",
@@ -318,17 +323,13 @@ def get_6axis_ft_fixed_joint(
         robot = cache["robot"]
         child_link_index = cache["child_link_index"]
 
-        if not hasattr(robot, "root_physx_view") or robot.root_physx_view is None:
+        # 핵심: root_physx_view가 아니라 robot wrapper에서 직접 읽기
+        if hasattr(robot, "get_measured_joint_forces"):
+            forces = robot.get_measured_joint_forces()
+        else:
             raise RuntimeError(
-                "[get_6axis_ft_fixed_joint] robot.root_physx_view is not available."
+                "[get_6axis_ft_fixed_joint] robot has no get_measured_joint_forces()"
             )
-
-        if not hasattr(robot.root_physx_view, "get_measured_joint_forces"):
-            raise RuntimeError(
-                "[get_6axis_ft_fixed_joint] root_physx_view has no get_measured_joint_forces()."
-            )
-
-        forces = robot.root_physx_view.get_measured_joint_forces()
 
         if forces is None:
             return torch.zeros((env.num_envs, 6), device=env.device, dtype=torch.float32)
@@ -339,10 +340,10 @@ def get_6axis_ft_fixed_joint(
             forces = forces.to(device=env.device, dtype=torch.float32)
 
         if forces.ndim == 2:
-            # single env: [num_links, 6]
+            # single env
             wrench = forces[child_link_index, :].unsqueeze(0)
         elif forces.ndim == 3:
-            # multi env: [num_envs, num_links, 6]
+            # multi env
             wrench = forces[:, child_link_index, :]
         else:
             raise RuntimeError(
