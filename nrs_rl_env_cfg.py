@@ -30,9 +30,8 @@ local_action = importlib.import_module(
 local_terms = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.mdp.terminations"
 )
-
-local_debug = importlib.import_module(
-    "nrs_rl.tasks.manager_based.nrs_rl.utils.debug"
+local_ft_sensor = importlib.import_module(
+    "nrs_rl.tasks.manager_based.nrs_rl.assets.assets.sensors.six_axis_ft_sensor"
 )
 
 from nrs_rl.tasks.manager_based.nrs_rl.assets.assets.robots.ur10e_w_spindle import (
@@ -66,6 +65,7 @@ class SpindleSceneCfg(InteractiveSceneCfg):
         ),
     )
 
+
 @configclass
 class ActionsCfg:
     arm_action = local_action.AdmittanceControlActionCfg(
@@ -88,7 +88,7 @@ class ActionsCfg:
         waypoint_rot_tol=0.20,
         max_steps_per_waypoint=120,
 
-        # spindle / TCP 보정
+        # spindle / TCP compensation
         tcp_length_offset_m=0.20,
         tcp_offset_axis="local_z_neg",
         z_target_offset=0.0,
@@ -127,7 +127,7 @@ class ObservationCfg:
         )
 
         ft_6axis = ObsTerm(
-            func=local_obs.get_6axis_ft_fixed_joint,
+            func=local_ft_sensor.get_6axis_ft_fixed_joint,
             params={
                 "asset_name": "robot",
                 "fixed_joint_name": "tool0_to_spindle",
@@ -163,7 +163,6 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-
     pass
 
 
@@ -191,7 +190,7 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
         self.decimation = 2
         self.sim.render_interval = self.decimation
 
-        # 이제 episode 종료는 h5 완료 기준이라, 시간은 넉넉히 잡아도 됨
+        # episode 종료는 h5 완료 기준
         self.episode_length_s = 9999.0
 
         self.viewer.eye = (3.5, 3.5, 3.5)
