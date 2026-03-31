@@ -13,6 +13,8 @@ import torch
 import omni.usd
 from pxr import UsdPhysics
 
+from nrs_rl.tasks.manager_based.nrs_rl.mdp import debug as local_debug
+
 # ------------------------------------------------------
 # ✅ Conditional import (avoid double registration)
 # ------------------------------------------------------
@@ -118,7 +120,7 @@ def load_hdf5_positions(
 
     _hdf5_positions = torch.tensor(data, dtype=torch.float32, device=env.device)
     _step_idx = 0
-    print(f"[INFO] Loaded HDF5 positions of shape {_hdf5_positions.shape} from {file_path}")
+    local_debug.print_hdf5_positions_loaded(_hdf5_positions.shape, file_path)
 
 # ------------------------------------------------------
 # Observation: target positions (horizon-based)
@@ -146,28 +148,6 @@ def get_hdf5_target_positions(env: ManagerBasedRLEnv, horizon: int = 5) -> torch
 # ------------------------------------------------------
 # ✅ Observation: Contact Sensor Forces
 # ------------------------------------------------------
-def get_contact_forces(env: ManagerBasedRLEnv, sensor_name: str = "contact_forces") -> torch.Tensor:
-    """
-    Mean contact wrench [Fx, Fy, Fz, 0, 0, 0]
-    - Uses ContactSensorCfg output: sensor.data.net_forces_w
-    """
-    if sensor_name not in env.scene.sensors:
-        raise KeyError(f"[ERROR] Contact sensor '{sensor_name}' not found in scene.sensors.")
-
-    sensor = env.scene.sensors[sensor_name]
-    forces_w = sensor.data.net_forces_w  # (N, B, 3) typically
-    mean_force = torch.mean(forces_w, dim=1)  # (N,3)
-
-    zeros_torque = torch.zeros_like(mean_force)
-    contact_wrench = torch.cat([mean_force, zeros_torque], dim=-1)  # (N,6)
-
-    step = int(env.common_step_counter)
-    if step % 100 == 0:
-        fx, fy, fz = mean_force[0].detach().cpu().tolist()
-        print(f"[ContactSensor DEBUG] Step {step}: Fx={fx:.3f}, Fy={fy:.3f}, Fz={fz:.3f}")
-
-    return contact_wrench
-
 
 def _to_scalar_index(idx_obj):
     if isinstance(idx_obj, int):
@@ -289,10 +269,12 @@ def _init_fixed_joint_ft_cache(
     env._ft6_fixed_cache[cache_key] = cache
 
     if verbose:
-        print(f"[get_6axis_ft_fixed_joint] robot_prim_path_env0 : {robot_prim_path_env0}")
-        print(f"[get_6axis_ft_fixed_joint] joint_prim_path      : {joint_prim_path}")
-        print(f"[get_6axis_ft_fixed_joint] child_link_name     : {child_link_name}")
-        print(f"[get_6axis_ft_fixed_joint] child_link_index    : {child_link_index}")
+        local_debug.print_fixed_joint_ft_cache(
+            robot_prim_path_env0=robot_prim_path_env0,
+            joint_prim_path=joint_prim_path,
+            child_link_name=child_link_name,
+            child_link_index=child_link_index,
+        )
 
     return cache
 
@@ -358,7 +340,7 @@ def get_6axis_ft_fixed_joint(
         return wrench
 
     except Exception as e:
-        print(f"[get_6axis_ft_fixed_joint] failed: {e}")
+        local_debug.print_fixed_joint_ft_failed(e)
         return torch.zeros((env.num_envs, 6), device=env.device, dtype=torch.float32)
 
 # ------------------------------------------------------
@@ -380,8 +362,7 @@ def get_camera_distance(env: ManagerBasedRLEnv, sensor_name: str = "camera", deb
     mean_distance = torch.nanmean(valid_data.view(valid_data.shape[0], -1), dim=1).unsqueeze(1)
 
     if int(env.common_step_counter) % int(debug_interval) == 0:
-        md_cpu = mean_distance[0].detach().cpu().item()
-        print(f"[Step {int(env.common_step_counter)}] Mean camera distance: {md_cpu:.4f} m")
+        local_debug.print_camera_distance(int(env.common_step_counter), mean_distance[0])
 
     return mean_distance
 
@@ -398,5 +379,5 @@ def get_camera_normals(env: ManagerBasedRLEnv, sensor_name: str = "camera") -> t
 
     normals_mean = normals.mean(dim=(1, 2))  # (N,3)
     if int(env.common_step_counter) % 100 == 0:
-        print(f"[Camera DEBUG] Step {int(env.common_step_counter)}: Mean surface normal = {normals_mean[0].detach().cpu().numpy()}")
+        local_debug.print_camera_normals(int(env.common_step_counter), normals_mean[0])
     return normals_mean

@@ -20,11 +20,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# ✅ nrs_rl 구조: 같은 mdp 폴더의 observations.py
-from .observations import (
+# ✅ nrs_rl 구조: 같은 mdp 폴더의 observation.py
+from .observation import (
     get_hdf5_target_positions,
     get_ee_pose,
-    get_contact_forces,  # ✅ [26.02.24. 추가] 힘 센서 데이터 가져오기
 )
 
 # -----------------------------------------------------------
@@ -128,93 +127,3 @@ def save_episode_plots_position(step: int):
     _position_tracking_history.clear()
     _position_reward_history.clear()
     _episode_counter_position += 1
-
-# -----------------------------------------------------------
-# [26.03.08 추가] (5) Off-Surface Penalty (표면 이탈 페널티)
-# 목적: 로봇이 연마 대상을 벗어나 허공에서 헛스윙하는 것을 강력히 방지합니다.
-# -----------------------------------------------------------
-def off_surface_penalty(env: "ManagerBasedRLEnv", contact_threshold: float = 1.0):
-    """
-    힘 센서의 측정값이 contact_threshold(기본 1.0N)보다 낮으면 
-    로봇이 표면을 이탈한 것으로 간주하고 강력한 마이너스 보상을 줍니다.
-    단, 에피소드 시작 직후(Warm-up 기간)에는 페널티를 주지 않습니다.
-    """
-    # 1. 센서에서 힘 데이터 가져오기 (N, 3)
-    contact_wrench = get_contact_forces(env, sensor_name="contact_forces")
-    forces = contact_wrench[:, :3]
-    force_magnitude = torch.norm(forces, dim=-1)
-    
-    # 2. 힘이 임계치(1.0N) 미만인지 확인 (True/False 텐서 생성)
-    is_off_surface = force_magnitude < contact_threshold
-    
-    # 3. [수정] 에피소드 초기 Warm-up 처리 (예: 5스텝 미만은 무시)
-    # env.episode_length_buf는 각 환경(env)별로 리셋 후 몇 스텝이 지났는지 기록된 텐서입니다.
-    warmup_steps = 5 
-    is_warmup = env.episode_length_buf < warmup_steps
-    
-    # 4. 페널티 계산: 이탈했더라도 Warm-up 기간 중이면 0.0을 줌
-    penalty = torch.where(
-        is_off_surface & (~is_warmup), # 이탈했고, 동시에 웜업 기간이 아닐 때만!
-        torch.tensor(-1.0, device=env.device), 
-        torch.tensor(0.0, device=env.device)
-    )
-    
-    # 5. 콘솔 확인용 (옵션)
-    step = int(env.common_step_counter)
-    if step > 0 and step % 100 == 0:
-        # 웜업을 제외하고 실제로 이탈 중인 개수만 카운트
-        actual_off_count = (is_off_surface & (~is_warmup)).sum().item()
-        if actual_off_count > 0:
-            print(f"⚠️ [경고] {actual_off_count}개의 환경이 표면을 이탈했습니다! (Warm-up 제외)")
-
-    return penalty
-
-# -----------------------------------------------------------
-# [26.03.28 수정] (6) Perfect Polishing Quality Reward (완벽 연마 종합 보상 - 수직 정렬 통합)
-# 목적: 1) 표면에 닿아있고(힘>3N), 2) 경로(X,Y)를 정확히 따르며, 3) 수직(Roll, Pitch)을 완벽히 유지할 때만 극대화된 보상을 줌.
-# 기존 'Perpendicular Alignment Reward' 로직을 완전히 흡수하여 연산 낭비를 없앴습니다.
-# -----------------------------------------------------------
-def perfect_polishing_quality_reward(env: "ManagerBasedRLEnv"):
-    device = env.device
-    
-    # 1. 데이터 추출
-    ee_pose = get_ee_pose(env)
-    fut = get_hdf5_target_positions(env, horizon=2)
-    if fut.ndim == 3:
-        fut = fut.squeeze(1)
-    target_next = fut[:, 6:12]
-    
-    # [26.03.28 수정] 목표 자세 강제화: HDF5에 비스듬한 데이터가 섞여 있을 가능성을 배제하기 위해
-    # 목표 Roll/Pitch를 강제로 0.0(완전 수직)으로 고정하거나, 목표값과의 오차를 매우 엄격하게 잡습니다.
-    # 만약 절대적인 수직을 원하신다면 target_rp를 직접 0으로 세팅할 수도 있습니다.
-    ee_rp = ee_pose[:, 3:5]
-    target_rp = target_next[:, 3:5] # 혹은 torch.zeros_like(ee_rp) 로 테스트 가능
-    
-    # 2. 오차 계산
-    pos_error = torch.norm(ee_pose[:, :2] - target_next[:, :2], dim=-1)
-    rp_error = angle_diff_torch(ee_rp, target_rp)
-    rp_error_magnitude = torch.norm(rp_error, dim=-1)
-    
-    # 3. 보상 설계 (Exponential Kernel 강화)
-    # [26.03.28 수정] 위치 보상보다 수직 보상의 k값(민감도)을 높여 조금만 기울어져도 점수가 폭락하게 만듭니다.
-    r_pos = torch.exp(-15.0 * torch.square(pos_error)) 
-    r_perp = torch.exp(-40.0 * torch.square(rp_error_magnitude)) # 기존 15.0 -> 40.0 (강력한 수직 강제)
-    
-    # 4. 접촉 판단
-    contact_wrench = get_contact_forces(env, sensor_name="contact_forces")
-    force_magnitude = torch.norm(contact_wrench[:, :3], dim=-1)
-    is_in_contact = force_magnitude > 3.0
-    
-    # 5. 최종 보상 (곱연산)
-    # 수직이 맞지 않으면(r_perp가 낮으면) 위치 점수가 아무리 좋아도 전체 보상이 0에 수렴합니다.
-    quality_score = r_pos * r_perp
-    final_reward = torch.where(is_in_contact, quality_score, torch.zeros_like(quality_score))
-    
-    # 모니터링 로그 추가
-    step = int(env.common_step_counter)
-    if step % 100 == 0:
-        print(f"📐 [Alignment Check] Pitch/Roll Error: {rp_error_magnitude.mean():.4f} rad")
-        if rp_error_magnitude.mean() > 0.05:
-            print("⚠️ [경고] 로봇이 비스듬합니다! 수직 정렬 보상이 더 필요합니다.")
-
-    return final_reward

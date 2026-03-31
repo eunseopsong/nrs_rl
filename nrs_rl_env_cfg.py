@@ -23,10 +23,13 @@ from isaaclab.sensors import ContactSensorCfg
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
 
 local_obs = importlib.import_module(
-    "nrs_rl.tasks.manager_based.nrs_rl.mdp.observations"
+    "nrs_rl.tasks.manager_based.nrs_rl.mdp.observation"
 )
 local_action = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.mdp.action"
+)
+local_debug = importlib.import_module(
+    "nrs_rl.tasks.manager_based.nrs_rl.mdp.debug"
 )
 local_terms = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.mdp.terminations"
@@ -106,7 +109,7 @@ class ActionsCfg:
 
 
 @configclass
-class ObservationsCfg:
+class ObservationCfg:
     @configclass
     class PolicyCfg(ObsGroup):
         joint_pos = ObsTerm(
@@ -126,25 +129,20 @@ class ObservationsCfg:
             params={"asset_name": "robot"},
         )
 
-        contact_forces = ObsTerm(
-            func=local_obs.get_contact_forces,
-            params={"sensor_name": "contact_forces"},
-        )
-
         target_positions = ObsTerm(
             func=local_obs.get_hdf5_target_positions,
             params={"horizon": 5},
         )
 
-        # ft_6axis = ObsTerm(
-        #     func=local_obs.get_6axis_ft_fixed_joint,
-        #     params={
-        #         "asset_name": "robot",
-        #         "fixed_joint_name": "tool0_to_spindle",
-        #         "joint_prim_relpath": "joints",
-        #         "verbose": False,
-        #     },
-        # )
+        ft_6axis = ObsTerm(
+            func=local_obs.get_6axis_ft_fixed_joint,
+            params={
+                "asset_name": "robot",
+                "fixed_joint_name": "tool0_to_spindle",
+                "joint_prim_relpath": "joints",
+                "verbose": False,
+            },
+        )
 
         def __post_init__(self):
             self.enable_corruption = True
@@ -173,7 +171,7 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    
+
     pass
 
 
@@ -191,7 +189,7 @@ class TerminationsCfg:
 @configclass
 class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
     scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=64, env_spacing=2.5)
-    observations: ObservationsCfg = ObservationsCfg()
+    observations: ObservationCfg = ObservationCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()

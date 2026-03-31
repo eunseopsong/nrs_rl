@@ -12,6 +12,8 @@ from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.utils import configclass
 
+from nrs_rl.tasks.manager_based.nrs_rl.mdp import debug as local_debug
+
 
 # =========================================================
 # Math utils
@@ -166,14 +168,18 @@ class AdmittanceControlAction(ActionTerm):
         self.des_quat = torch.zeros((self._num_envs_local, 4), device=self.device)
         self.des_quat[:, 0] = 1.0
 
-        print(f"[Action] HDF5 file: {self.cfg.hdf5_file_path}")
-        print(f"[Action] dataset key: {self.cfg.position_dataset_key}")
-        print(f"[Action] full traj shape: {tuple(traj_full.shape)}")
-        print(f"[Action] stride: {stride} -> used traj shape: {tuple(self.traj_positions.shape)}")
-        print(f"[Action] EE body_name: {self.cfg.body_name}, ee_idx: {self.ee_idx}")
-        print(f"[Action] num_envs: {self._num_envs_local}")
-        print(f"[Action] TCP length offset: {self.cfg.tcp_length_offset_m} m")
-        print(f"[Action] TCP offset axis: {self.cfg.tcp_offset_axis}")
+        local_debug.print_action_init(
+            hdf5_file_path=self.cfg.hdf5_file_path,
+            position_dataset_key=self.cfg.position_dataset_key,
+            traj_shape=tuple(traj_full.shape),
+            stride=stride,
+            used_traj_shape=tuple(self.traj_positions.shape),
+            body_name=self.cfg.body_name,
+            ee_idx=self.ee_idx,
+            num_envs=self._num_envs_local,
+            tcp_length_offset_m=self.cfg.tcp_length_offset_m,
+            tcp_offset_axis=self.cfg.tcp_offset_axis,
+        )
 
     @property
     def action_dim(self):
@@ -390,32 +396,21 @@ class AdmittanceControlAction(ActionTerm):
         current_xyz = ee_pos[env_id].detach().cpu()
         current_rpy = quat_to_rpy(ee_quat[env_id:env_id + 1]).squeeze(0).detach().cpu()
 
-        print("\n" + "=" * 100)
-        print(
-            f"[Action Debug] env={env_id} | step={global_step} | "
-            f"h5_index={int(self.path_index[env_id].item())}/{self.traj_length - 1} | "
-            f"waypoint_steps={int(self.steps_at_waypoint[env_id].item())} | "
-            f"done={bool(self.path_done[env_id].item())}"
+        local_debug.print_action_debug_status(
+            env_id=env_id,
+            global_step=global_step,
+            path_index=int(self.path_index[env_id].item()),
+            traj_length=self.traj_length,
+            waypoint_steps=int(self.steps_at_waypoint[env_id].item()),
+            path_done=bool(self.path_done[env_id].item()),
+            raw_target_xyz=raw_target_xyz,
+            target_xyz=target_xyz,
+            target_rpy=target_rpy,
+            current_xyz=current_xyz,
+            current_rpy=current_rpy,
+            pos_err_norm=float(pos_err_norm[env_id].item()),
+            rot_err_norm=float(rot_err_norm[env_id].item()),
         )
-        print(
-            "[Raw Target   ] "
-            f"x={raw_target_xyz[0]: .6f}, y={raw_target_xyz[1]: .6f}, z={raw_target_xyz[2]: .6f}"
-        )
-        print(
-            "[Target Pose  ] "
-            f"x={target_xyz[0]: .6f}, y={target_xyz[1]: .6f}, z={target_xyz[2]: .6f}, "
-            f"r={target_rpy[0]: .6f}, p={target_rpy[1]: .6f}, yw={target_rpy[2]: .6f}"
-        )
-        print(
-            "[Current Pose ] "
-            f"x={current_xyz[0]: .6f}, y={current_xyz[1]: .6f}, z={current_xyz[2]: .6f}, "
-            f"r={current_rpy[0]: .6f}, p={current_rpy[1]: .6f}, yw={current_rpy[2]: .6f}"
-        )
-        print(
-            f"[Error        ] pos_norm={float(pos_err_norm[env_id].item()): .6f}, "
-            f"rot_norm={float(rot_err_norm[env_id].item()): .6f}"
-        )
-        print("=" * 100)
 
     def _solve_dls_ik(self, J: torch.Tensor, e: torch.Tensor, damping: float) -> torch.Tensor:
         n = J.shape[0]
