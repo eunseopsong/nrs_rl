@@ -18,7 +18,6 @@ from isaaclab.managers import (
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
-from isaaclab.sensors import ContactSensorCfg
 
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
 
@@ -65,14 +64,6 @@ class SpindleSceneCfg(InteractiveSceneCfg):
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
     )
-
-    contact_forces = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/Robot/spindle_link",
-        update_period=0.0,
-        history_length=3,
-        track_air_time=False,
-    )
-
 
 @configclass
 class ActionsCfg:
