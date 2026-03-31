@@ -13,7 +13,7 @@ import torch
 import omni.usd
 from pxr import UsdPhysics
 
-from nrs_rl.tasks.manager_based.nrs_rl.mdp import debug as local_debug
+from ..utils import debug as local_debug
 
 # ------------------------------------------------------
 # ✅ Conditional import (avoid double registration)

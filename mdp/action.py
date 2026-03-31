@@ -12,7 +12,7 @@ from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.utils import configclass
 
-from nrs_rl.tasks.manager_based.nrs_rl.mdp import debug as local_debug
+from ..utils import debug as local_debug
 
 
 # =========================================================

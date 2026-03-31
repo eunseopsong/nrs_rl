@@ -27,11 +27,12 @@ local_obs = importlib.import_module(
 local_action = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.mdp.action"
 )
-local_debug = importlib.import_module(
-    "nrs_rl.tasks.manager_based.nrs_rl.mdp.debug"
-)
 local_terms = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.mdp.terminations"
+)
+
+local_debug = importlib.import_module(
+    "nrs_rl.tasks.manager_based.nrs_rl.utils.debug"
 )
 
 from nrs_rl.tasks.manager_based.nrs_rl.assets.assets.robots.ur10e_w_spindle import (
