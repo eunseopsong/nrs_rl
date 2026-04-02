@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import torch
-# [26.04.02 추가] 추가 내용: 시각화 및 데이터 저장을 위한 라이브러리 임포트
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -18,15 +17,31 @@ _last_ft_debug = {
     "wrench": None,  # [Fx, Fy, Fz, Tx, Ty, Tz]
 }
 
-# [26.04.02 추가] 추가 내용: 콘솔 출력을 위한 이전 위치 캐시 (속도 계산용)
+# =========================================================
+# Polishing metric cache
+# =========================================================
+_last_polishing_debug = {
+    "step": None,
+    "metrics": None,
+    # [0] cartesian_speed
+    # [1] Fz
+    # [2] abs_fz
+    # [3] contact_flag
+    # [4] effective_normal_force
+    # [5] removal_rate
+    # [6] cumulative_removal
+    # [7] contact_distance
+}
+
+# 콘솔 출력을 위한 이전 위치 캐시 (fallback 속도 계산용)
 _prev_xyz_for_debug = None
 
 
 def _as_float_list(x):
     if isinstance(x, torch.Tensor):
         return x.detach().cpu().reshape(-1).tolist()
-    if isinstance(x, (list, tuple)):
-        return [float(v) for v in x]
+    if isinstance(x, (list, tuple, np.ndarray)):
+        return [float(v) for v in np.array(x).reshape(-1).tolist()]
     return [float(x)]
 
 
@@ -104,9 +119,23 @@ def print_ft_sensor_debug(step: int, wrench_env0):
 
 
 # =========================================================
+# Polishing debug cache update
+# - 여기서는 print하지 않고 저장만 함
+# =========================================================
+def print_polishing_metrics_debug(step: int, metrics_env0):
+    global _last_polishing_debug
+
+    vals = _as_float_list(metrics_env0)
+    if len(vals) < 8:
+        vals = vals + [0.0] * (8 - len(vals))
+
+    _last_polishing_debug["step"] = int(step)
+    _last_polishing_debug["metrics"] = vals[:8]
+
+
+# =========================================================
 # Combined action debug print
-# - action + ft sensor 를 한 번에 출력
-# - [26.04.02 수정] 리워드, 페널티, 총점을 추가하여 출력
+# - action + ft sensor + polishing metrics 를 한 번에 출력
 # =========================================================
 def print_action_debug_status(
     env_id: int,
@@ -122,11 +151,9 @@ def print_action_debug_status(
     current_rpy,
     pos_err_norm: float,
     rot_err_norm: float,
-    # [26.04.02 추가] 추가 내용: 경로 가공량, 제어 주기, 리워드 변수 추가
     reward_total: float = 0.0,
     reward_score: float = 0.0,
     penalty_score: float = 0.0,
-    lookahead_offset: int = 0,
     dt: float = 0.02
 ):
     global _prev_xyz_for_debug
@@ -137,13 +164,24 @@ def print_action_debug_status(
     current_xyz = _as_float_list(current_xyz)
     current_rpy = _as_float_list(current_rpy)
 
-    # [26.04.02 추가] 추가 내용: Cartesian 공간에서의 선속도 자동 계산 (m/s)
+    # fallback velocity 계산
     if _prev_xyz_for_debug is None:
         vel_magnitude = 0.0
     else:
         dist = np.linalg.norm(np.array(current_xyz) - np.array(_prev_xyz_for_debug))
-        vel_magnitude = dist / dt
+        vel_magnitude = dist / max(dt, 1e-8)
     _prev_xyz_for_debug = current_xyz
+
+    # polishing cache에 있으면 그 속도를 우선 사용
+    if _last_polishing_debug["metrics"] is not None:
+        vel_display = _last_polishing_debug["metrics"][0]
+    else:
+        vel_display = vel_magnitude
+
+    # FT cache에 있으면 Dynamic Path 줄에도 Fz 같이 표시
+    fz_for_dynamic = None
+    if _last_ft_debug["wrench"] is not None:
+        fz_for_dynamic = float(_last_ft_debug["wrench"][2])
 
     print("\n" + "=" * 100)
     print(
@@ -170,19 +208,22 @@ def print_action_debug_status(
         f"[Error        ] pos_norm={pos_err_norm: .6f}, "
         f"rot_norm={rot_err_norm: .6f}"
     )
-    
-    # [26.04.02 추가] 추가 내용: 계산된 카테시안 속도(선속도) 및 동적 경로 가공량 출력
-    print(
-        f"[Dynamic Path ] cartesian_vel={vel_magnitude: .6f} m/s, "
-        f"path_offset={lookahead_offset: d}"
-    )
 
-    # [26.04.02 수정] 리워드/페널티/총점 출력 섹션 추가
+    if fz_for_dynamic is None:
+        print(
+            f"[Dynamic Path ] cartesian_vel={vel_display: .6f} m/s"
+        )
+    else:
+        print(
+            f"[Dynamic Path ] cartesian_vel={vel_display: .6f} m/s, "
+            f"Fz={fz_for_dynamic: .6f} N"
+        )
+
     print("-" * 100)
     print(
         f"[RL Score    ] TOTAL={reward_total: .6f} | "
-        f"REWARD(+)={reward_score: .6f} | "
-        f"PENALTY(-)={penalty_score: .6f}"
+        f"REWARD(+)= {reward_score: .6f} | "
+        f"PENALTY(-)= {penalty_score: .6f}"
     )
     print("-" * 100)
 
@@ -198,33 +239,55 @@ def print_action_debug_status(
     else:
         print("[FT Sensor    ] No cached 6-axis FT data")
 
+    if _last_polishing_debug["metrics"] is not None:
+        pm_step = _last_polishing_debug["step"]
+        pm = _last_polishing_debug["metrics"]
+
+        cartesian_speed = pm[0]
+        fz = pm[1]
+        abs_fz = pm[2]
+        contact_flag = int(pm[3])
+        effective_force = pm[4]
+        removal_rate = pm[5]
+        cumulative_removal = pm[6]
+        contact_distance = pm[7]
+
+        print(
+            "[Polishing    ] "
+            f"step={pm_step}, "
+            f"contact={contact_flag}, "
+            f"cartesian_speed={cartesian_speed: .6f} m/s, "
+            f"Fz={fz: .6f} N, "
+            f"|Fz|={abs_fz: .6f} N, "
+            f"effective_F={effective_force: .6f} N, "
+            f"removal_rate={removal_rate: .8f}, "
+            f"cumulative_removal={cumulative_removal: .8f}, "
+            f"contact_distance={contact_distance: .6f} m"
+        )
+    else:
+        print("[Polishing    ] No cached polishing metrics")
+
     print("=" * 100)
 
 
 # =========================================================
-# [26.04.02 추가] 추가 내용: 폴리싱 로깅 및 시각화 모듈 (위치 미분 기반 속도 적용)
+# 폴리싱 로깅 및 시각화 모듈
 # =========================================================
 class PolishingLoggerAndVisualizer:
     def __init__(self, target_force: float = 10.0, grid_size: int = 50, save_dir: str = "./logs/polishing_results", dt: float = 0.02):
-        """
-        폴리싱 공정의 힘, 속도(위치 미분), 표면 가공량을 추적하고 시각화하는 클래스
-        - dt: 환경의 제어 주기 (예: 50Hz 제어라면 0.02초)
-        """
         self.target_force = target_force
         self.grid_size = grid_size
         self.save_dir = save_dir
         self.dt = dt
         os.makedirs(self.save_dir, exist_ok=True)
-        
-        # 현재 에피소드 버퍼
+
         self.current_forces = []
         self.current_velocities = []
-        self.current_rewards = [] # 스텝별 리워드 저장용
+        self.current_rewards = []
         self.surface_map = np.zeros((self.grid_size, self.grid_size))
         self.current_reward_sum = 0.0
-        self.prev_xyz = None  # 속도 미분을 위한 이전 위치 저장
-        
-        # 베스트 에피소드 버퍼
+        self.prev_xyz = None
+
         self.best_reward = -float('inf')
         self.best_forces = []
         self.best_velocities = []
@@ -232,36 +295,28 @@ class PolishingLoggerAndVisualizer:
         self.best_surface_map = None
 
     def step_log(self, current_xyz: list, x_idx: int, y_idx: int, force: float, reward: float):
-        """
-        현재 위치(current_xyz)를 받아 이전 위치와 비교하여 선속도를 계산하고 가공량을 누적합니다.
-        """
-        # 1. 위치 미분을 통한 선속도(Cartesian Velocity) 계산
         if self.prev_xyz is None:
             velocity = 0.0
         else:
             dist = np.linalg.norm(np.array(current_xyz) - np.array(self.prev_xyz))
             velocity = dist / self.dt
-            
+
         self.prev_xyz = current_xyz
 
         self.current_forces.append(force)
         self.current_velocities.append(velocity)
         self.current_rewards.append(reward)
         self.current_reward_sum += reward
-        
-        # 2. 가공량 계산 (단순화된 프레스턴 모델: 가공량 ∝ 힘 * 속도)
-        K = 0.001 
+
+        K = 0.001
         removal_amount = K * max(0, force) * velocity
-        
-        # 인덱스 범위 이탈 방지
+
         x_idx = np.clip(int(x_idx), 0, self.grid_size - 1)
         y_idx = np.clip(int(y_idx), 0, self.grid_size - 1)
-        
-        # 해당 지점의 표면 깎임 누적
+
         self.surface_map[x_idx, y_idx] -= removal_amount
 
     def end_episode(self):
-        """에피소드 종료 시 호출. 베스트 케이스 갱신 및 초기화"""
         if self.current_reward_sum > self.best_reward:
             self.best_reward = self.current_reward_sum
             self.best_forces = list(self.current_forces)
@@ -269,24 +324,21 @@ class PolishingLoggerAndVisualizer:
             self.best_rewards = list(self.current_rewards)
             self.best_surface_map = np.copy(self.surface_map)
             print(f"[Polishing Logger] ⭐ New Best Episode Recorded! Reward Sum: {self.best_reward:.4f}")
-            
-        # 다음 에피소드를 위해 버퍼 초기화
+
         self.current_forces = []
         self.current_velocities = []
         self.current_rewards = []
         self.surface_map = np.zeros((self.grid_size, self.grid_size))
         self.current_reward_sum = 0.0
-        self.prev_xyz = None  # 위치 초기화
+        self.prev_xyz = None
 
     def visualize_best_case(self):
-        """학습 완료 후 베스트 가공 상태와 힘 추종 그래프 시각화"""
         if self.best_surface_map is None:
             print("[Polishing Logger] 저장된 베스트 에피소드가 없어 시각화를 건너뜁니다.")
             return
 
         fig = plt.figure(figsize=(18, 5))
 
-        # 1. 3D 표면 가공량(Surface Yield) 시각화
         ax1 = fig.add_subplot(1, 3, 1, projection='3d')
         X, Y = np.meshgrid(range(self.grid_size), range(self.grid_size))
         surf = ax1.plot_surface(X, Y, self.best_surface_map, cmap='viridis', edgecolor='none')
@@ -294,9 +346,8 @@ class PolishingLoggerAndVisualizer:
         ax1.set_xlabel("Surface X")
         ax1.set_ylabel("Surface Y")
         ax1.set_zlabel("Depth")
-        fig.colorbar(surf, ax1=ax1, shrink=0.5, aspect=5)
+        fig.colorbar(surf, ax=ax1, shrink=0.5, aspect=5)
 
-        # 2. 목표 힘 vs 실제 힘 추종 (Force Tracking) 시각화
         ax2 = fig.add_subplot(1, 3, 2)
         ax2.plot(self.best_forces, color='red', label='Actual Force (Fz)')
         ax2.axhline(self.target_force, color='blue', linestyle='--', label=f'Target Force ({self.target_force}N)')
@@ -306,7 +357,6 @@ class PolishingLoggerAndVisualizer:
         ax2.legend()
         ax2.grid(True)
 
-        # 3. 리워드 히스토리 추이 그래프 (학습 안정성 확인용)
         ax3 = fig.add_subplot(1, 3, 3)
         ax3.plot(self.best_rewards, color='green')
         ax3.set_title("Reward Step History (Best Episode)")
@@ -320,5 +370,4 @@ class PolishingLoggerAndVisualizer:
         print(f"\n[Polishing Logger] ✅ Visualization successfully saved to: {save_path}\n")
 
 
-# [26.04.02 추가] 추가 내용: 전역 객체 생성 (dt 값은 환경 제어 주기에 맞춰 수정 필요)
 polishing_logger = PolishingLoggerAndVisualizer(target_force=10.0, dt=0.02)

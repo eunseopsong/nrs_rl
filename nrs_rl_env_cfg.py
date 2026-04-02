@@ -140,7 +140,27 @@ class ObservationCfg:
             self.enable_corruption = True
             self.concatenate_terms = True
 
+    @configclass
+    class DebugCfg(ObsGroup):
+        processed_polishing_target = ObsTerm(
+            func=local_obs.get_processed_polishing_target,
+            params={
+                "asset_name": "robot",
+                "body_name": "spindle_link",
+                "fixed_joint_name": "tool0_to_spindle",
+                "joint_prim_relpath": "joints",
+                "contact_force_threshold": 10.0,
+                "removal_gain": 0.001,
+                "offset_axis": 2,
+            },
+        )
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = True
+
     policy: PolicyCfg = PolicyCfg()
+    debug: DebugCfg = DebugCfg()
 
 
 @configclass
