@@ -39,7 +39,7 @@ from isaaclab.assets.articulation import ArticulationCfg
 # -----------------------------------------------------------------------------
 # User paths and EE frame
 # -----------------------------------------------------------------------------
-UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_only_v2.usd"
+UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_only_v3.usd"
 EE_FRAME_NAME = "spindle_link"
 
 # -----------------------------------------------------------------------------

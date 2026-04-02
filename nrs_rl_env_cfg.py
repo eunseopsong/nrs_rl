@@ -71,7 +71,7 @@ class ActionsCfg:
     arm_action = local_action.AdmittanceControlActionCfg(
         asset_name="robot",
         body_name="spindle_link",
-        hdf5_file_path="/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/flat_g_recording.h5",
+        hdf5_file_path="/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/target_positions.h5",
         position_dataset_key="target_positions",
         action_dim=2,
 
@@ -89,7 +89,7 @@ class ActionsCfg:
         max_steps_per_waypoint=120,
 
         # spindle / TCP compensation
-        tcp_length_offset_m=0.20,
+        tcp_length_offset_m=0.10,
         tcp_offset_axis="local_z_neg",
         z_target_offset=0.0,
 
@@ -155,7 +155,7 @@ class EventCfg:
         func=local_obs.load_hdf5_positions,
         mode="reset",
         params={
-            "file_path": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/flat_g_recording.h5",
+            "file_path": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/target_positions.h5",
             "dataset_key": "target_positions",
         },
     )

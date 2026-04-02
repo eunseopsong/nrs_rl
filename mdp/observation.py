@@ -142,6 +142,77 @@ def get_hdf5_target_positions(env: "ManagerBasedRLEnv", horizon: int = 5) -> tor
     return future_targets.repeat(env.num_envs, 1)
 
 
+# [26.04.02 추가] 추가 내용: 로봇 현재 속도 Observation 
+# ------------------------------------------------------
+# 로봇 현재 속도 Observation
+# ------------------------------------------------------
+def get_joint_velocities(env: "ManagerBasedRLEnv", asset_name: str = "robot") -> torch.Tensor:
+    """
+    [26.04.02 추가] 로봇의 현재 조인트 속도(qdot)를 반환합니다.
+    - Output: (num_envs, 6) torch tensor on env device
+    """
+    robot = env.scene[asset_name]
+    # UR10e의 첫 6개 조인트 속도 추출
+    joint_vel = robot.data.joint_vel[:, :6]
+    return joint_vel
+
+
+# [26.04.02 추가] 추가 내용: 속도 기반 동적 타겟 경로 Observation 
+# ------------------------------------------------------
+# Observation: 속도 기반 동적 타겟 경로 (Velocity-Adjusted Target)
+# ------------------------------------------------------
+def get_velocity_adjusted_target_positions(
+    env: "ManagerBasedRLEnv", 
+    horizon: int = 5, 
+    lookahead_gain: float = 1.0
+) -> torch.Tensor:
+    """
+    [26.04.02 추가] 현재 속도 크기에 비례하여 HDF5 궤적의 탐색 인덱스를 가공(Look-ahead)하여 반환합니다.
+    - 로봇이 빠르게 움직일수록(속도가 높을수록) 궤적의 더 먼 미래를 타겟으로 삼도록 유도합니다.
+    - Output: (num_envs, horizon * 6) flattened tensor
+    """
+    global _hdf5_positions
+
+    if _hdf5_positions is None:
+        d = 6
+        return torch.zeros((env.num_envs, horizon * d), device=env.device, dtype=torch.float32)
+
+    robot = env.scene["robot"]
+    
+    # 1. 현재 조인트 속도 가져오기 및 크기(Norm) 계산
+    current_vel = robot.data.joint_vel[:, :6] 
+    vel_magnitude = torch.norm(current_vel, dim=-1)  # (num_envs,)
+
+    t_total, d = _hdf5_positions.shape
+    
+    # 2. 각 환경(env)별 진행 스텝 (1D 텐서)
+    step = env.episode_length_buf.to(torch.float32)
+    ep_len = max(int(env.max_episode_length), 1)
+    
+    # 3. 속도에 비례하는 인덱스 오프셋 계산 (가공 단계)
+    # lookahead_gain을 조절하여 속도에 따른 오프셋 민감도를 튜닝할 수 있습니다.
+    step_offset = (vel_magnitude * lookahead_gain).to(torch.int64) 
+    
+    # 4. 기본 인덱스 + 속도 기반 오프셋
+    base_idx = ((step / ep_len) * t_total).to(torch.int64)
+    dynamic_idx = base_idx + step_offset
+    
+    # 최대 인덱스를 초과하지 않도록 클램핑
+    dynamic_idx = torch.clamp(dynamic_idx, max=t_total - 1)
+
+    # 5. 환경별로 Horizon만큼 타겟 텐서 할당
+    future_targets = torch.zeros((env.num_envs, horizon * d), device=env.device, dtype=torch.float32)
+    
+    for i in range(horizon):
+        # 각 horizon 스텝마다 인덱스 증가 및 클램핑
+        h_idx = torch.clamp(dynamic_idx + i, max=t_total - 1)
+        
+        # _hdf5_positions[h_idx]는 (num_envs, 6) 형태가 됨
+        future_targets[:, i*d : (i+1)*d] = _hdf5_positions[h_idx]
+
+    return future_targets
+
+
 # ------------------------------------------------------
 # Camera distance & normals
 # ------------------------------------------------------

@@ -5,8 +5,8 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------
 # 1. 파일 경로 설정
 # ---------------------------------------------------
-input_txt = "hand_g_recording.txt"
-output_h5 = "hand_g_recording.h5"
+input_txt = "cmd_continue9D.txt"
+output_h5 = "target_positions.h5"
 
 # ---------------------------------------------------
 # 2. TXT 파일 읽기
