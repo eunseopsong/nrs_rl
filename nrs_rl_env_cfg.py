@@ -14,6 +14,7 @@ from isaaclab.managers import (
     ObservationTermCfg as ObsTerm,
     TerminationTermCfg as DoneTerm,
     EventTermCfg as EventTerm,
+    RewardTermCfg as RewTerm,
 )
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
@@ -32,6 +33,9 @@ local_terms = importlib.import_module(
 )
 local_ft_sensor = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.assets.assets.sensors.six_axis_ft_sensor"
+)
+local_rewards = importlib.import_module(
+    "nrs_rl.tasks.manager_based.nrs_rl.mdp.rewards"
 )
 
 from nrs_rl.tasks.manager_based.nrs_rl.assets.assets.robots.ur10e_w_spindle import (
@@ -183,8 +187,61 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    pass
+    uniform_mrr = RewTerm(
+        func=local_rewards.uniform_mrr_reward,
+        weight=2.0,
+        params={
+            "target_force": 20.0,
+            "target_velocity": 0.0002,
+            "mrr_sigma": 0.002,
+            "asset_name": "robot",
+            "body_name": "spindle_link",
+            "fixed_joint_name": "tool0_to_spindle",
+            "joint_prim_relpath": "joints",
+        },
+    )
 
+    force_track = RewTerm(
+        func=local_rewards.force_tracking_reward,
+        weight=1.0,
+        params={
+            "target_force": 20.0,
+            "force_sigma": 5.0,
+            "asset_name": "robot",
+            "fixed_joint_name": "tool0_to_spindle",
+            "joint_prim_relpath": "joints",
+        },
+    )
+
+    cornering = RewTerm(
+        func=local_rewards.lookahead_cornering_penalty,
+        weight=0.3,
+        params={
+            "cornering_threshold_angle": 0.5,
+            "penalty_scale": 0.5,
+            "lookahead_steps": 5,
+            "speed_ref": 0.002,
+            "action_rate_scale": 0.1,
+            "asset_name": "robot",
+            "body_name": "spindle_link",
+        },
+    )
+
+    traj_track = RewTerm(
+        func=local_rewards.trajectory_tracking_penalty,
+        weight=1.0,
+        params={
+            "pos_sigma": 0.03,
+            "rot_sigma": 0.20,
+            "asset_name": "robot",
+            "body_name": "spindle_link",
+        },
+    )
+
+    action_smooth = RewTerm(
+        func=local_rewards.action_smoothness_penalty,
+        weight=0.05,
+    )
 
 @configclass
 class TerminationsCfg:

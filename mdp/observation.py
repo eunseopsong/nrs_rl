@@ -421,20 +421,9 @@ def get_processed_polishing_target(
     Returns:
         (num_envs, 14) tensor
 
-        [0]  processed_target_x
-        [1]  processed_target_y
-        [2]  processed_target_z
-        [3]  target_quat_0
-        [4]  target_quat_1
-        [5]  target_quat_2
-        [6]  target_quat_3
-        [7]  cartesian_velocity
-        [8]  Fz
-        [9]  abs_fz
-        [10] contact_flag
-        [11] effective_normal_force
-        [12] cumulative_removal
-        [13] cumulative_contact_distance
+        [0]  processed_target_x | [1]  processed_target_y | [2]  processed_target_z | [3]  target_quat_0 | [4]  target_quat_1 | [5]  target_quat_2
+        [6]  target_quat_3 | [7]  cartesian_velocity | [8]  Fz | [9]  abs_fz | [10] contact_flag | [11] effective_normal_force
+        [12] cumulative_removal | [13] cumulative_contact_distance
     """
     global _prev_xyz_for_polishing
     global _cumulative_removal

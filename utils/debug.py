@@ -209,15 +209,15 @@ def print_action_debug_status(
         f"rot_norm={rot_err_norm: .6f}"
     )
 
-    if fz_for_dynamic is None:
-        print(
-            f"[Dynamic Path ] cartesian_vel={vel_display: .6f} m/s"
-        )
-    else:
-        print(
-            f"[Dynamic Path ] cartesian_vel={vel_display: .6f} m/s, "
-            f"Fz={fz_for_dynamic: .6f} N"
-        )
+    # if fz_for_dynamic is None:
+    #     print(
+    #         f"[Dynamic Path ] cartesian_vel={vel_display: .6f} m/s"
+    #     )
+    # else:
+    #     print(
+    #         f"[Dynamic Path ] cartesian_vel={vel_display: .6f} m/s, "
+    #         f"Fz={fz_for_dynamic: .6f} N"
+    #     )
 
     print("-" * 100)
     print(
