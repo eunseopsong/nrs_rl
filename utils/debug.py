@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import torch
 import os
 import numpy as np
+import torch
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
@@ -32,9 +32,6 @@ _last_polishing_debug = {
     # [6] cumulative_removal
     # [7] contact_distance
 }
-
-# 콘솔 출력을 위한 이전 위치 캐시 (fallback 속도 계산용)
-_prev_xyz_for_debug = None
 
 
 def _as_float_list(x):
@@ -136,6 +133,7 @@ def print_polishing_metrics_debug(step: int, metrics_env0):
 # =========================================================
 # Combined action debug print
 # - action + ft sensor + polishing metrics 를 한 번에 출력
+# - reward가 실제로 연결되지 않았으면 N/A 출력
 # =========================================================
 def print_action_debug_status(
     env_id: int,
@@ -151,37 +149,16 @@ def print_action_debug_status(
     current_rpy,
     pos_err_norm: float,
     rot_err_norm: float,
-    reward_total: float = 0.0,
-    reward_score: float = 0.0,
-    penalty_score: float = 0.0,
-    dt: float = 0.02
+    reward_total: float | None = None,
+    reward_score: float | None = None,
+    penalty_score: float | None = None,
+    dt: float = 0.02,
 ):
-    global _prev_xyz_for_debug
-
     raw_target_xyz = _as_float_list(raw_target_xyz)
     target_xyz = _as_float_list(target_xyz)
     target_rpy = _as_float_list(target_rpy)
     current_xyz = _as_float_list(current_xyz)
     current_rpy = _as_float_list(current_rpy)
-
-    # fallback velocity 계산
-    if _prev_xyz_for_debug is None:
-        vel_magnitude = 0.0
-    else:
-        dist = np.linalg.norm(np.array(current_xyz) - np.array(_prev_xyz_for_debug))
-        vel_magnitude = dist / max(dt, 1e-8)
-    _prev_xyz_for_debug = current_xyz
-
-    # polishing cache에 있으면 그 속도를 우선 사용
-    if _last_polishing_debug["metrics"] is not None:
-        vel_display = _last_polishing_debug["metrics"][0]
-    else:
-        vel_display = vel_magnitude
-
-    # FT cache에 있으면 Dynamic Path 줄에도 Fz 같이 표시
-    fz_for_dynamic = None
-    if _last_ft_debug["wrench"] is not None:
-        fz_for_dynamic = float(_last_ft_debug["wrench"][2])
 
     print("\n" + "=" * 100)
     print(
@@ -209,22 +186,15 @@ def print_action_debug_status(
         f"rot_norm={rot_err_norm: .6f}"
     )
 
-    # if fz_for_dynamic is None:
-    #     print(
-    #         f"[Dynamic Path ] cartesian_vel={vel_display: .6f} m/s"
-    #     )
-    # else:
-    #     print(
-    #         f"[Dynamic Path ] cartesian_vel={vel_display: .6f} m/s, "
-    #         f"Fz={fz_for_dynamic: .6f} N"
-    #     )
-
     print("-" * 100)
-    print(
-        f"[RL Score    ] TOTAL={reward_total: .6f} | "
-        f"REWARD(+)= {reward_score: .6f} | "
-        f"PENALTY(-)= {penalty_score: .6f}"
-    )
+    if reward_total is None or reward_score is None or penalty_score is None:
+        print("[RL Score    ] N/A (actual reward not connected)")
+    else:
+        print(
+            f"[RL Score    ] TOTAL={reward_total: .6f} | "
+            f"REWARD(+)= {reward_score: .6f} | "
+            f"PENALTY(-)= {penalty_score: .6f}"
+        )
     print("-" * 100)
 
     if _last_ft_debug["wrench"] is not None:
@@ -274,7 +244,13 @@ def print_action_debug_status(
 # 폴리싱 로깅 및 시각화 모듈
 # =========================================================
 class PolishingLoggerAndVisualizer:
-    def __init__(self, target_force: float = 10.0, grid_size: int = 50, save_dir: str = "./logs/polishing_results", dt: float = 0.02):
+    def __init__(
+        self,
+        target_force: float = 10.0,
+        grid_size: int = 50,
+        save_dir: str = "./logs/polishing_results",
+        dt: float = 0.02,
+    ):
         self.target_force = target_force
         self.grid_size = grid_size
         self.save_dir = save_dir
@@ -288,13 +264,20 @@ class PolishingLoggerAndVisualizer:
         self.current_reward_sum = 0.0
         self.prev_xyz = None
 
-        self.best_reward = -float('inf')
+        self.best_reward = -float("inf")
         self.best_forces = []
         self.best_velocities = []
         self.best_rewards = []
         self.best_surface_map = None
 
-    def step_log(self, current_xyz: list, x_idx: int, y_idx: int, force: float, reward: float):
+    def step_log(
+        self,
+        current_xyz: list,
+        x_idx: int,
+        y_idx: int,
+        force: float,
+        reward: float | None = None,
+    ):
         if self.prev_xyz is None:
             velocity = 0.0
         else:
@@ -303,13 +286,19 @@ class PolishingLoggerAndVisualizer:
 
         self.prev_xyz = current_xyz
 
-        self.current_forces.append(force)
-        self.current_velocities.append(velocity)
-        self.current_rewards.append(reward)
-        self.current_reward_sum += reward
+        self.current_forces.append(float(force))
+        self.current_velocities.append(float(velocity))
+
+        if reward is None:
+            self.current_rewards.append(np.nan)
+        else:
+            reward = float(reward)
+            self.current_rewards.append(reward)
+            if np.isfinite(reward):
+                self.current_reward_sum += reward
 
         K = 0.001
-        removal_amount = K * max(0, force) * velocity
+        removal_amount = K * max(0.0, float(force)) * float(velocity)
 
         x_idx = np.clip(int(x_idx), 0, self.grid_size - 1)
         y_idx = np.clip(int(y_idx), 0, self.grid_size - 1)
@@ -317,8 +306,11 @@ class PolishingLoggerAndVisualizer:
         self.surface_map[x_idx, y_idx] -= removal_amount
 
     def end_episode(self):
-        if self.current_reward_sum > self.best_reward:
-            self.best_reward = self.current_reward_sum
+        finite_rewards = [r for r in self.current_rewards if np.isfinite(r)]
+        episode_reward_sum = float(np.sum(finite_rewards)) if len(finite_rewards) > 0 else None
+
+        if episode_reward_sum is not None and episode_reward_sum > self.best_reward:
+            self.best_reward = episode_reward_sum
             self.best_forces = list(self.current_forces)
             self.best_velocities = list(self.current_velocities)
             self.best_rewards = list(self.current_rewards)
@@ -339,9 +331,9 @@ class PolishingLoggerAndVisualizer:
 
         fig = plt.figure(figsize=(18, 5))
 
-        ax1 = fig.add_subplot(1, 3, 1, projection='3d')
+        ax1 = fig.add_subplot(1, 3, 1, projection="3d")
         X, Y = np.meshgrid(range(self.grid_size), range(self.grid_size))
-        surf = ax1.plot_surface(X, Y, self.best_surface_map, cmap='viridis', edgecolor='none')
+        surf = ax1.plot_surface(X, Y, self.best_surface_map, cmap="viridis", edgecolor="none")
         ax1.set_title("Best Uniform Surface Yield (MRR)")
         ax1.set_xlabel("Surface X")
         ax1.set_ylabel("Surface Y")
@@ -349,8 +341,8 @@ class PolishingLoggerAndVisualizer:
         fig.colorbar(surf, ax=ax1, shrink=0.5, aspect=5)
 
         ax2 = fig.add_subplot(1, 3, 2)
-        ax2.plot(self.best_forces, color='red', label='Actual Force (Fz)')
-        ax2.axhline(self.target_force, color='blue', linestyle='--', label=f'Target Force ({self.target_force}N)')
+        ax2.plot(self.best_forces, color="red", label="Actual Force (Fz)")
+        ax2.axhline(self.target_force, color="blue", linestyle="--", label=f"Target Force ({self.target_force}N)")
         ax2.set_title("Force Tracking Profile")
         ax2.set_xlabel("Time Step")
         ax2.set_ylabel("Force (N)")
@@ -358,7 +350,7 @@ class PolishingLoggerAndVisualizer:
         ax2.grid(True)
 
         ax3 = fig.add_subplot(1, 3, 3)
-        ax3.plot(self.best_rewards, color='green')
+        ax3.plot(self.best_rewards, color="green")
         ax3.set_title("Reward Step History (Best Episode)")
         ax3.set_xlabel("Time Step")
         ax3.set_ylabel("Reward")
