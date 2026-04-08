@@ -1,7 +1,8 @@
+# -----------------------------
 # Python
+# -----------------------------
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.pyd
 *.egg-info/
 .eggs/
@@ -10,17 +11,59 @@ build/
 .pytest_cache/
 .mypy_cache/
 
+# Virtual / local env
+.venv/
+venv/
+env/
+env_*/
+
+# -----------------------------
 # Editors
+# -----------------------------
 .vscode/
 .idea/
 
+# -----------------------------
 # OS
+# -----------------------------
 .DS_Store
+Thumbs.db
 
-# Isaac/Omniverse logs & outputs (원하면 경로 추가)
+# -----------------------------
+# Logs / outputs
+# -----------------------------
 logs/
 outputs/
 *.log
 
-# Large binaries (필요하면 추적 제외)
+# -----------------------------
+# Binary build artifacts
+# -----------------------------
 *.so
+*.o
+*.a
+*.out
+
+# -----------------------------
+# CMake
+# -----------------------------
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+Makefile
+
+# -----------------------------
+# y2_control_pybind local build artifacts
+# -----------------------------
+y2_control_pybind/build/
+y2_control_pybind/dist/
+y2_control_pybind/*.egg-info/
+y2_control_pybind/y2_control_py/__pycache__/
+y2_control_pybind/y2_control_py/_y2_control_pybind*.so
+
+# -----------------------------
+# Optional: test caches
+# -----------------------------
+.coverage
+htmlcov/

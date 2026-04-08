@@ -3,6 +3,7 @@ from setuptools.command.build_ext import build_ext
 import pathlib
 import subprocess
 import sys
+import os
 
 
 class CMakeBuild(build_ext):
@@ -26,6 +27,11 @@ class CMakeBuild(build_ext):
             f"-DPython3_EXECUTABLE={sys.executable}",
             f"-Dpybind11_DIR={pybind11_cmake_dir}",
         ]
+
+        # pass Torch_DIR if available
+        torch_dir = os.environ.get("Torch_DIR", "").strip()
+        if torch_dir:
+            cmake_args.append(f"-DTorch_DIR={torch_dir}")
 
         build_args = [
             "--config", cfg,
@@ -52,7 +58,7 @@ ext_modules = [
 setup(
     name="y2_control_pybind",
     version="0.0.1",
-    description="Pybind wrapper for Y2 UR10e kinematics (FK / Jacobian / DLS IK)",
+    description="Pybind wrapper for Y2 UR10e kinematics and Mode5 force control",
     packages=find_packages(),
     ext_modules=ext_modules,
     cmdclass={"build_ext": CMakeBuild},
