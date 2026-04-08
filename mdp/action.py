@@ -122,14 +122,12 @@ class _PerEnvForceControllers:
 
 class AdmittanceControlAction(ActionTerm):
     """
-    HDF5 tracking with state machine:
+    Immediate HDF5 tracking version (no phase).
 
-        APPROACH -> DESCEND -> TRACK
-
-    TRACK:
-        - x, y      : position tracking
-        - z         : force control
-        - wx,wy,wz  : orientation tracking
+    - x, y: position tracking
+    - z: force control with ForceCon1DMode5
+    - wx, wy, wz: orientation tracking
+    - trajectory row advances every step
     """
 
     cfg: "AdmittanceControlActionCfg"
@@ -175,14 +173,30 @@ class AdmittanceControlAction(ActionTerm):
         )
 
         self._q_des = self._robot.data.joint_pos[:, :6].clone()
-
-        # 1 = APPROACH, 2 = DESCEND, 3 = TRACK
-        self._phase = torch.ones((self._num_envs,), device=self._device, dtype=torch.long)
         self._traj_row = torch.zeros((self._num_envs,), device=self._device, dtype=torch.long)
+        self.path_done = torch.zeros((self._num_envs,), device=self._device, dtype=torch.bool)
 
         self._fc = [_PerEnvForceControllers(cfg) for _ in range(self._num_envs)]
 
-        self.path_done = torch.zeros((self._num_envs,), device=self._device, dtype=torch.bool)
+        if cfg.enable_debug_print:
+            body_ids = self._robot.find_bodies(cfg.body_name)[0]
+            ee_idx = int(body_ids[0]) if len(body_ids) > 0 else 0
+            local_debug.print_action_init(
+                hdf5_file_path=cfg.hdf5_file_path,
+                position_dataset_key=cfg.position_dataset_key,
+                traj_shape=tuple(self._traj_pos.shape),
+                stride=1,
+                used_traj_shape=tuple(self._traj_pos.shape),
+                body_name=cfg.body_name,
+                ee_idx=ee_idx,
+                num_envs=self._num_envs,
+                tcp_length_offset_m=0.0,
+                tcp_offset_axis="z",
+            )
+            force_preview = self._traj_force[:5].detach().cpu().numpy()
+            print("[Action] force shape:", tuple(self._traj_force.shape))
+            print("[Action] first 5 force rows:")
+            print(force_preview)
 
     @property
     def action_dim(self) -> int:
@@ -203,8 +217,6 @@ class AdmittanceControlAction(ActionTerm):
         self._raw_actions[env_ids] = 0.0
         self._processed_actions[env_ids] = 0.0
         self._q_des[env_ids] = self._robot.data.joint_pos[env_ids, :6].clone()
-
-        self._phase[env_ids] = 1
         self._traj_row[env_ids] = 0
         self.path_done[env_ids] = False
 
@@ -232,19 +244,6 @@ class AdmittanceControlAction(ActionTerm):
         self._q_des = torch.tensor(q_des_list, device=self._device, dtype=torch.float32)
         self._robot.set_joint_position_target(self._q_des)
 
-    def _build_first_pose(self) -> torch.Tensor:
-        return self._traj_pos[0].unsqueeze(0).repeat(self._num_envs, 1)
-
-    def _build_approach_pose(self) -> torch.Tensor:
-        pose = self._build_first_pose()
-        pose[:, 2] = pose[:, 2] + float(self.cfg.approach_offset_mm)
-        return pose
-
-    def _pos_rot_error(self, current_pose: torch.Tensor, target_pose: torch.Tensor):
-        pos_err = torch.norm(target_pose[:, 0:3] - current_pose[:, 0:3], dim=-1)
-        rot_err = torch.norm(target_pose[:, 3:6] - current_pose[:, 3:6], dim=-1)
-        return pos_err, rot_err
-
     def apply_actions(self):
         current_pose = local_obs.get_ee_pose(self._env, asset_name=self.cfg.asset_name)
         wrench = local_ft_sensor.get_6axis_ft_fixed_joint(
@@ -260,100 +259,53 @@ class AdmittanceControlAction(ActionTerm):
         current_xyz_m = current_xyz_mm / 1000.0
         current_force = wrench[:, 0:3]
 
-        first_pose = self._build_first_pose()
-        approach_pose = self._build_approach_pose()
+        idx = torch.clamp(self._traj_row, 0, self._traj_len - 1)
 
-        approach_pos_err, approach_rot_err = self._pos_rot_error(current_pose, approach_pose)
-        descend_pos_err, descend_rot_err = self._pos_rot_error(current_pose, first_pose)
+        raw_target_pose = self._traj_pos[idx].clone()
+        raw_target_force = self._traj_force[idx].clone()
 
-        # APPROACH -> DESCEND
-        approach_done = (
-            (self._phase == 1)
-            & (approach_pos_err < float(self.cfg.approach_pos_tol_mm))
-            & (approach_rot_err < float(self.cfg.approach_rot_tol_rad))
-        )
-        if torch.any(approach_done):
-            self._phase[approach_done] = 2
+        target_pose = raw_target_pose.clone()
+        target_force = raw_target_force.clone()
 
-        # DESCEND -> TRACK
-        descend_done = (
-            (self._phase == 2)
-            & (descend_pos_err < float(self.cfg.descend_pos_tol_mm))
-            & (descend_rot_err < float(self.cfg.descend_rot_tol_rad))
-        )
-        if torch.any(descend_done):
-            self._phase[descend_done] = 3
-            for i in torch.where(descend_done)[0].tolist():
-                self._fc[i].reset(float(current_xyz_m[i, 2].item()))
-
-        target_pose = torch.zeros((self._num_envs, 6), device=self._device, dtype=torch.float32)
-        target_force = torch.zeros((self._num_envs, 3), device=self._device, dtype=torch.float32)
-
-        # APPROACH
-        approach_mask = self._phase == 1
-        if torch.any(approach_mask):
-            target_pose[approach_mask] = approach_pose[approach_mask]
-            target_force[approach_mask] = 0.0
-
-        # DESCEND
-        descend_mask = self._phase == 2
-        if torch.any(descend_mask):
-            target_pose[descend_mask] = first_pose[descend_mask]
-            target_force[descend_mask] = 0.0
-
-        # TRACK
-        track_mask = self._phase == 3
-        if torch.any(track_mask):
-            idx = torch.clamp(self._traj_row, 0, self._traj_len - 1)
-            target_pose[track_mask] = self._traj_pos[idx[track_mask]]
-            target_force[track_mask] = self._traj_force[idx[track_mask]]
-
-            # optional RL residuals: z only
-            if self.cfg.action_dim >= 1:
-                target_pose[track_mask, 2] += self._processed_actions[track_mask, 0] * self.cfg.position_scale
-            if self.cfg.action_dim >= 2:
-                target_force[track_mask, 2] += self._processed_actions[track_mask, 1] * self.cfg.force_scale
+        # optional RL residuals: z only
+        if self.cfg.action_dim >= 1:
+            target_pose[:, 2] += self._processed_actions[:, 0] * self.cfg.position_scale
+        if self.cfg.action_dim >= 2:
+            target_force[:, 2] += self._processed_actions[:, 1] * self.cfg.force_scale
 
         target_pose[:, 2] += float(self.cfg.z_target_offset_mm)
 
+        # command pose:
+        # x,y = position tracking
+        # z   = force control
+        # ori = target orientation tracking
         cmd_pose = target_pose.clone()
 
-        # APPROACH / DESCEND: pure IK
-        pure_ik_mask = self._phase != 3
-        if torch.any(pure_ik_mask):
-            self._solve_ik_batch(cmd_pose)
+        cmd_xyz_mm = target_pose[:, 0:3].clone()
 
-        # TRACK: x/y/orientation position control, z only force control
-        if torch.any(track_mask):
-            cmd_xyz_mm = target_pose[:, 0:3].clone()
+        for i in range(self._num_envs):
+            # x,y position control only
+            cmd_xyz_mm[i, 0] = target_pose[i, 0]
+            cmd_xyz_mm[i, 1] = target_pose[i, 1]
 
-            for i in torch.where(track_mask)[0].tolist():
-                # x, y: pure position tracking
-                cmd_xyz_mm[i, 0] = target_pose[i, 0]
-                cmd_xyz_mm[i, 1] = target_pose[i, 1]
+            # z force control only
+            xd_z = float(target_pose[i, 2].item() / 1000.0)
+            x_z = float(current_xyz_m[i, 2].item())
 
-                # z: force control only
-                xd_z = float(target_pose[i, 2].item() / 1000.0)
-                x_z = float(current_xyz_m[i, 2].item())
+            fd_z = float(target_force[i, 2].item())
+            fext_z = float(current_force[i, 2].item())
 
-                fd_z = float(target_force[i, 2].item())
-                fext_z = float(current_force[i, 2].item())
+            out_z = self._fc[i].fz.step(xd_z, x_z, fd_z, fext_z)
+            cmd_xyz_mm[i, 2] = float(out_z[0]) * 1000.0
 
-                out_z = self._fc[i].fz.step(xd_z, x_z, fd_z, fext_z)
-                cmd_xyz_mm[i, 2] = float(out_z[0]) * 1000.0
+        cmd_pose[:, 0:3] = cmd_xyz_mm
+        cmd_pose[:, 3:6] = target_pose[:, 3:6]
 
-            cmd_pose[track_mask, 0:3] = cmd_xyz_mm[track_mask]
-            cmd_pose[track_mask, 3:6] = target_pose[track_mask, 3:6]
+        self._solve_ik_batch(cmd_pose)
 
-            self._solve_ik_batch(cmd_pose)
-
-            # row advance only if z-force is reasonably close
-            force_err = torch.abs(current_force[:, 2] - target_force[:, 2])
-            allow_advance = track_mask & (force_err < float(self.cfg.track_force_tol_n))
-
-            self._traj_row[allow_advance] += 1
-            self._traj_row = torch.clamp(self._traj_row, 0, self._traj_len - 1)
-
+        # immediate tracking: advance every step
+        self._traj_row += 1
+        self._traj_row = torch.clamp(self._traj_row, 0, self._traj_len - 1)
         self.path_done = self._traj_row >= (self._traj_len - 1)
 
         if self.cfg.enable_debug_print:
@@ -365,23 +317,22 @@ class AdmittanceControlAction(ActionTerm):
                 pos_err_norm = torch.norm(cmd_pose[env_id, 0:3] - current_xyz_mm[env_id]).item()
                 rot_err_norm = torch.norm(cmd_pose[env_id, 3:6] - current_wxyz[env_id]).item()
 
-                h5_index = int(self._traj_row[env_id].item()) if self._phase[env_id].item() == 3 else 0
-
                 local_debug.print_action_debug_status(
                     env_id=env_id,
                     global_step=step,
-                    path_index=h5_index,
+                    path_index=int(idx[env_id].item()),
                     traj_length=self._traj_len,
                     waypoint_steps=1,
                     path_done=bool(self.path_done[env_id].item()),
-                    raw_target_xyz=target_pose[env_id, 0:3],
+                    raw_target_xyz=raw_target_pose[env_id, 0:3],
+                    raw_target_force=raw_target_force[env_id],
                     target_xyz=cmd_pose[env_id, 0:3],
                     target_wxyz=cmd_pose[env_id, 3:6],
+                    target_force=target_force[env_id],
                     current_xyz=current_xyz_mm[env_id, 0:3],
                     current_wxyz=current_wxyz[env_id, 0:3],
                     pos_err_norm=float(pos_err_norm),
                     rot_err_norm=float(rot_err_norm),
-                    target_force=target_force[env_id],   # 추가
                     reward_total=None,
                     reward_score=None,
                     penalty_score=None,
@@ -407,14 +358,6 @@ class AdmittanceControlActionCfg(ActionTermCfg):
     position_scale: float = 1.0   # z residual [mm]
     force_scale: float = 1.0      # z-force residual [N]
     z_target_offset_mm: float = 0.0
-
-    approach_offset_mm: float = 120.0
-    approach_pos_tol_mm: float = 20.0
-    approach_rot_tol_rad: float = 0.20
-    descend_pos_tol_mm: float = 10.0
-    descend_rot_tol_rad: float = 0.10
-
-    track_force_tol_n: float = 10.0
 
     force_model_path: str = ""
     force_dt: float = 0.002

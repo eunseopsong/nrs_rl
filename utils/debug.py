@@ -7,19 +7,11 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
 
-# =========================================================
-# Internal cache
-# - FT sensor debug는 여기 저장만 하고
-# - 실제 출력은 action debug 시점에 함께 묶어서 출력
-# =========================================================
 _last_ft_debug = {
     "step": None,
     "wrench": None,  # [Fx, Fy, Fz, Tx, Ty, Tz]
 }
 
-# =========================================================
-# Polishing metric cache
-# =========================================================
 _last_polishing_debug = {
     "step": None,
     "metrics": None,
@@ -42,9 +34,6 @@ def _as_float_list(x):
     return [float(x)]
 
 
-# =========================================================
-# HDF5 / init prints
-# =========================================================
 def print_hdf5_positions_loaded(shape, file_path: str):
     print(f"[INFO] Loaded HDF5 positions of shape {shape} from {file_path}")
 
@@ -87,9 +76,6 @@ def print_action_init(
     print(f"[Action] TCP offset axis: {tcp_offset_axis}")
 
 
-# =========================================================
-# Camera debug
-# =========================================================
 def print_camera_distance(step: int, mean_distance_env0):
     md_cpu = float(_as_float_list(mean_distance_env0)[0])
     print(f"[Step {step}] Mean camera distance: {md_cpu:.4f} m")
@@ -100,9 +86,6 @@ def print_camera_normals(step: int, normals_mean_env0):
     print(f"[Camera DEBUG] Step {step}: Mean surface normal = [{nx:.6f} {ny:.6f} {nz:.6f}]")
 
 
-# =========================================================
-# FT sensor debug cache update
-# =========================================================
 def print_ft_sensor_debug(step: int, wrench_env0):
     global _last_ft_debug
 
@@ -114,9 +97,6 @@ def print_ft_sensor_debug(step: int, wrench_env0):
     _last_ft_debug["wrench"] = vals[:6]
 
 
-# =========================================================
-# Polishing debug cache update
-# =========================================================
 def print_polishing_metrics_debug(step: int, metrics_env0):
     global _last_polishing_debug
 
@@ -128,9 +108,6 @@ def print_polishing_metrics_debug(step: int, metrics_env0):
     _last_polishing_debug["metrics"] = vals[:8]
 
 
-# =========================================================
-# Combined action debug print
-# =========================================================
 def print_action_debug_status(
     env_id: int,
     global_step: int,
@@ -139,24 +116,31 @@ def print_action_debug_status(
     waypoint_steps: int,
     path_done: bool,
     raw_target_xyz,
+    raw_target_force,
     target_xyz,
     target_wxyz,
+    target_force,
     current_xyz,
     current_wxyz,
     pos_err_norm: float,
     rot_err_norm: float,
-    target_force=None,   # [fx, fy, fz]
     reward_total: float | None = None,
     reward_score: float | None = None,
     penalty_score: float | None = None,
     dt: float = 0.02,
 ):
     raw_target_xyz = _as_float_list(raw_target_xyz)
+    raw_target_force = _as_float_list(raw_target_force)
     target_xyz = _as_float_list(target_xyz)
     target_wxyz = _as_float_list(target_wxyz)
+    target_force = _as_float_list(target_force)
     current_xyz = _as_float_list(current_xyz)
     current_wxyz = _as_float_list(current_wxyz)
-    target_force_vals = _as_float_list(target_force) if target_force is not None else None
+
+    while len(raw_target_force) < 3:
+        raw_target_force.append(0.0)
+    while len(target_force) < 3:
+        target_force.append(0.0)
 
     print("\n" + "=" * 100)
     print(
@@ -170,9 +154,17 @@ def print_action_debug_status(
         f"x={raw_target_xyz[0]: .6f}, y={raw_target_xyz[1]: .6f}, z={raw_target_xyz[2]: .6f}"
     )
     print(
+        "[Raw Force    ] "
+        f"Fx={raw_target_force[0]: .6f}, Fy={raw_target_force[1]: .6f}, Fz={raw_target_force[2]: .6f}"
+    )
+    print(
         "[Target Pose  ] "
         f"x={target_xyz[0]: .6f}, y={target_xyz[1]: .6f}, z={target_xyz[2]: .6f}, "
         f"wx={target_wxyz[0]: .6f}, wy={target_wxyz[1]: .6f}, wz={target_wxyz[2]: .6f}"
+    )
+    print(
+        "[Target Force ] "
+        f"Fx={target_force[0]: .6f}, Fy={target_force[1]: .6f}, Fz={target_force[2]: .6f}"
     )
     print(
         "[Current Pose ] "
@@ -183,16 +175,6 @@ def print_action_debug_status(
         f"[Error        ] pos_norm={pos_err_norm: .6f}, "
         f"rot_norm={rot_err_norm: .6f}"
     )
-
-    if target_force_vals is not None:
-        while len(target_force_vals) < 3:
-            target_force_vals.append(0.0)
-        print(
-            "[Target Force ] "
-            f"Fx={target_force_vals[0]: .6f}, "
-            f"Fy={target_force_vals[1]: .6f}, "
-            f"Fz={target_force_vals[2]: .6f}"
-        )
 
     print("-" * 100)
     if reward_total is None or reward_score is None or penalty_score is None:
@@ -214,15 +196,12 @@ def print_action_debug_status(
             f"Fx={fx: .6f}, Fy={fy: .6f}, Fz={fz: .6f}, "
             f"Tx={tx: .6f}, Ty={ty: .6f}, Tz={tz: .6f}"
         )
-
-        if target_force_vals is not None:
-            fz_err = fz - target_force_vals[2]
-            print(
-                "[Force Error ] "
-                f"dFx={fx - target_force_vals[0]: .6f}, "
-                f"dFy={fy - target_force_vals[1]: .6f}, "
-                f"dFz={fz_err: .6f}"
-            )
+        print(
+            "[Force Error ] "
+            f"dFx={fx - target_force[0]: .6f}, "
+            f"dFy={fy - target_force[1]: .6f}, "
+            f"dFz={fz - target_force[2]: .6f}"
+        )
     else:
         print("[FT Sensor    ] No cached 6-axis FT data")
 
@@ -257,9 +236,6 @@ def print_action_debug_status(
     print("=" * 100)
 
 
-# =========================================================
-# 폴리싱 로깅 및 시각화 모듈
-# =========================================================
 class PolishingLoggerAndVisualizer:
     def __init__(
         self,

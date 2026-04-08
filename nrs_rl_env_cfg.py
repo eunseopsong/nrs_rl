@@ -80,16 +80,11 @@ class ActionsCfg:
         hdf5_file_path=HDF5_TRAJ_PATH,
         position_dataset_key="position",
         force_dataset_key="force",
-        action_dim=2,
-        position_scale=1.0,
-        force_scale=1.0,
-        z_target_offset_mm=0.0,
 
-        approach_offset_mm=120.0,
-        approach_pos_tol_mm=20.0,
-        approach_rot_tol_rad=0.20,
-        descend_pos_tol_mm=10.0,
-        descend_rot_tol_rad=0.10,
+        action_dim=2,
+        position_scale=1.0,   # z residual [mm]
+        force_scale=1.0,      # z-force residual [N]
+        z_target_offset_mm=0.0,
 
         fixed_joint_name="tool0_to_spindle",
         joint_prim_relpath="joints",
@@ -117,7 +112,6 @@ class ActionsCfg:
         enable_debug_print=True,
         debug_print_interval=10,
         debug_env_id=0,
-        track_force_tol_n=10.0,
     )
 
 @configclass
