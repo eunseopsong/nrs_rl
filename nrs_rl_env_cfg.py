@@ -81,37 +81,8 @@ class ActionsCfg:
         position_dataset_key="position",
         force_dataset_key="force",
         action_dim=2,
-        position_scale=1.0,   # z residual [mm]
-        force_scale=1.0,      # fz residual [N]
-        z_target_offset_mm=0.0,
-
-        # connect phase tolerance
-        connect_pos_tol_mm=20.0,
-        connect_rot_tol_rad=0.20,
-
         fixed_joint_name="tool0_to_spindle",
         joint_prim_relpath="joints",
-
-        force_model_path="/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/y2_control_pybind/checkpoints/ContextNAF_MDGradi/contextNAF_mdGradi_policy_script.pt",
-        force_dt=0.002,
-        force_threads=1,
-        force_device="cpu",
-        force_md_ratio=1000.0,
-        force_fc_fext=50.0,
-        force_free_mass=2.0,
-        force_free_damping=6000.0,
-        force_free_stiffness=2000.0,
-        force_contact_stiffness=0.0,
-        force_recovery_tau=3.0,
-        force_action_low=(-0.25, -0.25),
-        force_action_high=(0.25, 0.25),
-        force_mass_min=0.5,
-        force_mass_max=5.0,
-        force_alpha_min=0.5,
-        force_alpha_max=3.0,
-        force_alpha_rate_up=4.0,
-        force_alpha_rate_down=4.0,
-
         enable_debug_print=True,
         debug_print_interval=10,
         debug_env_id=0,

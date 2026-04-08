@@ -7,7 +7,6 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11 REQUIRED CONFIG)
-find_package(Torch REQUIRED)
 
 add_compile_definitions(Y2_IK_SOLVER_MODE=Y2_IK_SOLVER_DLS)
 
@@ -16,8 +15,27 @@ if(DEFINED TORCH_CXX11_ABI)
     add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=${TORCH_CXX11_ABI})
 endif()
 
+# Torch paths are injected from setup.py
+if(NOT DEFINED TORCH_INCLUDE_DIRS)
+    message(FATAL_ERROR "TORCH_INCLUDE_DIRS is not set")
+endif()
+
+if(NOT DEFINED TORCH_LIBRARY_DIRS)
+    message(FATAL_ERROR "TORCH_LIBRARY_DIRS is not set")
+endif()
+
+if(NOT DEFINED TORCH_LIB_NAMES)
+    message(FATAL_ERROR "TORCH_LIB_NAMES is not set")
+endif()
+
+# Parse semicolon-separated lists passed from setup.py
+separate_arguments(TORCH_INCLUDE_DIRS_LIST UNIX_COMMAND "${TORCH_INCLUDE_DIRS}")
+separate_arguments(TORCH_LIBRARY_DIRS_LIST UNIX_COMMAND "${TORCH_LIBRARY_DIRS}")
+separate_arguments(TORCH_LIB_NAMES_LIST UNIX_COMMAND "${TORCH_LIB_NAMES}")
+
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include
+    ${TORCH_INCLUDE_DIRS_LIST}
 )
 
 set(Y2_MATRIX_SRCS
@@ -57,15 +75,23 @@ pybind11_add_module(_y2_control_pybind
 
 target_include_directories(_y2_control_pybind PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include
+    ${TORCH_INCLUDE_DIRS_LIST}
 )
 
-target_link_libraries(_y2_control_pybind PRIVATE ${TORCH_LIBRARIES})
+target_link_directories(_y2_control_pybind PRIVATE
+    ${TORCH_LIBRARY_DIRS_LIST}
+)
 
-separate_arguments(TORCH_CXX_FLAGS_LIST NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
-target_compile_options(_y2_control_pybind PRIVATE ${TORCH_CXX_FLAGS_LIST})
+target_link_libraries(_y2_control_pybind PRIVATE
+    ${TORCH_LIB_NAMES_LIST}
+)
 
+# Ensure runtime loader prefers current Python env torch libs
 set_target_properties(_y2_control_pybind PROPERTIES
     PREFIX ""
+    BUILD_RPATH_USE_ORIGIN FALSE
+    BUILD_RPATH "${TORCH_LIBRARY_DIRS}"
+    INSTALL_RPATH "${TORCH_LIBRARY_DIRS}"
 )
 
 install(TARGETS _y2_control_pybind

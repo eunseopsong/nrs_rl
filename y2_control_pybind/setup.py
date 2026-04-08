@@ -3,12 +3,12 @@ from setuptools.command.build_ext import build_ext
 import pathlib
 import subprocess
 import sys
-import os
 
 
 class CMakeBuild(build_ext):
     def build_extension(self, ext):
-        import torch  # lazy import: only when actual build runs
+        import torch
+        from torch.utils.cpp_extension import include_paths, library_paths
 
         ext_fullpath = pathlib.Path(self.get_ext_fullpath(ext.name)).resolve()
         extdir = ext_fullpath.parent
@@ -20,19 +20,26 @@ class CMakeBuild(build_ext):
 
         pybind11_cmake_dir = subprocess.check_output(
             [sys.executable, "-m", "pybind11", "--cmakedir"],
-            text=True
+            text=True,
         ).strip()
 
-        torch_cmake_dir = torch.utils.cmake_prefix_path
+        torch_include_dirs = include_paths()
+        torch_library_dirs = library_paths()
         torch_abi_flag = "1" if torch.compiled_with_cxx11_abi() else "0"
+
+        # Link against the torch libs from the CURRENT python env only
+        # Keep this minimal and stable
+        torch_lib_names = ["torch", "torch_cpu", "c10"]
 
         cmake_args = [
             f"-DCMAKE_BUILD_TYPE={cfg}",
             f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}",
             f"-DPython3_EXECUTABLE={sys.executable}",
             f"-Dpybind11_DIR={pybind11_cmake_dir}",
-            f"-DTorch_DIR={torch_cmake_dir}/Torch",
             f"-DTORCH_CXX11_ABI={torch_abi_flag}",
+            f"-DTORCH_INCLUDE_DIRS={';'.join(torch_include_dirs)}",
+            f"-DTORCH_LIBRARY_DIRS={';'.join(torch_library_dirs)}",
+            f"-DTORCH_LIB_NAMES={';'.join(torch_lib_names)}",
         ]
 
         build_args = [

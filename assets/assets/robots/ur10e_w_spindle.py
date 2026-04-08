@@ -46,12 +46,12 @@ EE_FRAME_NAME = "spindle_link"
 # Home pose (rad)
 # -----------------------------------------------------------------------------
 UR10E_HOME_DICT = {
-    "shoulder_pan_joint": -0.5939,
-    "shoulder_lift_joint": -1.2795,
-    "elbow_joint": -2.2452,
-    "wrist_1_joint": -1.1892,
+    "shoulder_pan_joint": 0.5585,
+    "shoulder_lift_joint": -2.0949,
+    "elbow_joint": -1.5711,
+    "wrist_1_joint": -1.0472,
     "wrist_2_joint": 1.5708,
-    "wrist_3_joint": 0.1915,
+    "wrist_3_joint": 0.5585,
 }
 # v20 baseline
 
