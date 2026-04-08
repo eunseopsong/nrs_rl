@@ -3,9 +3,9 @@
 """
 Observation utilities for UR10e spindle environment.
 
-- Integrated with nrs_fk_core (C++ FK module)
-- Horizon-based trajectory loaders (positions + forces)
-- Includes EE pose (x, y, z, roll, pitch, yaw), and camera sensors
+- Integrated with y2_control_pybind (C++ FK module)
+- HDF5 trajectory loader for position/force
+- Includes EE pose (x, y, z, wx, wy, wz), target position/force, and camera sensors
 """
 
 from __future__ import annotations
@@ -15,10 +15,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
-import sys
 import torch
 import importlib
-import math
 
 from ..utils import debug as local_debug
 
@@ -26,122 +24,192 @@ local_ft_sensor = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.assets.assets.sensors.six_axis_ft_sensor"
 )
 
-from y2_control_py import UR10eKinematics, EE2TCP, CONTROL_PERIOD
-
 # ------------------------------------------------------
-# Global FK solver (y2_control_pybind)
-# - y2 FK output position unit: mm
-# - observation output should be meters
+# y2_control_pybind import
 # ------------------------------------------------------
-_ur10e_fk_solver: UR10eKinematics | None = None
+y2_cfg = importlib.import_module(
+    "nrs_rl.tasks.manager_based.nrs_rl.y2_control_pybind.y2_control_py.config"
+)
+y2_pb = importlib.import_module(
+    "nrs_rl.tasks.manager_based.nrs_rl.y2_control_pybind.y2_control_py._y2_control_pybind"
+)
 
-
-def _get_fk_solver() -> UR10eKinematics:
-    global _ur10e_fk_solver
-    if _ur10e_fk_solver is None:
-        _ur10e_fk_solver = UR10eKinematics(
-            dt=float(CONTROL_PERIOD),
-            ee2tcp=EE2TCP,
-        )
-    return _ur10e_fk_solver
 # ------------------------------------------------------
 # Global buffers
 # ------------------------------------------------------
-_hdf5_positions: torch.Tensor | None = None
-_hdf5_forces: torch.Tensor | None = None
-_step_idx = 0
+_hdf5_position: torch.Tensor | None = None   # (T, 6) = [x y z wx wy wz]
+_hdf5_force: torch.Tensor | None = None      # (T, 3) = [fx fy fz]
+_hdf5_traj_len: int = 0
+
+# ------------------------------------------------------
+# Global singleton-like FK solver
+# ------------------------------------------------------
+_y2_kin_solver = None
 
 
-def _rpy_to_quat_torch(rpy: torch.Tensor) -> torch.Tensor:
+def _get_y2_kin_solver():
+    global _y2_kin_solver
+    if _y2_kin_solver is None:
+        _y2_kin_solver = y2_pb.UR10eKinematics(
+            dt=float(y2_cfg.CONTROL_PERIOD),
+            ee2tcp=y2_cfg.EE2TCP,
+        )
+    return _y2_kin_solver
+
+
+def get_hdf5_trajectory_length() -> int:
+    return int(_hdf5_traj_len)
+
+
+def _get_traj_indices(env: "ManagerBasedRLEnv", horizon: int = 1) -> torch.Tensor:
     """
-    Convert roll-pitch-yaw to quaternion [w, x, y, z].
+    Use episode_length_buf directly as trajectory row index.
+    idx[k] = current_step + k, clamped to the last row.
+    """
+    global _hdf5_traj_len
+
+    num_envs = env.num_envs
+    device = env.device
+
+    if _hdf5_traj_len <= 0:
+        return torch.zeros((num_envs, horizon), device=device, dtype=torch.long)
+
+    if hasattr(env, "episode_length_buf"):
+        base_idx = env.episode_length_buf.to(device=device, dtype=torch.long)
+    else:
+        base_idx = torch.zeros((num_envs,), device=device, dtype=torch.long)
+
+    offsets = torch.arange(horizon, device=device, dtype=torch.long).unsqueeze(0)
+    idx = base_idx.unsqueeze(1) + offsets
+    idx = torch.clamp(idx, 0, _hdf5_traj_len - 1)
+    return idx
+
+
+def _spatial_angle_to_quat_torch(spatial: torch.Tensor) -> torch.Tensor:
+    """
+    Convert spatial angle [wx, wy, wz] to quaternion [w, x, y, z].
     Input:  (N, 3)
     Output: (N, 4)
     """
-    roll = rpy[:, 0] * 0.5
-    pitch = rpy[:, 1] * 0.5
-    yaw = rpy[:, 2] * 0.5
+    angle = torch.norm(spatial, dim=-1, keepdim=True)
+    eps = 1e-10
 
-    cr = torch.cos(roll)
-    sr = torch.sin(roll)
-    cp = torch.cos(pitch)
-    sp = torch.sin(pitch)
-    cy = torch.cos(yaw)
-    sy = torch.sin(yaw)
+    axis = torch.where(
+        angle > eps,
+        spatial / angle,
+        torch.zeros_like(spatial),
+    )
 
-    qw = cr * cp * cy + sr * sp * sy
-    qx = sr * cp * cy - cr * sp * sy
-    qy = cr * sp * cy + sr * cp * sy
-    qz = cr * cp * sy - sr * sp * cy
+    half = 0.5 * angle
+    qw = torch.cos(half)
+    xyz = axis * torch.sin(half)
 
-    return torch.stack([qw, qx, qy, qz], dim=-1)
+    quat = torch.cat([qw, xyz], dim=-1)
+    # for zero-angle, return identity
+    zero_mask = (angle.squeeze(-1) <= eps)
+    if torch.any(zero_mask):
+        quat[zero_mask, 0] = 1.0
+        quat[zero_mask, 1:] = 0.0
+    return quat
+
+
+def _rotmat_to_spatial_angle_torch(R: torch.Tensor) -> torch.Tensor:
+    """
+    Convert rotation matrix to SpatialAngle [wx, wy, wz].
+
+    Input:
+        R: (..., 3, 3)
+    Output:
+        (..., 3)
+    """
+    assert R.shape[-2:] == (3, 3), f"Expected (...,3,3), got {R.shape}"
+
+    trace = R[..., 0, 0] + R[..., 1, 1] + R[..., 2, 2]
+    cos_angle = (trace - 1.0) / 2.0
+    cos_angle = torch.clamp(cos_angle, -1.0, 1.0)
+    angle = torch.acos(cos_angle)
+
+    eps = 1e-6
+    pi = torch.pi
+
+    out = torch.zeros((*R.shape[:-2], 3), dtype=R.dtype, device=R.device)
+
+    # 1) near zero rotation
+    small_mask = torch.abs(angle) < eps
+    if torch.any(small_mask):
+        out[small_mask] = 0.0
+
+    # 2) near pi rotation
+    pi_mask = torch.abs(angle - pi) < eps
+    if torch.any(pi_mask):
+        R_pi = R[pi_mask]
+        angle_pi = angle[pi_mask]
+
+        spatial_list = []
+        for i in range(R_pi.shape[0]):
+            Ri = R_pi[i]
+            ai = angle_pi[i]
+
+            if Ri[0, 0] >= Ri[1, 1] and Ri[0, 0] >= Ri[2, 2]:
+                axis_x = torch.sqrt(torch.clamp((Ri[0, 0] + 1.0) / 2.0, min=0.0))
+                denom = 2.0 * torch.clamp(axis_x, min=1e-8)
+                axis_y = Ri[0, 1] / denom
+                axis_z = Ri[0, 2] / denom
+            elif Ri[1, 1] >= Ri[2, 2]:
+                axis_y = torch.sqrt(torch.clamp((Ri[1, 1] + 1.0) / 2.0, min=0.0))
+                denom = 2.0 * torch.clamp(axis_y, min=1e-8)
+                axis_x = Ri[0, 1] / denom
+                axis_z = Ri[1, 2] / denom
+            else:
+                axis_z = torch.sqrt(torch.clamp((Ri[2, 2] + 1.0) / 2.0, min=0.0))
+                denom = 2.0 * torch.clamp(axis_z, min=1e-8)
+                axis_x = Ri[0, 2] / denom
+                axis_y = Ri[1, 2] / denom
+
+            spatial_list.append(torch.stack([axis_x * ai, axis_y * ai, axis_z * ai]))
+
+        out[pi_mask] = torch.stack(spatial_list, dim=0)
+
+    # 3) normal case
+    normal_mask = ~(small_mask | pi_mask)
+    if torch.any(normal_mask):
+        Rn = R[normal_mask]
+        ang = angle[normal_mask]
+        sin_ang = torch.sin(ang)
+
+        axis_x = (Rn[:, 2, 1] - Rn[:, 1, 2]) / (2.0 * sin_ang)
+        axis_y = (Rn[:, 0, 2] - Rn[:, 2, 0]) / (2.0 * sin_ang)
+        axis_z = (Rn[:, 1, 0] - Rn[:, 0, 1]) / (2.0 * sin_ang)
+
+        out[normal_mask, 0] = axis_x * ang
+        out[normal_mask, 1] = axis_y * ang
+        out[normal_mask, 2] = axis_z * ang
+
+    return out
 
 
 def _get_target_pose_for_polishing(env: "ManagerBasedRLEnv") -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Safe target-pose fetcher for polishing observation.
-
-    Priority:
-      1) command_manager['trajectory'] if available
-      2) _hdf5_positions current-step fallback
-      3) zeros + identity quaternion
-
     Returns:
       target_xyz  : (N, 3)
       target_quat : (N, 4)
+
+    Uses HDF5 [x y z wx wy wz] directly.
     """
-    global _hdf5_positions
+    global _hdf5_position
 
     device = env.device
     num_envs = env.num_envs
 
-    # --------------------------------------------------
-    # 1) Try command_manager trajectory first
-    # --------------------------------------------------
-    try:
-        cmd_mgr = getattr(env, "command_manager", None)
-        if cmd_mgr is not None and hasattr(cmd_mgr, "_terms") and ("trajectory" in cmd_mgr._terms):
-            target_pose = cmd_mgr.get_command("trajectory")
-            if target_pose is not None and target_pose.ndim == 2 and target_pose.shape[1] >= 7:
-                target_xyz = target_pose[:, :3].to(device=device, dtype=torch.float32)
-                target_quat = target_pose[:, 3:7].to(device=device, dtype=torch.float32)
-                return target_xyz, target_quat
-    except Exception as e:
-        print(f"[TARGET FETCH WARN] command trajectory unavailable | {repr(e)}")
+    if _hdf5_position is not None and _hdf5_position.ndim == 2 and _hdf5_position.shape[0] > 0:
+        idx = _get_traj_indices(env, horizon=1).squeeze(1)
+        row = _hdf5_position[idx].to(device=device, dtype=torch.float32)
 
-    # --------------------------------------------------
-    # 2) Fallback to HDF5 positions
-    # --------------------------------------------------
-    if _hdf5_positions is not None and _hdf5_positions.ndim == 2 and _hdf5_positions.shape[0] > 0:
-        t_total, d = _hdf5_positions.shape
-
-        if hasattr(env, "episode_length_buf"):
-            step = env.episode_length_buf.to(torch.float32)
-        else:
-            step = torch.zeros((num_envs,), device=device, dtype=torch.float32)
-
-        ep_len = max(int(getattr(env, "max_episode_length", 1)), 1)
-        idx = ((step / ep_len) * t_total).to(torch.int64)
-        idx = torch.clamp(idx, 0, t_total - 1)
-
-        row = _hdf5_positions[idx].to(device=device, dtype=torch.float32)
-
-        target_xyz = torch.zeros((num_envs, 3), device=device, dtype=torch.float32)
-        if d >= 3:
-            target_xyz = row[:, :3]
-
-        target_quat = torch.zeros((num_envs, 4), device=device, dtype=torch.float32)
-        target_quat[:, 0] = 1.0
-
-        if d >= 6:
-            target_rpy = row[:, 3:6]
-            target_quat = _rpy_to_quat_torch(target_rpy)
-
+        target_xyz = row[:, :3]
+        target_spatial = row[:, 3:6]
+        target_quat = _spatial_angle_to_quat_torch(target_spatial)
         return target_xyz, target_quat
 
-    # --------------------------------------------------
-    # 3) Final fallback
-    # --------------------------------------------------
     target_xyz = torch.zeros((num_envs, 3), device=device, dtype=torch.float32)
     target_quat = torch.zeros((num_envs, 4), device=device, dtype=torch.float32)
     target_quat[:, 0] = 1.0
@@ -160,7 +228,6 @@ _cumulative_contact_distance: torch.Tensor | None = None
 # Internal helpers
 # ------------------------------------------------------
 def _update_debug_cache(step: int, wrench_env0: torch.Tensor | None = None, metrics_env0: torch.Tensor | None = None):
-    """Update local debug caches directly so action debug can always read them."""
     try:
         if wrench_env0 is not None and hasattr(local_debug, "_last_ft_debug"):
             local_debug._last_ft_debug["step"] = int(step)
@@ -174,7 +241,6 @@ def _update_debug_cache(step: int, wrench_env0: torch.Tensor | None = None, metr
 
 
 def _call_debug_printers(step: int, wrench_env0: torch.Tensor | None = None, metrics_env0: torch.Tensor | None = None):
-    """Call debug printer functions without silently swallowing all errors."""
     if wrench_env0 is not None:
         try:
             if hasattr(local_debug, "print_ft_sensor_debug"):
@@ -191,15 +257,13 @@ def _call_debug_printers(step: int, wrench_env0: torch.Tensor | None = None, met
 
 
 # ------------------------------------------------------
-# EE pose observation (x, y, z, roll, pitch, yaw)
+# EE pose observation (x, y, z, wx, wy, wz)
 # ------------------------------------------------------
 def get_ee_pose(env: "ManagerBasedRLEnv", asset_name: str = "robot") -> torch.Tensor:
     """
-    Returns end-effector pose (x, y, z, roll, pitch, yaw)
+    Returns end-effector pose (x, y, z, wx, wy, wz)
 
-    - Reads q1~q6
-    - Runs FK via y2_control_py.UR10eKinematics
-    - FK position output is mm -> converted to meters
+    - Reads q1~q6 and runs FK via y2_control_pybind.UR10eKinematics
     - Output: (num_envs, 6) torch tensor on env device
     """
     robot = env.scene[asset_name]
@@ -208,48 +272,62 @@ def get_ee_pose(env: "ManagerBasedRLEnv", asset_name: str = "robot") -> torch.Te
     device = q.device
     num_envs = q.shape[0]
 
-    fk_solver = _get_fk_solver()
+    kin = _get_y2_kin_solver()
 
     ee_pose_list = []
-    q_cpu = q.detach().cpu()
+    q_cpu = q.detach().cpu().to(torch.float64)
 
     for i in range(num_envs):
-        q_list = q_cpu[i].tolist()
+        q_i = q_cpu[i].tolist()
 
-        # y2 FK returns 4x4 HTM (position in mm)
-        T = fk_solver.forward_kinematics(q_list)
+        T = kin.forward_kinematics(q_i)
+        T_t = torch.tensor(T, dtype=torch.float64)
 
-        x_mm = float(T[0][3])
-        y_mm = float(T[1][3])
-        z_mm = float(T[2][3])
+        pos = T_t[:3, 3]
+        R = T_t[:3, :3]
+        spatial = _rotmat_to_spatial_angle_torch(R.unsqueeze(0)).squeeze(0)
 
-        # rotation matrix -> roll, pitch, yaw
-        r11, r12, r13 = float(T[0][0]), float(T[0][1]), float(T[0][2])
-        r21, r22, r23 = float(T[1][0]), float(T[1][1]), float(T[1][2])
-        r31, r32, r33 = float(T[2][0]), float(T[2][1]), float(T[2][2])
-
-        # ZYX convention
-        yaw = math.atan2(r21, r11)
-        pitch = math.atan2(-r31, math.sqrt(r32 * r32 + r33 * r33))
-        roll = math.atan2(r32, r33)
-
-        ee_pose_list.append([
-            x_mm * 0.001,   # mm -> m
-            y_mm * 0.001,   # mm -> m
-            z_mm * 0.001,   # mm -> m
-            roll,
-            pitch,
-            yaw,
-        ])
+        ee_pose_list.append(
+            [
+                float(pos[0]),
+                float(pos[1]),
+                float(pos[2]),
+                float(spatial[0]),
+                float(spatial[1]),
+                float(spatial[2]),
+            ]
+        )
 
     ee_pose = torch.tensor(ee_pose_list, dtype=torch.float32, device=device)
     assert ee_pose.ndim == 2 and ee_pose.shape[1] == 6, f"[EE_POSE] Invalid shape: {ee_pose.shape}"
     return ee_pose
 
+
+def get_current_pose_and_force(
+    env: "ManagerBasedRLEnv",
+    asset_name: str = "robot",
+    fixed_joint_name: str = "tool0_to_spindle",
+    joint_prim_relpath: str = "joints",
+) -> torch.Tensor:
+    """
+    Returns:
+        (N, 12) = [x y z wx wy wz fx fy fz tx ty tz]
+    """
+    pose = get_ee_pose(env, asset_name=asset_name)
+    wrench = local_ft_sensor.get_6axis_ft_fixed_joint(
+        env=env,
+        asset_name=asset_name,
+        fixed_joint_name=fixed_joint_name,
+        joint_prim_relpath=joint_prim_relpath,
+        verbose=False,
+    )
+    return torch.cat([pose, wrench], dim=-1)
+
+
 # ------------------------------------------------------
-# HDF5 loader: Positions + Forces
+# HDF5 loader
 # ------------------------------------------------------
-def load_hdf5_positions(
+def load_hdf5_trajectory(
     env: "ManagerBasedRLEnv",
     env_ids,
     file_path: str,
@@ -257,105 +335,110 @@ def load_hdf5_positions(
     force_dataset_key: str = "force",
 ):
     """
-    Load HDF5 trajectory (position + force targets).
-
-    Expected datasets:
-        - position: (T, 6)
-        - force:    (T, 3)
+    Load HDF5 trajectory:
+      - position: (T, 6) = [x y z wx wy wz]
+      - force   : (T, 3) = [fx fy fz]
     """
-    global _hdf5_positions, _hdf5_forces, _step_idx
+    global _hdf5_position, _hdf5_force, _hdf5_traj_len
     import h5py
 
     with h5py.File(file_path, "r") as f:
         if position_dataset_key not in f:
             raise KeyError(
-                f"[ERROR] HDF5 (positions): '{position_dataset_key}' not found. Available keys: {list(f.keys())}"
+                f"[ERROR] HDF5 position dataset '{position_dataset_key}' not found. Available keys: {list(f.keys())}"
             )
         if force_dataset_key not in f:
             raise KeyError(
-                f"[ERROR] HDF5 (forces): '{force_dataset_key}' not found. Available keys: {list(f.keys())}"
+                f"[ERROR] HDF5 force dataset '{force_dataset_key}' not found. Available keys: {list(f.keys())}"
             )
 
-        pos_data = f[position_dataset_key][:]
-        force_data = f[force_dataset_key][:]
+        pos = f[position_dataset_key][:]
+        frc = f[force_dataset_key][:]
 
-    if pos_data.ndim != 2 or pos_data.shape[1] != 6:
-        raise ValueError(f"[ERROR] position dataset must have shape (T, 6), got {pos_data.shape}")
-    if force_data.ndim != 2 or force_data.shape[1] != 3:
-        raise ValueError(f"[ERROR] force dataset must have shape (T, 3), got {force_data.shape}")
-    if pos_data.shape[0] != force_data.shape[0]:
-        raise ValueError(
-            f"[ERROR] position and force must have same length, got "
-            f"{pos_data.shape[0]} vs {force_data.shape[0]}"
-        )
+    if pos.ndim != 2 or pos.shape[1] != 6:
+        raise ValueError(f"[ERROR] position dataset must be (T,6), got {pos.shape}")
+    if frc.ndim != 2 or frc.shape[1] != 3:
+        raise ValueError(f"[ERROR] force dataset must be (T,3), got {frc.shape}")
+    if pos.shape[0] != frc.shape[0]:
+        raise ValueError(f"[ERROR] position/force length mismatch: {pos.shape[0]} vs {frc.shape[0]}")
 
-    _hdf5_positions = torch.tensor(pos_data, dtype=torch.float32, device=env.device)
-    _hdf5_forces = torch.tensor(force_data, dtype=torch.float32, device=env.device)
-    _step_idx = 0
+    _hdf5_position = torch.tensor(pos, dtype=torch.float32, device=env.device)
+    _hdf5_force = torch.tensor(frc, dtype=torch.float32, device=env.device)
+    _hdf5_traj_len = int(pos.shape[0])
 
-    local_debug.print_hdf5_positions_loaded(_hdf5_positions.shape, file_path)
-    print(f"[INFO] Loaded HDF5 forces of shape {_hdf5_forces.shape} from {file_path}")
+    local_debug.print_hdf5_positions_loaded(_hdf5_position.shape, file_path)
+
+
+# backward-compatible alias
+def load_hdf5_positions(
+    env: "ManagerBasedRLEnv",
+    env_ids,
+    file_path: str,
+    position_dataset_key: str = "position",
+    force_dataset_key: str = "force",
+):
+    return load_hdf5_trajectory(
+        env=env,
+        env_ids=env_ids,
+        file_path=file_path,
+        position_dataset_key=position_dataset_key,
+        force_dataset_key=force_dataset_key,
+    )
 
 
 # ------------------------------------------------------
-# Observation: target positions (horizon-based)
+# Observation: target positions / forces (horizon-based)
 # ------------------------------------------------------
 def get_hdf5_target_positions(env: "ManagerBasedRLEnv", horizon: int = 5) -> torch.Tensor:
     """
-    Return future EE pose targets (x,y,z,roll,pitch,yaw) flattened: (N, horizon*6).
+    Return future target positions flattened: (N, horizon*6)
+    Each row: [x y z wx wy wz]
     """
-    global _hdf5_positions
+    global _hdf5_position
 
-    if _hdf5_positions is None:
-        d = 6
-        return torch.zeros((env.num_envs, horizon * d), device=env.device, dtype=torch.float32)
+    if _hdf5_position is None:
+        return torch.zeros((env.num_envs, horizon * 6), device=env.device, dtype=torch.float32)
 
-    t_total, d = _hdf5_positions.shape
-    step = int(env.episode_length_buf[0].item())
-    ep_len = int(env.max_episode_length)
-    idx = min(int((step / max(ep_len, 1)) * t_total), t_total - 1)
-
-    future_idx = torch.arange(idx, idx + horizon, device=_hdf5_positions.device)
-    future_idx = torch.clamp(future_idx, max=t_total - 1)
-
-    future_targets = _hdf5_positions[future_idx].reshape(1, horizon * d)
-    return future_targets.repeat(env.num_envs, 1)
+    idx = _get_traj_indices(env, horizon=horizon)  # (N, H)
+    rows = _hdf5_position[idx]                      # (N, H, 6)
+    return rows.reshape(env.num_envs, horizon * 6)
 
 
-# ------------------------------------------------------
-# Observation: target forces (horizon-based)
-# ------------------------------------------------------
 def get_hdf5_target_forces(env: "ManagerBasedRLEnv", horizon: int = 5) -> torch.Tensor:
     """
-    Return future force targets (fx, fy, fz) flattened: (N, horizon*3).
+    Return future target forces flattened: (N, horizon*3)
+    Each row: [fx fy fz]
     """
-    global _hdf5_forces
+    global _hdf5_force
 
-    if _hdf5_forces is None:
-        d = 3
-        return torch.zeros((env.num_envs, horizon * d), device=env.device, dtype=torch.float32)
+    if _hdf5_force is None:
+        return torch.zeros((env.num_envs, horizon * 3), device=env.device, dtype=torch.float32)
 
-    t_total, d = _hdf5_forces.shape
-    step = int(env.episode_length_buf[0].item())
-    ep_len = int(env.max_episode_length)
-    idx = min(int((step / max(ep_len, 1)) * t_total), t_total - 1)
+    idx = _get_traj_indices(env, horizon=horizon)  # (N, H)
+    rows = _hdf5_force[idx]                         # (N, H, 3)
+    return rows.reshape(env.num_envs, horizon * 3)
 
-    future_idx = torch.arange(idx, idx + horizon, device=_hdf5_forces.device)
-    future_idx = torch.clamp(future_idx, max=t_total - 1)
 
-    future_targets = _hdf5_forces[future_idx].reshape(1, horizon * d)
-    return future_targets.repeat(env.num_envs, 1)
+def get_hdf5_target_pose_force(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    """
+    Returns current target row:
+      (N, 9) = [x y z wx wy wz fx fy fz]
+    """
+    global _hdf5_position, _hdf5_force
+
+    if _hdf5_position is None or _hdf5_force is None:
+        return torch.zeros((env.num_envs, 9), device=env.device, dtype=torch.float32)
+
+    idx = _get_traj_indices(env, horizon=1).squeeze(1)
+    pos = _hdf5_position[idx]
+    frc = _hdf5_force[idx]
+    return torch.cat([pos, frc], dim=-1)
 
 
 # ------------------------------------------------------
 # 로봇 현재 속도 Observation
 # ------------------------------------------------------
 def get_joint_velocities(env: "ManagerBasedRLEnv", asset_name: str = "robot") -> torch.Tensor:
-    """
-    로봇의 현재 조인트 속도(qdot)를 반환합니다.
-
-    - Output: (num_envs, 6) torch tensor on env device
-    """
     robot = env.scene[asset_name]
     joint_vel = robot.data.joint_vel[:, :6]
     return joint_vel
@@ -369,35 +452,32 @@ def get_velocity_adjusted_target_positions(
     horizon: int = 5,
     lookahead_gain: float = 1.0,
 ) -> torch.Tensor:
-    """
-    현재 속도 크기에 비례하여 HDF5 궤적의 탐색 인덱스를 가공(Look-ahead)하여 반환합니다.
+    global _hdf5_position
 
-    - Output: (num_envs, horizon * 6)
-    """
-    global _hdf5_positions
-
-    if _hdf5_positions is None:
-        d = 6
-        return torch.zeros((env.num_envs, horizon * d), device=env.device, dtype=torch.float32)
+    if _hdf5_position is None:
+        return torch.zeros((env.num_envs, horizon * 6), device=env.device, dtype=torch.float32)
 
     robot = env.scene["robot"]
+
     current_vel = robot.data.joint_vel[:, :6]
-    vel_magnitude = torch.norm(current_vel, dim=-1)
+    vel_magnitude = torch.norm(current_vel, dim=-1)  # (N,)
 
-    t_total, d = _hdf5_positions.shape
-    step = env.episode_length_buf.to(torch.float32)
-    ep_len = max(int(env.max_episode_length), 1)
+    if _hdf5_traj_len <= 0:
+        return torch.zeros((env.num_envs, horizon * 6), device=env.device, dtype=torch.float32)
 
-    step_offset = (vel_magnitude * lookahead_gain).to(torch.int64)
-    base_idx = ((step / ep_len) * t_total).to(torch.int64)
-    dynamic_idx = base_idx + step_offset
-    dynamic_idx = torch.clamp(dynamic_idx, max=t_total - 1)
+    if hasattr(env, "episode_length_buf"):
+        base_idx = env.episode_length_buf.to(device=env.device, dtype=torch.long)
+    else:
+        base_idx = torch.zeros((env.num_envs,), device=env.device, dtype=torch.long)
 
-    future_targets = torch.zeros((env.num_envs, horizon * d), device=env.device, dtype=torch.float32)
+    step_offset = (vel_magnitude * lookahead_gain).to(torch.long)
+    dynamic_idx = torch.clamp(base_idx + step_offset, 0, _hdf5_traj_len - 1)
+
+    future_targets = torch.zeros((env.num_envs, horizon * 6), device=env.device, dtype=torch.float32)
 
     for i in range(horizon):
-        h_idx = torch.clamp(dynamic_idx + i, max=t_total - 1)
-        future_targets[:, i * d : (i + 1) * d] = _hdf5_positions[h_idx]
+        h_idx = torch.clamp(dynamic_idx + i, 0, _hdf5_traj_len - 1)
+        future_targets[:, i * 6 : (i + 1) * 6] = _hdf5_position[h_idx]
 
     return future_targets
 
@@ -457,6 +537,25 @@ def get_processed_polishing_target(
     removal_gain: float = 0.001,
     offset_axis: int = 2,
 ) -> torch.Tensor:
+    """
+    Returns:
+        (num_envs, 14)
+
+        [0]  processed_target_x
+        [1]  processed_target_y
+        [2]  processed_target_z
+        [3]  target_quat_0
+        [4]  target_quat_1
+        [5]  target_quat_2
+        [6]  target_quat_3
+        [7]  cartesian_velocity
+        [8]  Fz
+        [9]  abs_fz
+        [10] contact_flag
+        [11] effective_normal_force
+        [12] cumulative_removal
+        [13] cumulative_contact_distance
+    """
     global _prev_xyz_for_polishing
     global _cumulative_removal
     global _cumulative_contact_distance
@@ -533,7 +632,7 @@ def get_processed_polishing_target(
     _cumulative_contact_distance = _cumulative_contact_distance + (contact_flag * cartesian_vel * dt)
 
     processed_target_xyz = target_xyz.clone()
-    processed_target_xyz[:, offset_axis:offset_axis + 1] -= _cumulative_removal
+    processed_target_xyz[:, offset_axis : offset_axis + 1] -= _cumulative_removal
 
     metrics = torch.cat(
         [

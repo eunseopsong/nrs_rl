@@ -102,7 +102,6 @@ def print_camera_normals(step: int, normals_mean_env0):
 
 # =========================================================
 # FT sensor debug cache update
-# - 여기서는 print하지 않고 저장만 함
 # =========================================================
 def print_ft_sensor_debug(step: int, wrench_env0):
     global _last_ft_debug
@@ -117,7 +116,6 @@ def print_ft_sensor_debug(step: int, wrench_env0):
 
 # =========================================================
 # Polishing debug cache update
-# - 여기서는 print하지 않고 저장만 함
 # =========================================================
 def print_polishing_metrics_debug(step: int, metrics_env0):
     global _last_polishing_debug
@@ -132,8 +130,6 @@ def print_polishing_metrics_debug(step: int, metrics_env0):
 
 # =========================================================
 # Combined action debug print
-# - action + ft sensor + polishing metrics 를 한 번에 출력
-# - reward가 실제로 연결되지 않았으면 N/A 출력
 # =========================================================
 def print_action_debug_status(
     env_id: int,
@@ -144,9 +140,9 @@ def print_action_debug_status(
     path_done: bool,
     raw_target_xyz,
     target_xyz,
-    target_rpy,
+    target_wxyz,
     current_xyz,
-    current_rpy,
+    current_wxyz,
     pos_err_norm: float,
     rot_err_norm: float,
     reward_total: float | None = None,
@@ -156,9 +152,9 @@ def print_action_debug_status(
 ):
     raw_target_xyz = _as_float_list(raw_target_xyz)
     target_xyz = _as_float_list(target_xyz)
-    target_rpy = _as_float_list(target_rpy)
+    target_wxyz = _as_float_list(target_wxyz)
     current_xyz = _as_float_list(current_xyz)
-    current_rpy = _as_float_list(current_rpy)
+    current_wxyz = _as_float_list(current_wxyz)
 
     print("\n" + "=" * 100)
     print(
@@ -174,12 +170,12 @@ def print_action_debug_status(
     print(
         "[Target Pose  ] "
         f"x={target_xyz[0]: .6f}, y={target_xyz[1]: .6f}, z={target_xyz[2]: .6f}, "
-        f"r={target_rpy[0]: .6f}, p={target_rpy[1]: .6f}, yw={target_rpy[2]: .6f}"
+        f"wx={target_wxyz[0]: .6f}, wy={target_wxyz[1]: .6f}, wz={target_wxyz[2]: .6f}"
     )
     print(
         "[Current Pose ] "
         f"x={current_xyz[0]: .6f}, y={current_xyz[1]: .6f}, z={current_xyz[2]: .6f}, "
-        f"r={current_rpy[0]: .6f}, p={current_rpy[1]: .6f}, yw={current_rpy[2]: .6f}"
+        f"wx={current_wxyz[0]: .6f}, wy={current_wxyz[1]: .6f}, wz={current_wxyz[2]: .6f}"
     )
     print(
         f"[Error        ] pos_norm={pos_err_norm: .6f}, "

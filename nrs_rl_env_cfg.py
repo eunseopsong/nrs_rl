@@ -19,10 +19,6 @@ from isaaclab.managers import (
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
-from nrs_rl.utils.visualization import (
-    rl_step,
-    rl_episode_done,
-)
 
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
 
@@ -81,64 +77,38 @@ class ActionsCfg:
     arm_action = local_action.AdmittanceControlActionCfg(
         asset_name="robot",
         body_name="spindle_link",
-
         hdf5_file_path=HDF5_TRAJ_PATH,
         position_dataset_key="position",
         force_dataset_key="force",
-        position_scale=0.001,   # txt/h5 xyz is mm -> m
-
         action_dim=2,
-
-        # IK
-        dls_lambda=0.10,
-        ik_step_size=0.60,
-        max_dq=0.08,
-        max_pos_err=0.05,
-        max_rot_err=0.30,
-
-        # waypoint follower
-        waypoint_stride=100,
-        waypoint_pos_tol=0.02,
-        waypoint_rot_tol=0.20,
+        position_scale=1.0,   # z residual [mm]
+        force_scale=1.0,      # fz residual [N]
+        waypoint_stride=1,
+        waypoint_pos_tol_mm=20.0,
+        waypoint_rot_tol_rad=0.20,
         max_steps_per_waypoint=120,
-
-        # spindle / TCP compensation
-        tcp_length_offset_m=0.10,
-        tcp_offset_axis="local_z_neg",
-        z_target_offset=0.0,
-
-        # FT source
+        z_target_offset_mm=0.0,
         fixed_joint_name="tool0_to_spindle",
         joint_prim_relpath="joints",
-
-        # force control axis
-        force_axis="z",
-
-        # Mode5 force controller
         force_model_path="/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/y2_control_pybind/checkpoints/ContextNAF_MDGradi/contextNAF_mdGradi_policy_script.pt",
         force_dt=0.002,
         force_threads=1,
         force_device="cpu",
         force_md_ratio=1000.0,
         force_fc_fext=50.0,
-
         force_free_mass=2.0,
         force_free_damping=6000.0,
         force_free_stiffness=2000.0,
         force_contact_stiffness=0.0,
         force_recovery_tau=3.0,
-
         force_action_low=(-0.25, -0.25),
         force_action_high=(0.25, 0.25),
-
         force_mass_min=0.5,
         force_mass_max=5.0,
         force_alpha_min=0.5,
         force_alpha_max=3.0,
         force_alpha_rate_up=4.0,
         force_alpha_rate_down=4.0,
-
-        # debug
         enable_debug_print=True,
         debug_print_interval=10,
         debug_env_id=0,
@@ -221,8 +191,8 @@ class EventCfg:
         params={"position_range": (1.0, 1.0), "velocity_range": (0.0, 0.0)},
     )
 
-    load_hdf5_positions = EventTerm(
-        func=local_obs.load_hdf5_positions,
+    load_hdf5_trajectory = EventTerm(
+        func=local_obs.load_hdf5_trajectory,
         mode="reset",
         params={
             "file_path": HDF5_TRAJ_PATH,
@@ -295,7 +265,6 @@ class RewardsCfg:
 class TerminationsCfg:
     trajectory_finished = DoneTerm(
         func=local_terms.trajectory_finished,
-        params={"action_term_name": "arm_action"},
     )
 
 
@@ -312,6 +281,7 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
         self.decimation = 2
         self.sim.render_interval = self.decimation
 
+        # termination is controlled by trajectory_finished()
         self.episode_length_s = 9999.0
 
         self.viewer.eye = (3.5, 3.5, 3.5)

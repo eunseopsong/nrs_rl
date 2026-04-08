@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
 Reward functions module for Uniform Polishing.
-[26.04.02 업데이트]
-- 프레스턴 방정식 기반 MRR 균일화 보상
-- 6축 FT 센서 데이터 및 Cartesian 선속도 연동
-- Look-ahead 웨이포인트를 활용한 코너링 감속/힘 조절 유도
-- 현재 nrs_rl 환경 구조에 맞게 안전하게 수정됨
 """
 
 from __future__ import annotations
@@ -27,9 +22,6 @@ local_ft_sensor = importlib.import_module(
 )
 
 
-# =========================================================================
-# Internal helper functions
-# =========================================================================
 def _get_ee_idx(
     env: "ManagerBasedRLEnv",
     asset_name: str = "robot",
@@ -49,12 +41,6 @@ def _get_current_pose_and_velocity(
     asset_name: str = "robot",
     body_name: str = "spindle_link",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Returns:
-        current_xyz  : (N, 3) env-local
-        current_quat : (N, 4) world quat
-        vel_norm     : (N,)
-    """
     robot = env.scene[asset_name]
     ee_idx = _get_ee_idx(env, asset_name=asset_name, body_name=body_name)
 
@@ -75,10 +61,6 @@ def _get_current_fz(
     fixed_joint_name: str = "tool0_to_spindle",
     joint_prim_relpath: str = "joints",
 ) -> torch.Tensor:
-    """
-    Returns:
-        current_fz : (N,)
-    """
     wrench = local_ft_sensor.get_6axis_ft_fixed_joint(
         env=env,
         asset_name=asset_name,
@@ -96,10 +78,6 @@ def _safe_normalize(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
 def _get_current_target_pose(
     env: "ManagerBasedRLEnv",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Safe current target getter.
-    observation.py 쪽 fallback 로직을 그대로 활용
-    """
     return local_obs._get_target_pose_for_polishing(env)
 
 
@@ -107,18 +85,9 @@ def _get_lookahead_xyz(
     env: "ManagerBasedRLEnv",
     lookahead_steps: int = 5,
 ) -> torch.Tensor:
-    """
-    Safe future target getter.
-
-    Priority:
-      1) command_manager['lookahead'] if available
-      2) HDF5 trajectory fallback
-      3) current target fallback
-    """
     device = env.device
     num_envs = env.num_envs
 
-    # 1) command_manager lookahead
     try:
         cmd_mgr = getattr(env, "command_manager", None)
         if cmd_mgr is not None and hasattr(cmd_mgr, "_terms") and ("lookahead" in cmd_mgr._terms):
@@ -128,7 +97,6 @@ def _get_lookahead_xyz(
     except Exception:
         pass
 
-    # 2) fallback from HDF5
     h5 = getattr(local_obs, "_hdf5_positions", None)
     if h5 is not None and h5.ndim == 2 and h5.shape[0] > 0:
         t_total, d = h5.shape
@@ -146,24 +114,16 @@ def _get_lookahead_xyz(
         if d >= 3:
             return row[:, :3]
 
-    # 3) final fallback = current target
     target_xyz, _ = _get_current_target_pose(env)
     return target_xyz
 
 
 def _quat_angle_error(current_quat: torch.Tensor, target_quat: torch.Tensor) -> torch.Tensor:
-    """
-    Quaternion angular distance in rad.
-    quat format: (w, x, y, z)
-    """
     quat_inner = torch.abs(torch.sum(current_quat * target_quat, dim=-1))
     quat_inner = torch.clamp(quat_inner, -1.0 + 1e-6, 1.0 - 1e-6)
     return 2.0 * torch.acos(quat_inner)
 
 
-# =========================================================================
-# 1. Uniform Material Removal Rate (MRR) Reward
-# =========================================================================
 def uniform_mrr_reward(
     env: "ManagerBasedRLEnv",
     target_force: float = 20.0,
@@ -174,12 +134,6 @@ def uniform_mrr_reward(
     fixed_joint_name: str = "tool0_to_spindle",
     joint_prim_relpath: str = "joints",
 ) -> torch.Tensor:
-    """
-    Preston proxy = |Fz| * |v|
-
-    현재 디버그 값 기준으로 cartesian_vel 이 매우 작게 나오므로,
-    target_velocity 도 같은 스케일(예: 0.0002 m/s 전후)로 두는 게 맞습니다.
-    """
     current_fz = _get_current_fz(
         env,
         asset_name=asset_name,
@@ -201,9 +155,6 @@ def uniform_mrr_reward(
     return reward
 
 
-# =========================================================================
-# 2. Force Tracking Reward
-# =========================================================================
 def force_tracking_reward(
     env: "ManagerBasedRLEnv",
     target_force: float = 20.0,
@@ -212,9 +163,6 @@ def force_tracking_reward(
     fixed_joint_name: str = "tool0_to_spindle",
     joint_prim_relpath: str = "joints",
 ) -> torch.Tensor:
-    """
-    목표 접촉 힘 추종 보상
-    """
     current_fz = _get_current_fz(
         env,
         asset_name=asset_name,
@@ -227,12 +175,9 @@ def force_tracking_reward(
     return reward
 
 
-# =========================================================================
-# 3. Look-ahead Cornering Smoothness Penalty
-# =========================================================================
 def lookahead_cornering_penalty(
     env: "ManagerBasedRLEnv",
-    cornering_threshold_angle: float = 0.5,   # rad
+    cornering_threshold_angle: float = 0.5,
     penalty_scale: float = 0.5,
     lookahead_steps: int = 5,
     speed_ref: float = 0.002,
@@ -240,9 +185,6 @@ def lookahead_cornering_penalty(
     asset_name: str = "robot",
     body_name: str = "spindle_link",
 ) -> torch.Tensor:
-    """
-    코너링이 큰 구간에서 속도가 높거나 action 변화가 크면 페널티.
-    """
     current_xyz, _, current_vel_norm = _get_current_pose_and_velocity(
         env,
         asset_name=asset_name,
@@ -262,7 +204,6 @@ def lookahead_cornering_penalty(
     cos_sim = torch.clamp(cos_sim, -1.0 + 1e-6, 1.0 - 1e-6)
     angle_diff = torch.acos(cos_sim)
 
-    # 코너 강도: threshold 이하 0, 그 이상 선형 증가
     corner_strength = torch.relu(angle_diff - cornering_threshold_angle)
     corner_strength = corner_strength / max(math.pi - cornering_threshold_angle, 1e-6)
 
@@ -280,9 +221,6 @@ def lookahead_cornering_penalty(
     return -penalty
 
 
-# =========================================================================
-# 4. Trajectory Tracking Penalty (Position & Rotation Error)
-# =========================================================================
 def trajectory_tracking_penalty(
     env: "ManagerBasedRLEnv",
     pos_sigma: float = 0.03,
@@ -290,11 +228,6 @@ def trajectory_tracking_penalty(
     asset_name: str = "robot",
     body_name: str = "spindle_link",
 ) -> torch.Tensor:
-    """
-    경로 이탈 페널티
-    - bounded penalty 형태
-    - 원래 코드처럼 exp(+err^2)가 아니라 안정적으로 음수 범위에 머물도록 수정
-    """
     current_xyz, current_quat, _ = _get_current_pose_and_velocity(
         env,
         asset_name=asset_name,
@@ -312,15 +245,9 @@ def trajectory_tracking_penalty(
     return pos_penalty + rot_penalty
 
 
-# =========================================================================
-# 5. Action Smoothness (Chattering Prevention)
-# =========================================================================
 def action_smoothness_penalty(
     env: "ManagerBasedRLEnv",
 ) -> torch.Tensor:
-    """
-    이전 Action과 현재 Action의 변화량(L2 Norm)에 대한 페널티
-    """
     if not hasattr(env, "action_manager"):
         return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
 
