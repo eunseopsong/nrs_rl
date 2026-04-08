@@ -8,6 +8,8 @@ import os
 
 class CMakeBuild(build_ext):
     def build_extension(self, ext):
+        import torch  # lazy import: only when actual build runs
+
         ext_fullpath = pathlib.Path(self.get_ext_fullpath(ext.name)).resolve()
         extdir = ext_fullpath.parent
 
@@ -21,17 +23,17 @@ class CMakeBuild(build_ext):
             text=True
         ).strip()
 
+        torch_cmake_dir = torch.utils.cmake_prefix_path
+        torch_abi_flag = "1" if torch.compiled_with_cxx11_abi() else "0"
+
         cmake_args = [
             f"-DCMAKE_BUILD_TYPE={cfg}",
             f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}",
             f"-DPython3_EXECUTABLE={sys.executable}",
             f"-Dpybind11_DIR={pybind11_cmake_dir}",
+            f"-DTorch_DIR={torch_cmake_dir}/Torch",
+            f"-DTORCH_CXX11_ABI={torch_abi_flag}",
         ]
-
-        # pass Torch_DIR if available
-        torch_dir = os.environ.get("Torch_DIR", "").strip()
-        if torch_dir:
-            cmake_args.append(f"-DTorch_DIR={torch_dir}")
 
         build_args = [
             "--config", cfg,

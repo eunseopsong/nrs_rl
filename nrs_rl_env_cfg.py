@@ -63,7 +63,7 @@ class SpindleSceneCfg(InteractiveSceneCfg):
     workpiece = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Workpiece",
         spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/eunseop/isaac/isaac_save/surface/workpiece_standard.usd",
+            usd_path="/home/eunseop/isaac/isaac_save/surface/workpiece_standard_8.usd",
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.0),
@@ -77,8 +77,12 @@ class ActionsCfg:
     arm_action = local_action.AdmittanceControlActionCfg(
         asset_name="robot",
         body_name="spindle_link",
+
         hdf5_file_path=HDF5_TRAJ_PATH,
         position_dataset_key="position",
+        force_dataset_key="force",
+        position_scale=0.001,   # txt/h5 xyz is mm -> m
+
         action_dim=2,
 
         # IK
@@ -98,6 +102,37 @@ class ActionsCfg:
         tcp_length_offset_m=0.10,
         tcp_offset_axis="local_z_neg",
         z_target_offset=0.0,
+
+        # FT source
+        fixed_joint_name="tool0_to_spindle",
+        joint_prim_relpath="joints",
+
+        # force control axis
+        force_axis="z",
+
+        # Mode5 force controller
+        force_model_path="/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/y2_control_pybind/checkpoints/ContextNAF_MDGradi/contextNAF_mdGradi_policy_script.pt",
+        force_dt=0.002,
+        force_threads=1,
+        force_device="cpu",
+        force_md_ratio=1000.0,
+        force_fc_fext=50.0,
+
+        force_free_mass=2.0,
+        force_free_damping=6000.0,
+        force_free_stiffness=2000.0,
+        force_contact_stiffness=0.0,
+        force_recovery_tau=3.0,
+
+        force_action_low=(-0.25, -0.25),
+        force_action_high=(0.25, 0.25),
+
+        force_mass_min=0.5,
+        force_mass_max=5.0,
+        force_alpha_min=0.5,
+        force_alpha_max=3.0,
+        force_alpha_rate_up=4.0,
+        force_alpha_rate_down=4.0,
 
         # debug
         enable_debug_print=True,

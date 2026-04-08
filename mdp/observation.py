@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 import sys
 import torch
 import importlib
+import math
 
 from ..utils import debug as local_debug
 
@@ -25,15 +26,24 @@ local_ft_sensor = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.assets.assets.sensors.six_axis_ft_sensor"
 )
 
+from y2_control_py import UR10eKinematics, EE2TCP, CONTROL_PERIOD
+
 # ------------------------------------------------------
-# Conditional import (avoid double registration)
+# Global FK solver (y2_control_pybind)
+# - y2 FK output position unit: mm
+# - observation output should be meters
 # ------------------------------------------------------
-if "nrs_fk_core" not in sys.modules:
-    from nrs_fk_core import FKSolver
-else:
-    FKSolver = sys.modules["nrs_fk_core"].FKSolver
+_ur10e_fk_solver: UR10eKinematics | None = None
 
 
+def _get_fk_solver() -> UR10eKinematics:
+    global _ur10e_fk_solver
+    if _ur10e_fk_solver is None:
+        _ur10e_fk_solver = UR10eKinematics(
+            dt=float(CONTROL_PERIOD),
+            ee2tcp=EE2TCP,
+        )
+    return _ur10e_fk_solver
 # ------------------------------------------------------
 # Global buffers
 # ------------------------------------------------------
@@ -187,54 +197,54 @@ def get_ee_pose(env: "ManagerBasedRLEnv", asset_name: str = "robot") -> torch.Te
     """
     Returns end-effector pose (x, y, z, roll, pitch, yaw)
 
-    - Reads q1~q6 and runs FK via nrs_fk_core.FKSolver
+    - Reads q1~q6
+    - Runs FK via y2_control_py.UR10eKinematics
+    - FK position output is mm -> converted to meters
     - Output: (num_envs, 6) torch tensor on env device
     """
     robot = env.scene[asset_name]
     q = robot.data.joint_pos[:, :6]
+
     device = q.device
     num_envs = q.shape[0]
 
-    fk_solver = FKSolver(tool_z=0.239, use_degrees=False)
-
-    if hasattr(fk_solver, "compute_batch"):
-        try:
-            q_np = q.detach().cpu().numpy().astype(float)
-            ok, poses = fk_solver.compute_batch(q_np, as_degrees=False)
-            if not ok:
-                ee_pose = torch.full((num_envs, 6), float("nan"), device=device, dtype=torch.float32)
-            else:
-                ee_pose = torch.tensor(poses, dtype=torch.float32, device=device)
-            return ee_pose
-        except Exception:
-            pass
-
-    if hasattr(fk_solver, "forward"):
-        try:
-            poses = fk_solver.forward(q)
-            ee_pose = poses if isinstance(poses, torch.Tensor) else torch.tensor(
-                poses, dtype=torch.float32, device=device
-            )
-            if ee_pose.device != device:
-                ee_pose = ee_pose.to(device)
-            return ee_pose
-        except Exception:
-            pass
+    fk_solver = _get_fk_solver()
 
     ee_pose_list = []
     q_cpu = q.detach().cpu()
+
     for i in range(num_envs):
-        q_np = q_cpu[i].numpy().astype(float)
-        ok, pose = fk_solver.compute(q_np, as_degrees=False)
-        if not ok:
-            ee_pose_list.append([float("nan")] * 6)
-        else:
-            ee_pose_list.append([pose.x, pose.y, pose.z, pose.r, pose.p, pose.yaw])
+        q_list = q_cpu[i].tolist()
+
+        # y2 FK returns 4x4 HTM (position in mm)
+        T = fk_solver.forward_kinematics(q_list)
+
+        x_mm = float(T[0][3])
+        y_mm = float(T[1][3])
+        z_mm = float(T[2][3])
+
+        # rotation matrix -> roll, pitch, yaw
+        r11, r12, r13 = float(T[0][0]), float(T[0][1]), float(T[0][2])
+        r21, r22, r23 = float(T[1][0]), float(T[1][1]), float(T[1][2])
+        r31, r32, r33 = float(T[2][0]), float(T[2][1]), float(T[2][2])
+
+        # ZYX convention
+        yaw = math.atan2(r21, r11)
+        pitch = math.atan2(-r31, math.sqrt(r32 * r32 + r33 * r33))
+        roll = math.atan2(r32, r33)
+
+        ee_pose_list.append([
+            x_mm * 0.001,   # mm -> m
+            y_mm * 0.001,   # mm -> m
+            z_mm * 0.001,   # mm -> m
+            roll,
+            pitch,
+            yaw,
+        ])
 
     ee_pose = torch.tensor(ee_pose_list, dtype=torch.float32, device=device)
     assert ee_pose.ndim == 2 and ee_pose.shape[1] == 6, f"[EE_POSE] Invalid shape: {ee_pose.shape}"
     return ee_pose
-
 
 # ------------------------------------------------------
 # HDF5 loader: Positions + Forces

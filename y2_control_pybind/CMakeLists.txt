@@ -11,6 +11,11 @@ find_package(Torch REQUIRED)
 
 add_compile_definitions(Y2_IK_SOLVER_MODE=Y2_IK_SOLVER_DLS)
 
+# Torch ABI compatibility
+if(DEFINED TORCH_CXX11_ABI)
+    add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=${TORCH_CXX11_ABI})
+endif()
+
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include
 )
@@ -54,7 +59,7 @@ target_include_directories(_y2_control_pybind PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include
 )
 
-target_link_libraries(_y2_control_pybind PRIVATE "${TORCH_LIBRARIES}")
+target_link_libraries(_y2_control_pybind PRIVATE ${TORCH_LIBRARIES})
 
 separate_arguments(TORCH_CXX_FLAGS_LIST NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
 target_compile_options(_y2_control_pybind PRIVATE ${TORCH_CXX_FLAGS_LIST})
