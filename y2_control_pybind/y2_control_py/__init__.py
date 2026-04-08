@@ -1,3 +1,35 @@
 from ._y2_control_pybind import UR10eKinematics
+from .config import (
+    ROBOT_KINEMATICS,
+    NUMBER_OF_JOINTS,
+    PACKAGE_BUNDLE_DIR,
+    TRAJECTORY_MODE,
+    FORCE_CON_COORDINATE,
+    CONTROL_PERIOD,
+    ROBOT_NAME,
+    TEST_MODE,
+    REMAPPING_ENABLED,
+    REMAP_STATE_TOPIC,
+    REMAP_COMMAND_TOPIC,
+    JOINT_NAMES,
+    TCP_LENGTH_MM,
+    EE2TCP,
+)
 
-__all__ = ["UR10eKinematics"]
+__all__ = [
+    "UR10eKinematics",
+    "ROBOT_KINEMATICS",
+    "NUMBER_OF_JOINTS",
+    "PACKAGE_BUNDLE_DIR",
+    "TRAJECTORY_MODE",
+    "FORCE_CON_COORDINATE",
+    "CONTROL_PERIOD",
+    "ROBOT_NAME",
+    "TEST_MODE",
+    "REMAPPING_ENABLED",
+    "REMAP_STATE_TOPIC",
+    "REMAP_COMMAND_TOPIC",
+    "JOINT_NAMES",
+    "TCP_LENGTH_MM",
+    "EE2TCP",
+]
