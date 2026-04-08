@@ -145,6 +145,7 @@ def print_action_debug_status(
     current_wxyz,
     pos_err_norm: float,
     rot_err_norm: float,
+    target_force=None,   # [fx, fy, fz]
     reward_total: float | None = None,
     reward_score: float | None = None,
     penalty_score: float | None = None,
@@ -155,11 +156,12 @@ def print_action_debug_status(
     target_wxyz = _as_float_list(target_wxyz)
     current_xyz = _as_float_list(current_xyz)
     current_wxyz = _as_float_list(current_wxyz)
+    target_force_vals = _as_float_list(target_force) if target_force is not None else None
 
     print("\n" + "=" * 100)
     print(
         f"[Action Debug] env={env_id} | step={global_step} | "
-        f"h5_index={path_index}/{traj_length - 1} | "
+        f"h5_index={path_index}/{max(traj_length - 1, 0)} | "
         f"waypoint_steps={waypoint_steps} | "
         f"done={path_done}"
     )
@@ -182,6 +184,16 @@ def print_action_debug_status(
         f"rot_norm={rot_err_norm: .6f}"
     )
 
+    if target_force_vals is not None:
+        while len(target_force_vals) < 3:
+            target_force_vals.append(0.0)
+        print(
+            "[Target Force ] "
+            f"Fx={target_force_vals[0]: .6f}, "
+            f"Fy={target_force_vals[1]: .6f}, "
+            f"Fz={target_force_vals[2]: .6f}"
+        )
+
     print("-" * 100)
     if reward_total is None or reward_score is None or penalty_score is None:
         print("[RL Score    ] N/A (actual reward not connected)")
@@ -202,6 +214,15 @@ def print_action_debug_status(
             f"Fx={fx: .6f}, Fy={fy: .6f}, Fz={fz: .6f}, "
             f"Tx={tx: .6f}, Ty={ty: .6f}, Tz={tz: .6f}"
         )
+
+        if target_force_vals is not None:
+            fz_err = fz - target_force_vals[2]
+            print(
+                "[Force Error ] "
+                f"dFx={fx - target_force_vals[0]: .6f}, "
+                f"dFy={fy - target_force_vals[1]: .6f}, "
+                f"dFz={fz_err: .6f}"
+            )
     else:
         print("[FT Sensor    ] No cached 6-axis FT data")
 

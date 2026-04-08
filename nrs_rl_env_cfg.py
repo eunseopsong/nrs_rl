@@ -63,7 +63,7 @@ class SpindleSceneCfg(InteractiveSceneCfg):
     workpiece = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Workpiece",
         spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/eunseop/isaac/isaac_save/surface/workpiece_standard_8.usd",
+            usd_path="/home/eunseop/isaac/isaac_save/workpiece_8_v2.usd",
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.0),
@@ -81,13 +81,44 @@ class ActionsCfg:
         position_dataset_key="position",
         force_dataset_key="force",
         action_dim=2,
+        position_scale=1.0,
+        force_scale=1.0,
+        z_target_offset_mm=0.0,
+
+        approach_offset_mm=120.0,
+        approach_pos_tol_mm=20.0,
+        approach_rot_tol_rad=0.20,
+        descend_pos_tol_mm=10.0,
+        descend_rot_tol_rad=0.10,
+
         fixed_joint_name="tool0_to_spindle",
         joint_prim_relpath="joints",
+
+        force_model_path="/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/y2_control_pybind/checkpoints/ContextNAF_MDGradi/contextNAF_mdGradi_policy_script.pt",
+        force_dt=0.002,
+        force_threads=1,
+        force_device="cpu",
+        force_md_ratio=1000.0,
+        force_fc_fext=50.0,
+        force_free_mass=2.0,
+        force_free_damping=6000.0,
+        force_free_stiffness=2000.0,
+        force_contact_stiffness=0.0,
+        force_recovery_tau=3.0,
+        force_action_low=(-0.25, -0.25),
+        force_action_high=(0.25, 0.25),
+        force_mass_min=0.5,
+        force_mass_max=5.0,
+        force_alpha_min=0.5,
+        force_alpha_max=3.0,
+        force_alpha_rate_up=4.0,
+        force_alpha_rate_down=4.0,
+
         enable_debug_print=True,
         debug_print_interval=10,
         debug_env_id=0,
+        track_force_tol_n=10.0,
     )
-
 
 @configclass
 class ObservationCfg:

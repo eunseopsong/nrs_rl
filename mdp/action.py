@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
+import h5py
 import importlib
 import torch
 
@@ -32,6 +33,10 @@ y2_pb = importlib.import_module(
 
 
 def _spatial_angle_to_rotmat_torch(spatial: torch.Tensor) -> torch.Tensor:
+    """
+    spatial: (N, 3) = [wx wy wz]
+    return : (N, 3, 3)
+    """
     device = spatial.device
     dtype = spatial.dtype
     n = spatial.shape[0]
@@ -71,6 +76,11 @@ def _spatial_angle_to_rotmat_torch(spatial: torch.Tensor) -> torch.Tensor:
 
 
 def _build_target_htm_torch(pos_mm: torch.Tensor, spatial: torch.Tensor) -> torch.Tensor:
+    """
+    pos_mm : (N,3)
+    spatial: (N,3)
+    return : (N,4,4)
+    """
     n = pos_mm.shape[0]
     device = pos_mm.device
     dtype = pos_mm.dtype
@@ -81,12 +91,45 @@ def _build_target_htm_torch(pos_mm: torch.Tensor, spatial: torch.Tensor) -> torc
     return T
 
 
+class _PerEnvForceControllers:
+    def __init__(self, cfg):
+        common_kwargs = dict(
+            model_path=cfg.force_model_path,
+            dt=cfg.force_dt,
+            threads=cfg.force_threads,
+            device=cfg.force_device,
+            md_ratio=cfg.force_md_ratio,
+            fc_fext=cfg.force_fc_fext,
+            free_mass=cfg.force_free_mass,
+            free_damping=cfg.force_free_damping,
+            free_stiffness=cfg.force_free_stiffness,
+            contact_stiffness=cfg.force_contact_stiffness,
+            recovery_tau=cfg.force_recovery_tau,
+            action_low=list(cfg.force_action_low),
+            action_high=list(cfg.force_action_high),
+            mass_min=cfg.force_mass_min,
+            mass_max=cfg.force_mass_max,
+            alpha_min=cfg.force_alpha_min,
+            alpha_max=cfg.force_alpha_max,
+            alpha_rate_up=cfg.force_alpha_rate_up,
+            alpha_rate_down=cfg.force_alpha_rate_down,
+        )
+        self.fz = y2_pb.ForceCon1DMode5(**common_kwargs)
+
+    def reset(self, z_m: float):
+        self.fz.reset(float(z_m))
+
+
 class AdmittanceControlAction(ActionTerm):
     """
-    Debug / validation mode:
-    - Do NOT follow HDF5 trajectory
-    - Do NOT run force control
-    - Just hold the initial EE pose captured at reset
+    HDF5 tracking with state machine:
+
+        APPROACH -> DESCEND -> TRACK
+
+    TRACK:
+        - x, y      : position tracking
+        - z         : force control
+        - wx,wy,wz  : orientation tracking
     """
 
     cfg: "AdmittanceControlActionCfg"
@@ -101,6 +144,31 @@ class AdmittanceControlAction(ActionTerm):
         self._raw_actions = torch.zeros((self._num_envs, cfg.action_dim), device=self._device, dtype=torch.float32)
         self._processed_actions = torch.zeros_like(self._raw_actions)
 
+        with h5py.File(cfg.hdf5_file_path, "r") as f:
+            if cfg.position_dataset_key not in f:
+                raise KeyError(
+                    f"[Action] position dataset '{cfg.position_dataset_key}' not found. "
+                    f"Available keys: {list(f.keys())}"
+                )
+            if cfg.force_dataset_key not in f:
+                raise KeyError(
+                    f"[Action] force dataset '{cfg.force_dataset_key}' not found. "
+                    f"Available keys: {list(f.keys())}"
+                )
+            pos = f[cfg.position_dataset_key][:]
+            frc = f[cfg.force_dataset_key][:]
+
+        if pos.ndim != 2 or pos.shape[1] != 6:
+            raise ValueError(f"[Action] expected position dataset (T,6), got {pos.shape}")
+        if frc.ndim != 2 or frc.shape[1] != 3:
+            raise ValueError(f"[Action] expected force dataset (T,3), got {frc.shape}")
+        if pos.shape[0] != frc.shape[0]:
+            raise ValueError(f"[Action] position/force length mismatch: {pos.shape[0]} vs {frc.shape[0]}")
+
+        self._traj_pos = torch.tensor(pos, device=self._device, dtype=torch.float32)
+        self._traj_force = torch.tensor(frc, device=self._device, dtype=torch.float32)
+        self._traj_len = int(pos.shape[0])
+
         self._ik = y2_pb.UR10eKinematics(
             dt=float(y2_cfg.CONTROL_PERIOD),
             ee2tcp=y2_cfg.EE2TCP,
@@ -108,10 +176,12 @@ class AdmittanceControlAction(ActionTerm):
 
         self._q_des = self._robot.data.joint_pos[:, :6].clone()
 
-        # reset 시 저장할 hold target
-        self._hold_pose = torch.zeros((self._num_envs, 6), device=self._device, dtype=torch.float32)
+        # 1 = APPROACH, 2 = DESCEND, 3 = TRACK
+        self._phase = torch.ones((self._num_envs,), device=self._device, dtype=torch.long)
+        self._traj_row = torch.zeros((self._num_envs,), device=self._device, dtype=torch.long)
 
-        # termination compatibility
+        self._fc = [_PerEnvForceControllers(cfg) for _ in range(self._num_envs)]
+
         self.path_done = torch.zeros((self._num_envs,), device=self._device, dtype=torch.bool)
 
     @property
@@ -128,16 +198,20 @@ class AdmittanceControlAction(ActionTerm):
 
     def reset(self, env_ids=None) -> dict[str, torch.Tensor]:
         if env_ids is None:
-            env_ids = slice(None)
+            env_ids = torch.arange(self._num_envs, device=self._device)
 
         self._raw_actions[env_ids] = 0.0
         self._processed_actions[env_ids] = 0.0
         self._q_des[env_ids] = self._robot.data.joint_pos[env_ids, :6].clone()
+
+        self._phase[env_ids] = 1
+        self._traj_row[env_ids] = 0
         self.path_done[env_ids] = False
 
-        # 현재 pose를 그대로 hold target으로 저장
         current_pose = local_obs.get_ee_pose(self._env, asset_name=self.cfg.asset_name)
-        self._hold_pose[env_ids] = current_pose[env_ids].clone()
+        current_z_m = current_pose[:, 2] / 1000.0
+        for i in env_ids.tolist():
+            self._fc[i].reset(float(current_z_m[i].item()))
 
         return {}
 
@@ -145,21 +219,7 @@ class AdmittanceControlAction(ActionTerm):
         self._raw_actions[:] = actions.to(self._device)
         self._processed_actions[:] = self._raw_actions
 
-    def apply_actions(self):
-        current_pose = local_obs.get_ee_pose(self._env, asset_name=self.cfg.asset_name)
-        wrench = local_ft_sensor.get_6axis_ft_fixed_joint(
-            env=self._env,
-            asset_name=self.cfg.asset_name,
-            fixed_joint_name=self.cfg.fixed_joint_name,
-            joint_prim_relpath=self.cfg.joint_prim_relpath,
-            verbose=False,
-        )
-
-        current_xyz = current_pose[:, 0:3]
-        current_wxyz = current_pose[:, 3:6]
-
-        target_pose = self._hold_pose.clone()
-
+    def _solve_ik_batch(self, target_pose: torch.Tensor):
         target_htm = _build_target_htm_torch(target_pose[:, 0:3], target_pose[:, 3:6])
 
         q_des_list = []
@@ -172,8 +232,129 @@ class AdmittanceControlAction(ActionTerm):
         self._q_des = torch.tensor(q_des_list, device=self._device, dtype=torch.float32)
         self._robot.set_joint_position_target(self._q_des)
 
-        # hold mode에서는 종료 안 함
-        self.path_done[:] = False
+    def _build_first_pose(self) -> torch.Tensor:
+        return self._traj_pos[0].unsqueeze(0).repeat(self._num_envs, 1)
+
+    def _build_approach_pose(self) -> torch.Tensor:
+        pose = self._build_first_pose()
+        pose[:, 2] = pose[:, 2] + float(self.cfg.approach_offset_mm)
+        return pose
+
+    def _pos_rot_error(self, current_pose: torch.Tensor, target_pose: torch.Tensor):
+        pos_err = torch.norm(target_pose[:, 0:3] - current_pose[:, 0:3], dim=-1)
+        rot_err = torch.norm(target_pose[:, 3:6] - current_pose[:, 3:6], dim=-1)
+        return pos_err, rot_err
+
+    def apply_actions(self):
+        current_pose = local_obs.get_ee_pose(self._env, asset_name=self.cfg.asset_name)
+        wrench = local_ft_sensor.get_6axis_ft_fixed_joint(
+            env=self._env,
+            asset_name=self.cfg.asset_name,
+            fixed_joint_name=self.cfg.fixed_joint_name,
+            joint_prim_relpath=self.cfg.joint_prim_relpath,
+            verbose=False,
+        )
+
+        current_xyz_mm = current_pose[:, 0:3]
+        current_wxyz = current_pose[:, 3:6]
+        current_xyz_m = current_xyz_mm / 1000.0
+        current_force = wrench[:, 0:3]
+
+        first_pose = self._build_first_pose()
+        approach_pose = self._build_approach_pose()
+
+        approach_pos_err, approach_rot_err = self._pos_rot_error(current_pose, approach_pose)
+        descend_pos_err, descend_rot_err = self._pos_rot_error(current_pose, first_pose)
+
+        # APPROACH -> DESCEND
+        approach_done = (
+            (self._phase == 1)
+            & (approach_pos_err < float(self.cfg.approach_pos_tol_mm))
+            & (approach_rot_err < float(self.cfg.approach_rot_tol_rad))
+        )
+        if torch.any(approach_done):
+            self._phase[approach_done] = 2
+
+        # DESCEND -> TRACK
+        descend_done = (
+            (self._phase == 2)
+            & (descend_pos_err < float(self.cfg.descend_pos_tol_mm))
+            & (descend_rot_err < float(self.cfg.descend_rot_tol_rad))
+        )
+        if torch.any(descend_done):
+            self._phase[descend_done] = 3
+            for i in torch.where(descend_done)[0].tolist():
+                self._fc[i].reset(float(current_xyz_m[i, 2].item()))
+
+        target_pose = torch.zeros((self._num_envs, 6), device=self._device, dtype=torch.float32)
+        target_force = torch.zeros((self._num_envs, 3), device=self._device, dtype=torch.float32)
+
+        # APPROACH
+        approach_mask = self._phase == 1
+        if torch.any(approach_mask):
+            target_pose[approach_mask] = approach_pose[approach_mask]
+            target_force[approach_mask] = 0.0
+
+        # DESCEND
+        descend_mask = self._phase == 2
+        if torch.any(descend_mask):
+            target_pose[descend_mask] = first_pose[descend_mask]
+            target_force[descend_mask] = 0.0
+
+        # TRACK
+        track_mask = self._phase == 3
+        if torch.any(track_mask):
+            idx = torch.clamp(self._traj_row, 0, self._traj_len - 1)
+            target_pose[track_mask] = self._traj_pos[idx[track_mask]]
+            target_force[track_mask] = self._traj_force[idx[track_mask]]
+
+            # optional RL residuals: z only
+            if self.cfg.action_dim >= 1:
+                target_pose[track_mask, 2] += self._processed_actions[track_mask, 0] * self.cfg.position_scale
+            if self.cfg.action_dim >= 2:
+                target_force[track_mask, 2] += self._processed_actions[track_mask, 1] * self.cfg.force_scale
+
+        target_pose[:, 2] += float(self.cfg.z_target_offset_mm)
+
+        cmd_pose = target_pose.clone()
+
+        # APPROACH / DESCEND: pure IK
+        pure_ik_mask = self._phase != 3
+        if torch.any(pure_ik_mask):
+            self._solve_ik_batch(cmd_pose)
+
+        # TRACK: x/y/orientation position control, z only force control
+        if torch.any(track_mask):
+            cmd_xyz_mm = target_pose[:, 0:3].clone()
+
+            for i in torch.where(track_mask)[0].tolist():
+                # x, y: pure position tracking
+                cmd_xyz_mm[i, 0] = target_pose[i, 0]
+                cmd_xyz_mm[i, 1] = target_pose[i, 1]
+
+                # z: force control only
+                xd_z = float(target_pose[i, 2].item() / 1000.0)
+                x_z = float(current_xyz_m[i, 2].item())
+
+                fd_z = float(target_force[i, 2].item())
+                fext_z = float(current_force[i, 2].item())
+
+                out_z = self._fc[i].fz.step(xd_z, x_z, fd_z, fext_z)
+                cmd_xyz_mm[i, 2] = float(out_z[0]) * 1000.0
+
+            cmd_pose[track_mask, 0:3] = cmd_xyz_mm[track_mask]
+            cmd_pose[track_mask, 3:6] = target_pose[track_mask, 3:6]
+
+            self._solve_ik_batch(cmd_pose)
+
+            # row advance only if z-force is reasonably close
+            force_err = torch.abs(current_force[:, 2] - target_force[:, 2])
+            allow_advance = track_mask & (force_err < float(self.cfg.track_force_tol_n))
+
+            self._traj_row[allow_advance] += 1
+            self._traj_row = torch.clamp(self._traj_row, 0, self._traj_len - 1)
+
+        self.path_done = self._traj_row >= (self._traj_len - 1)
 
         if self.cfg.enable_debug_print:
             step = int(getattr(self._env, "common_step_counter", 0))
@@ -181,23 +362,26 @@ class AdmittanceControlAction(ActionTerm):
                 env_id = int(self.cfg.debug_env_id)
                 env_id = max(0, min(env_id, self._num_envs - 1))
 
-                pos_err_norm = torch.norm(target_pose[env_id, 0:3] - current_xyz[env_id]).item()
-                rot_err_norm = torch.norm(target_pose[env_id, 3:6] - current_wxyz[env_id]).item()
+                pos_err_norm = torch.norm(cmd_pose[env_id, 0:3] - current_xyz_mm[env_id]).item()
+                rot_err_norm = torch.norm(cmd_pose[env_id, 3:6] - current_wxyz[env_id]).item()
+
+                h5_index = int(self._traj_row[env_id].item()) if self._phase[env_id].item() == 3 else 0
 
                 local_debug.print_action_debug_status(
                     env_id=env_id,
                     global_step=step,
-                    path_index=0,
-                    traj_length=1,
+                    path_index=h5_index,
+                    traj_length=self._traj_len,
                     waypoint_steps=1,
-                    path_done=False,
+                    path_done=bool(self.path_done[env_id].item()),
                     raw_target_xyz=target_pose[env_id, 0:3],
-                    target_xyz=target_pose[env_id, 0:3],
-                    target_wxyz=target_pose[env_id, 3:6],
-                    current_xyz=current_xyz[env_id, 0:3],
+                    target_xyz=cmd_pose[env_id, 0:3],
+                    target_wxyz=cmd_pose[env_id, 3:6],
+                    current_xyz=current_xyz_mm[env_id, 0:3],
                     current_wxyz=current_wxyz[env_id, 0:3],
                     pos_err_norm=float(pos_err_norm),
                     rot_err_norm=float(rot_err_norm),
+                    target_force=target_force[env_id],   # 추가
                     reward_total=None,
                     reward_score=None,
                     penalty_score=None,
@@ -212,7 +396,6 @@ class AdmittanceControlActionCfg(ActionTermCfg):
     asset_name: str = "robot"
     body_name: str = "spindle_link"
 
-    # compatibility only
     hdf5_file_path: str = ""
     position_dataset_key: str = "position"
     force_dataset_key: str = "force"
@@ -221,15 +404,18 @@ class AdmittanceControlActionCfg(ActionTermCfg):
     joint_prim_relpath: str = "joints"
 
     action_dim: int = 2
-    position_scale: float = 1.0
-    force_scale: float = 1.0
+    position_scale: float = 1.0   # z residual [mm]
+    force_scale: float = 1.0      # z-force residual [N]
     z_target_offset_mm: float = 0.0
 
-    # compatibility only
-    connect_pos_tol_mm: float = 20.0
-    connect_rot_tol_rad: float = 0.20
+    approach_offset_mm: float = 120.0
+    approach_pos_tol_mm: float = 20.0
+    approach_rot_tol_rad: float = 0.20
+    descend_pos_tol_mm: float = 10.0
+    descend_rot_tol_rad: float = 0.10
 
-    # compatibility only
+    track_force_tol_n: float = 10.0
+
     force_model_path: str = ""
     force_dt: float = 0.002
     force_threads: int = 1
