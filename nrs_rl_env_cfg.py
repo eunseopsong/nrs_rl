@@ -83,13 +83,15 @@ class ActionsCfg:
         action_dim=2,
         position_scale=1.0,   # z residual [mm]
         force_scale=1.0,      # fz residual [N]
-        waypoint_stride=1,
-        waypoint_pos_tol_mm=20.0,
-        waypoint_rot_tol_rad=0.20,
-        max_steps_per_waypoint=120,
         z_target_offset_mm=0.0,
+
+        # connect phase tolerance
+        connect_pos_tol_mm=20.0,
+        connect_rot_tol_rad=0.20,
+
         fixed_joint_name="tool0_to_spindle",
         joint_prim_relpath="joints",
+
         force_model_path="/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/y2_control_pybind/checkpoints/ContextNAF_MDGradi/contextNAF_mdGradi_policy_script.pt",
         force_dt=0.002,
         force_threads=1,
@@ -109,6 +111,7 @@ class ActionsCfg:
         force_alpha_max=3.0,
         force_alpha_rate_up=4.0,
         force_alpha_rate_down=4.0,
+
         enable_debug_print=True,
         debug_print_interval=10,
         debug_env_id=0,
@@ -270,7 +273,7 @@ class TerminationsCfg:
 
 @configclass
 class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
-    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=64, env_spacing=2.5)
+    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=1, env_spacing=2.5)
     observations: ObservationCfg = ObservationCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
