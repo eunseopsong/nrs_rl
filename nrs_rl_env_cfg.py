@@ -42,6 +42,8 @@ from nrs_rl.tasks.manager_based.nrs_rl.assets.assets.robots.ur10e_w_spindle impo
     UR10E_W_SPINDLE_HIGH_PD_CFG,
 )
 
+HDF5_TRAJ_PATH = "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/cmd_continue9D.h5"
+
 
 @configclass
 class SpindleSceneCfg(InteractiveSceneCfg):
@@ -75,8 +77,8 @@ class ActionsCfg:
     arm_action = local_action.AdmittanceControlActionCfg(
         asset_name="robot",
         body_name="spindle_link",
-        hdf5_file_path="/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/target_positions.h5",
-        position_dataset_key="target_positions",
+        hdf5_file_path=HDF5_TRAJ_PATH,
+        position_dataset_key="position",
         action_dim=2,
 
         # IK
@@ -130,6 +132,11 @@ class ObservationCfg:
             params={"horizon": 5},
         )
 
+        target_forces = ObsTerm(
+            func=local_obs.get_hdf5_target_forces,
+            params={"horizon": 5},
+        )
+
         ft_6axis = ObsTerm(
             func=local_ft_sensor.get_6axis_ft_fixed_joint,
             params={
@@ -179,8 +186,9 @@ class EventCfg:
         func=local_obs.load_hdf5_positions,
         mode="reset",
         params={
-            "file_path": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/target_positions.h5",
-            "dataset_key": "target_positions",
+            "file_path": HDF5_TRAJ_PATH,
+            "position_dataset_key": "position",
+            "force_dataset_key": "force",
         },
     )
 
@@ -243,15 +251,13 @@ class RewardsCfg:
         weight=0.05,
     )
 
+
 @configclass
 class TerminationsCfg:
     trajectory_finished = DoneTerm(
         func=local_terms.trajectory_finished,
         params={"action_term_name": "arm_action"},
     )
-
-    # 필요하면 안전장치로 매우 큰 timeout 하나 남겨도 됨
-    # safety_time_out = DoneTerm(func=mdp.time_out, time_out=True)
 
 
 @configclass
@@ -267,7 +273,6 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
         self.decimation = 2
         self.sim.render_interval = self.decimation
 
-        # episode 종료는 h5 완료 기준
         self.episode_length_s = 9999.0
 
         self.viewer.eye = (3.5, 3.5, 3.5)
