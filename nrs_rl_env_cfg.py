@@ -82,37 +82,20 @@ class ActionsCfg:
         force_dataset_key="force",
 
         action_dim=2,
-        position_scale=1.0,   # z residual [mm]
-        force_scale=1.0,      # z-force residual [N]
-        z_target_offset_mm=0.0,
 
         fixed_joint_name="tool0_to_spindle",
         joint_prim_relpath="joints",
 
-        force_model_path="/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/y2_control_pybind/checkpoints/ContextNAF_MDGradi/contextNAF_mdGradi_policy_script.pt",
-        force_dt=0.002,
-        force_threads=1,
-        force_device="cpu",
-        force_md_ratio=1000.0,
-        force_fc_fext=50.0,
-        force_free_mass=2.0,
-        force_free_damping=6000.0,
-        force_free_stiffness=2000.0,
-        force_contact_stiffness=0.0,
-        force_recovery_tau=3.0,
-        force_action_low=(-0.25, -0.25),
-        force_action_high=(0.25, 0.25),
-        force_mass_min=0.5,
-        force_mass_max=5.0,
-        force_alpha_min=0.5,
-        force_alpha_max=3.0,
-        force_alpha_rate_up=4.0,
-        force_alpha_rate_down=4.0,
+        initial_z_offset_mm=0.0,
+        poke_step_mm=0.05,
+        contact_stop_force_n=5.0,
+        control_dt_debug=0.008,
 
         enable_debug_print=True,
         debug_print_interval=10,
         debug_env_id=0,
     )
+
 
 @configclass
 class ObservationCfg:
@@ -203,61 +186,62 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    uniform_mrr = RewTerm(
-        func=local_rewards.uniform_mrr_reward,
-        weight=2.0,
-        params={
-            "target_force": 20.0,
-            "target_velocity": 0.0002,
-            "mrr_sigma": 0.002,
-            "asset_name": "robot",
-            "body_name": "spindle_link",
-            "fixed_joint_name": "tool0_to_spindle",
-            "joint_prim_relpath": "joints",
-        },
-    )
+    # uniform_mrr = RewTerm(
+    #     func=local_rewards.uniform_mrr_reward,
+    #     weight=2.0,
+    #     params={
+    #         "target_force": 20.0,
+    #         "target_velocity": 0.0002,
+    #         "mrr_sigma": 0.002,
+    #         "asset_name": "robot",
+    #         "body_name": "spindle_link",
+    #         "fixed_joint_name": "tool0_to_spindle",
+    #         "joint_prim_relpath": "joints",
+    #     },
+    # )
 
-    force_track = RewTerm(
-        func=local_rewards.force_tracking_reward,
-        weight=1.0,
-        params={
-            "target_force": 20.0,
-            "force_sigma": 5.0,
-            "asset_name": "robot",
-            "fixed_joint_name": "tool0_to_spindle",
-            "joint_prim_relpath": "joints",
-        },
-    )
+    # force_track = RewTerm(
+    #     func=local_rewards.force_tracking_reward,
+    #     weight=1.0,
+    #     params={
+    #         "target_force": 20.0,
+    #         "force_sigma": 5.0,
+    #         "asset_name": "robot",
+    #         "fixed_joint_name": "tool0_to_spindle",
+    #         "joint_prim_relpath": "joints",
+    #     },
+    # )
 
-    cornering = RewTerm(
-        func=local_rewards.lookahead_cornering_penalty,
-        weight=0.3,
-        params={
-            "cornering_threshold_angle": 0.5,
-            "penalty_scale": 0.5,
-            "lookahead_steps": 5,
-            "speed_ref": 0.002,
-            "action_rate_scale": 0.1,
-            "asset_name": "robot",
-            "body_name": "spindle_link",
-        },
-    )
+    # cornering = RewTerm(
+    #     func=local_rewards.lookahead_cornering_penalty,
+    #     weight=0.3,
+    #     params={
+    #         "cornering_threshold_angle": 0.5,
+    #         "penalty_scale": 0.5,
+    #         "lookahead_steps": 5,
+    #         "speed_ref": 0.002,
+    #         "action_rate_scale": 0.1,
+    #         "asset_name": "robot",
+    #         "body_name": "spindle_link",
+    #     },
+    # )
 
-    traj_track = RewTerm(
-        func=local_rewards.trajectory_tracking_penalty,
-        weight=1.0,
-        params={
-            "pos_sigma": 0.03,
-            "rot_sigma": 0.20,
-            "asset_name": "robot",
-            "body_name": "spindle_link",
-        },
-    )
+    # traj_track = RewTerm(
+    #     func=local_rewards.trajectory_tracking_penalty,
+    #     weight=1.0,
+    #     params={
+    #         "pos_sigma": 0.03,
+    #         "rot_sigma": 0.20,
+    #         "asset_name": "robot",
+    #         "body_name": "spindle_link",
+    #     },
+    # )
 
-    action_smooth = RewTerm(
-        func=local_rewards.action_smoothness_penalty,
-        weight=0.05,
-    )
+    # action_smooth = RewTerm(
+    #     func=local_rewards.action_smoothness_penalty,
+    #     weight=0.05,
+    # )
+    pass
 
 
 @configclass

@@ -41,13 +41,15 @@ def print_hdf5_positions_loaded(shape, file_path: str):
 def print_fixed_joint_ft_cache(
     robot_prim_path_env0: str,
     joint_prim_path: str,
-    child_link_name: str,
-    child_link_index: int,
+    child_link_name: str | None = None,
+    child_link_index: int | None = None,
 ):
     print(f"[get_6axis_ft_fixed_joint] robot_prim_path_env0 : {robot_prim_path_env0}")
     print(f"[get_6axis_ft_fixed_joint] joint_prim_path      : {joint_prim_path}")
-    print(f"[get_6axis_ft_fixed_joint] child_link_name     : {child_link_name}")
-    print(f"[get_6axis_ft_fixed_joint] child_link_index    : {child_link_index}")
+    if child_link_name is not None:
+        print(f"[get_6axis_ft_fixed_joint] child_link_name     : {child_link_name}")
+    if child_link_index is not None:
+        print(f"[get_6axis_ft_fixed_joint] child_link_index    : {child_link_index}")
 
 
 def print_fixed_joint_ft_failed(error):
@@ -137,80 +139,73 @@ def print_action_debug_status(
     current_xyz = _as_float_list(current_xyz)
     current_wxyz = _as_float_list(current_wxyz)
 
+    while len(raw_target_xyz) < 3:
+        raw_target_xyz.append(0.0)
     while len(raw_target_force) < 3:
         raw_target_force.append(0.0)
+    while len(target_xyz) < 3:
+        target_xyz.append(0.0)
+    while len(target_wxyz) < 3:
+        target_wxyz.append(0.0)
     while len(target_force) < 3:
         target_force.append(0.0)
+    while len(current_xyz) < 3:
+        current_xyz.append(0.0)
+    while len(current_wxyz) < 3:
+        current_wxyz.append(0.0)
 
     print("\n" + "=" * 100)
+
+    # 1) Action Debug
     print(
         f"[Action Debug] env={env_id} | step={global_step} | "
         f"h5_index={path_index}/{max(traj_length - 1, 0)} | "
         f"waypoint_steps={waypoint_steps} | "
-        f"done={path_done}"
+        f"done={path_done} | "
+        f"pos_err_norm={pos_err_norm:.6f} | "
+        f"rot_err_norm={rot_err_norm:.6f}"
     )
-    print(
-        "[Raw Target   ] "
-        f"x={raw_target_xyz[0]: .6f}, y={raw_target_xyz[1]: .6f}, z={raw_target_xyz[2]: .6f}"
-    )
-    print(
-        "[Raw Force    ] "
-        f"Fx={raw_target_force[0]: .6f}, Fy={raw_target_force[1]: .6f}, Fz={raw_target_force[2]: .6f}"
-    )
-    print(
-        "[Target Pose  ] "
-        f"x={target_xyz[0]: .6f}, y={target_xyz[1]: .6f}, z={target_xyz[2]: .6f}, "
-        f"wx={target_wxyz[0]: .6f}, wy={target_wxyz[1]: .6f}, wz={target_wxyz[2]: .6f}"
-    )
-    print(
-        "[Target Force ] "
-        f"Fx={target_force[0]: .6f}, Fy={target_force[1]: .6f}, Fz={target_force[2]: .6f}"
-    )
+
+    # 2) Current Pose
     print(
         "[Current Pose ] "
         f"x={current_xyz[0]: .6f}, y={current_xyz[1]: .6f}, z={current_xyz[2]: .6f}, "
         f"wx={current_wxyz[0]: .6f}, wy={current_wxyz[1]: .6f}, wz={current_wxyz[2]: .6f}"
     )
+
+    # 3) Target Pose
     print(
-        f"[Error        ] pos_norm={pos_err_norm: .6f}, "
-        f"rot_norm={rot_err_norm: .6f}"
+        "[Target Pose  ] "
+        f"x={target_xyz[0]: .6f}, y={target_xyz[1]: .6f}, z={target_xyz[2]: .6f}, "
+        f"wx={target_wxyz[0]: .6f}, wy={target_wxyz[1]: .6f}, wz={target_wxyz[2]: .6f}"
     )
 
-    print("-" * 100)
-    if reward_total is None or reward_score is None or penalty_score is None:
-        print("[RL Score    ] N/A (actual reward not connected)")
-    else:
-        print(
-            f"[RL Score    ] TOTAL={reward_total: .6f} | "
-            f"REWARD(+)= {reward_score: .6f} | "
-            f"PENALTY(-)= {penalty_score: .6f}"
-        )
-    print("-" * 100)
-
+    # 4) Current Force
     if _last_ft_debug["wrench"] is not None:
         fx, fy, fz, tx, ty, tz = _last_ft_debug["wrench"]
         ft_step = _last_ft_debug["step"]
         print(
-            "[FT Sensor    ] "
+            "[Current Force] "
             f"step={ft_step}, "
             f"Fx={fx: .6f}, Fy={fy: .6f}, Fz={fz: .6f}, "
             f"Tx={tx: .6f}, Ty={ty: .6f}, Tz={tz: .6f}"
         )
-        print(
-            "[Force Error ] "
-            f"dFx={fx - target_force[0]: .6f}, "
-            f"dFy={fy - target_force[1]: .6f}, "
-            f"dFz={fz - target_force[2]: .6f}"
-        )
     else:
-        print("[FT Sensor    ] No cached 6-axis FT data")
+        print("[Current Force] No cached 6-axis FT data")
 
+    # 5) Target Force
+    print(
+        "[Target Force ] "
+        f"Fx={target_force[0]: .6f}, Fy={target_force[1]: .6f}, Fz={target_force[2]: .6f}"
+    )
+
+    # 6) Polishing
     if _last_polishing_debug["metrics"] is not None:
         pm_step = _last_polishing_debug["step"]
         pm = _last_polishing_debug["metrics"]
 
         cartesian_speed = pm[0]
-        fz = pm[1]
+        fz_polish = pm[1]
         abs_fz = pm[2]
         contact_flag = int(pm[3])
         effective_force = pm[4]
@@ -223,7 +218,7 @@ def print_action_debug_status(
             f"step={pm_step}, "
             f"contact={contact_flag}, "
             f"cartesian_speed={cartesian_speed: .6f} m/s, "
-            f"Fz={fz: .6f} N, "
+            f"Fz={fz_polish: .6f} N, "
             f"|Fz|={abs_fz: .6f} N, "
             f"effective_F={effective_force: .6f} N, "
             f"removal_rate={removal_rate: .8f}, "
@@ -232,6 +227,16 @@ def print_action_debug_status(
         )
     else:
         print("[Polishing    ] No cached polishing metrics")
+
+    # 7) RL Score
+    if reward_total is None or reward_score is None or penalty_score is None:
+        print("[RL Score     ] N/A (actual reward not connected)")
+    else:
+        print(
+            f"[RL Score     ] TOTAL={reward_total: .6f} | "
+            f"REWARD(+)= {reward_score: .6f} | "
+            f"PENALTY(-)= {penalty_score: .6f}"
+        )
 
     print("=" * 100)
 

@@ -91,43 +91,22 @@ def _build_target_htm_torch(pos_mm: torch.Tensor, spatial: torch.Tensor) -> torc
     return T
 
 
-class _PerEnvForceControllers:
-    def __init__(self, cfg):
-        common_kwargs = dict(
-            model_path=cfg.force_model_path,
-            dt=cfg.force_dt,
-            threads=cfg.force_threads,
-            device=cfg.force_device,
-            md_ratio=cfg.force_md_ratio,
-            fc_fext=cfg.force_fc_fext,
-            free_mass=cfg.force_free_mass,
-            free_damping=cfg.force_free_damping,
-            free_stiffness=cfg.force_free_stiffness,
-            contact_stiffness=cfg.force_contact_stiffness,
-            recovery_tau=cfg.force_recovery_tau,
-            action_low=list(cfg.force_action_low),
-            action_high=list(cfg.force_action_high),
-            mass_min=cfg.force_mass_min,
-            mass_max=cfg.force_mass_max,
-            alpha_min=cfg.force_alpha_min,
-            alpha_max=cfg.force_alpha_max,
-            alpha_rate_up=cfg.force_alpha_rate_up,
-            alpha_rate_down=cfg.force_alpha_rate_down,
-        )
-        self.fz = y2_pb.ForceCon1DMode5(**common_kwargs)
-
-    def reset(self, z_m: float):
-        self.fz.reset(float(z_m))
-
-
 class AdmittanceControlAction(ActionTerm):
     """
-    Immediate HDF5 tracking version (no phase).
+    Z-axis poke mode for contact / FT-axis validation.
 
-    - x, y: position tracking
-    - z: force control with ForceCon1DMode5
-    - wx, wy, wz: orientation tracking
-    - trajectory row advances every step
+    Behavior:
+    - Use HDF5 first row orientation as fixed orientation target
+    - Lock x,y to current pose every step
+    - Move z downward by constant step each call until contact threshold is reached
+    - After contact threshold, hold current z
+    - No force controller
+    - Raw FT is only observed, not fed back into control
+
+    This isolates:
+    1) whether contact occurs
+    2) how raw Fz rises
+    3) whether Fx/Fy remain small or get mixed
     """
 
     cfg: "AdmittanceControlActionCfg"
@@ -139,6 +118,7 @@ class AdmittanceControlAction(ActionTerm):
         self._num_envs = env.num_envs
         self._robot = env.scene[cfg.asset_name]
 
+        # keep skrl happy, though not actually used
         self._raw_actions = torch.zeros((self._num_envs, cfg.action_dim), device=self._device, dtype=torch.float32)
         self._processed_actions = torch.zeros_like(self._raw_actions)
 
@@ -162,10 +142,15 @@ class AdmittanceControlAction(ActionTerm):
             raise ValueError(f"[Action] expected force dataset (T,3), got {frc.shape}")
         if pos.shape[0] != frc.shape[0]:
             raise ValueError(f"[Action] position/force length mismatch: {pos.shape[0]} vs {frc.shape[0]}")
+        if pos.shape[0] < 1:
+            raise ValueError("[Action] trajectory is empty.")
 
         self._traj_pos = torch.tensor(pos, device=self._device, dtype=torch.float32)
         self._traj_force = torch.tensor(frc, device=self._device, dtype=torch.float32)
         self._traj_len = int(pos.shape[0])
+
+        self._fixed_target_pose = self._traj_pos[0].clone()     # (6,)
+        self._fixed_target_force = self._traj_force[0].clone()  # (3,)
 
         self._ik = y2_pb.UR10eKinematics(
             dt=float(y2_cfg.CONTROL_PERIOD),
@@ -176,7 +161,9 @@ class AdmittanceControlAction(ActionTerm):
         self._traj_row = torch.zeros((self._num_envs,), device=self._device, dtype=torch.long)
         self.path_done = torch.zeros((self._num_envs,), device=self._device, dtype=torch.bool)
 
-        self._fc = [_PerEnvForceControllers(cfg) for _ in range(self._num_envs)]
+        # per-env poke target z [mm]
+        self._poke_z_mm = torch.zeros((self._num_envs,), device=self._device, dtype=torch.float32)
+        self._contact_latched = torch.zeros((self._num_envs,), device=self._device, dtype=torch.bool)
 
         if cfg.enable_debug_print:
             body_ids = self._robot.find_bodies(cfg.body_name)[0]
@@ -186,17 +173,17 @@ class AdmittanceControlAction(ActionTerm):
                 position_dataset_key=cfg.position_dataset_key,
                 traj_shape=tuple(self._traj_pos.shape),
                 stride=1,
-                used_traj_shape=tuple(self._traj_pos.shape),
+                used_traj_shape=(1, self._traj_pos.shape[1]),
                 body_name=cfg.body_name,
                 ee_idx=ee_idx,
                 num_envs=self._num_envs,
                 tcp_length_offset_m=0.0,
                 tcp_offset_axis="z",
             )
-            force_preview = self._traj_force[:5].detach().cpu().numpy()
-            print("[Action] force shape:", tuple(self._traj_force.shape))
-            print("[Action] first 5 force rows:")
-            print(force_preview)
+            print("[Action] poke mode enabled")
+            print("[Action] fixed target pose (row 0):", self._fixed_target_pose.detach().cpu().numpy())
+            print("[Action] fixed target force(row 0):", self._fixed_target_force.detach().cpu().numpy())
+            print(f"[Action] poke_step_mm={cfg.poke_step_mm}, contact_stop_force_n={cfg.contact_stop_force_n}, initial_offset_mm={cfg.initial_z_offset_mm}")
 
     @property
     def action_dim(self) -> int:
@@ -217,17 +204,21 @@ class AdmittanceControlAction(ActionTerm):
         self._raw_actions[env_ids] = 0.0
         self._processed_actions[env_ids] = 0.0
         self._q_des[env_ids] = self._robot.data.joint_pos[env_ids, :6].clone()
+
         self._traj_row[env_ids] = 0
         self.path_done[env_ids] = False
 
         current_pose = local_obs.get_ee_pose(self._env, asset_name=self.cfg.asset_name)
-        current_z_m = current_pose[:, 2] / 1000.0
-        for i in env_ids.tolist():
-            self._fc[i].reset(float(current_z_m[i].item()))
+        current_xyz_mm = current_pose[:, 0:3]
+
+        # start from current z + initial offset
+        self._poke_z_mm[env_ids] = current_xyz_mm[env_ids, 2] + float(self.cfg.initial_z_offset_mm)
+        self._contact_latched[env_ids] = False
 
         return {}
 
     def process_actions(self, actions: torch.Tensor):
+        # not used, but keep interface
         self._raw_actions[:] = actions.to(self._device)
         self._processed_actions[:] = self._raw_actions
 
@@ -256,57 +247,41 @@ class AdmittanceControlAction(ActionTerm):
 
         current_xyz_mm = current_pose[:, 0:3]
         current_wxyz = current_pose[:, 3:6]
-        current_xyz_m = current_xyz_mm / 1000.0
         current_force = wrench[:, 0:3]
 
-        idx = torch.clamp(self._traj_row, 0, self._traj_len - 1)
+        raw_target_pose = self._fixed_target_pose.unsqueeze(0).repeat(self._num_envs, 1).clone()
+        raw_target_force = self._fixed_target_force.unsqueeze(0).repeat(self._num_envs, 1).clone()
 
-        raw_target_pose = self._traj_pos[idx].clone()
-        raw_target_force = self._traj_force[idx].clone()
+        cmd_pose = raw_target_pose.clone()
+        cmd_xyz_mm = current_xyz_mm.clone()
 
-        target_pose = raw_target_pose.clone()
-        target_force = raw_target_force.clone()
-
-        # optional RL residuals: z only
-        if self.cfg.action_dim >= 1:
-            target_pose[:, 2] += self._processed_actions[:, 0] * self.cfg.position_scale
-        if self.cfg.action_dim >= 2:
-            target_force[:, 2] += self._processed_actions[:, 1] * self.cfg.force_scale
-
-        target_pose[:, 2] += float(self.cfg.z_target_offset_mm)
-
-        # command pose:
-        # x,y = position tracking
-        # z   = force control
-        # ori = target orientation tracking
-        cmd_pose = target_pose.clone()
-
-        cmd_xyz_mm = target_pose[:, 0:3].clone()
+        # orientation is fixed to first row orientation
+        cmd_pose[:, 3:6] = raw_target_pose[:, 3:6]
 
         for i in range(self._num_envs):
-            # x,y position control only
-            cmd_xyz_mm[i, 0] = target_pose[i, 0]
-            cmd_xyz_mm[i, 1] = target_pose[i, 1]
+            fz = float(current_force[i, 2].item())
 
-            # z force control only
-            xd_z = float(target_pose[i, 2].item() / 1000.0)
-            x_z = float(current_xyz_m[i, 2].item())
+            # x,y lock to current pose
+            cmd_xyz_mm[i, 0] = current_xyz_mm[i, 0]
+            cmd_xyz_mm[i, 1] = current_xyz_mm[i, 1]
 
-            fd_z = float(target_force[i, 2].item())
-            fext_z = float(current_force[i, 2].item())
+            # if enough contact, latch and hold z
+            if (not bool(self._contact_latched[i].item())) and (abs(fz) >= float(self.cfg.contact_stop_force_n)):
+                self._contact_latched[i] = True
+                self._poke_z_mm[i] = current_xyz_mm[i, 2]
 
-            out_z = self._fc[i].fz.step(xd_z, x_z, fd_z, fext_z)
-            cmd_xyz_mm[i, 2] = float(out_z[0]) * 1000.0
+            # if not yet in contact, keep poking downward
+            if not bool(self._contact_latched[i].item()):
+                self._poke_z_mm[i] = self._poke_z_mm[i] - float(self.cfg.poke_step_mm)
+
+            cmd_xyz_mm[i, 2] = self._poke_z_mm[i]
 
         cmd_pose[:, 0:3] = cmd_xyz_mm
-        cmd_pose[:, 3:6] = target_pose[:, 3:6]
 
         self._solve_ik_batch(cmd_pose)
 
-        # immediate tracking: advance every step
-        self._traj_row += 1
-        self._traj_row = torch.clamp(self._traj_row, 0, self._traj_len - 1)
-        self.path_done = self._traj_row >= (self._traj_len - 1)
+        self._traj_row[:] = 0
+        self.path_done[:] = False
 
         if self.cfg.enable_debug_print:
             step = int(getattr(self._env, "common_step_counter", 0))
@@ -320,15 +295,15 @@ class AdmittanceControlAction(ActionTerm):
                 local_debug.print_action_debug_status(
                     env_id=env_id,
                     global_step=step,
-                    path_index=int(idx[env_id].item()),
+                    path_index=0,
                     traj_length=self._traj_len,
                     waypoint_steps=1,
-                    path_done=bool(self.path_done[env_id].item()),
+                    path_done=False,
                     raw_target_xyz=raw_target_pose[env_id, 0:3],
                     raw_target_force=raw_target_force[env_id],
                     target_xyz=cmd_pose[env_id, 0:3],
                     target_wxyz=cmd_pose[env_id, 3:6],
-                    target_force=target_force[env_id],
+                    target_force=raw_target_force[env_id],
                     current_xyz=current_xyz_mm[env_id, 0:3],
                     current_wxyz=current_wxyz[env_id, 0:3],
                     pos_err_norm=float(pos_err_norm),
@@ -336,7 +311,7 @@ class AdmittanceControlAction(ActionTerm):
                     reward_total=None,
                     reward_score=None,
                     penalty_score=None,
-                    dt=float(self.cfg.force_dt),
+                    dt=float(self.cfg.control_dt_debug),
                 )
 
 
@@ -354,30 +329,16 @@ class AdmittanceControlActionCfg(ActionTermCfg):
     fixed_joint_name: str = "tool0_to_spindle"
     joint_prim_relpath: str = "joints"
 
+    # keep skrl happy
     action_dim: int = 2
-    position_scale: float = 1.0   # z residual [mm]
-    force_scale: float = 1.0      # z-force residual [N]
-    z_target_offset_mm: float = 0.0
 
-    force_model_path: str = ""
-    force_dt: float = 0.002
-    force_threads: int = 1
-    force_device: str = "cpu"
-    force_md_ratio: float = 1000.0
-    force_fc_fext: float = 50.0
-    force_free_mass: float = 2.0
-    force_free_damping: float = 6000.0
-    force_free_stiffness: float = 2000.0
-    force_contact_stiffness: float = 0.0
-    force_recovery_tau: float = 3.0
-    force_action_low: tuple[float, float] = (-0.25, -0.25)
-    force_action_high: tuple[float, float] = (0.25, 0.25)
-    force_mass_min: float = 0.5
-    force_mass_max: float = 5.0
-    force_alpha_min: float = 0.5
-    force_alpha_max: float = 3.0
-    force_alpha_rate_up: float = 4.0
-    force_alpha_rate_down: float = 4.0
+    # poke parameters
+    initial_z_offset_mm: float = 0.0
+    poke_step_mm: float = 0.05
+    contact_stop_force_n: float = 5.0
+
+    # debug only
+    control_dt_debug: float = 0.008
 
     enable_debug_print: bool = True
     debug_print_interval: int = 10
