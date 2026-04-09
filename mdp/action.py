@@ -9,7 +9,6 @@ if TYPE_CHECKING:
 
 import importlib
 import torch
-import h5py
 
 from isaaclab.managers import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
@@ -84,15 +83,36 @@ def _build_target_htm_torch(pos_mm: torch.Tensor, spatial: torch.Tensor) -> torc
 
 class AdmittanceControlAction(ActionTerm):
     """
-    Pybind-backed 1D admittance force control.
+    Minimal single-point controller using C++ Admittance1D directly.
 
-    - x,y fixed at reset
-    - orientation fixed at reset
-    - z is controlled by C++ Admittance1D
-    - per-env controller object is kept statefully
+    cfg에 남기는 control parameter:
+      - adm_dt
+      - mass
+      - damping
+      - stiffness
+
+    나머지 상수(contact threshold, approach step 등)는
+    C++ 함수 파라미터가 아니므로 action 내부 상수로 고정.
     """
 
     cfg: "AdmittanceControlActionCfg"
+
+    # -----------------------------
+    # Internal fixed constants
+    # -----------------------------
+    TARGET_FZ_N = 10.0
+    CONTACT_FORCE_THRESHOLD_N = 8.0
+    CONTACT_DEBOUNCE_STEPS = 5
+    APPROACH_STEP_MM = 0.05
+    FORCE_LPF_ALPHA = 0.8
+
+    Z_DOWN_LIMIT_MM = 150.0
+    Z_UP_LIMIT_MM = 5.0
+
+    ENABLE_DEBUG_PRINT = True
+    DEBUG_PRINT_INTERVAL = 10
+    DEBUG_ENV_ID = 0
+    CONTROL_DT_DEBUG = 0.008
 
     def __init__(self, cfg: "AdmittanceControlActionCfg", env: "ManagerBasedRLEnv"):
         super().__init__(cfg, env)
@@ -109,43 +129,25 @@ class AdmittanceControlAction(ActionTerm):
             ee2tcp=y2_cfg.EE2TCP,
         )
 
-        # 1D admittance controller per env
+        # C++ Admittance1D per env
         self._adm_1d = [y2_pb.Admittance1D(float(cfg.adm_dt)) for _ in range(self._num_envs)]
         for adm in self._adm_1d:
             adm.set_mdk(float(cfg.mass), float(cfg.damping), float(cfg.stiffness))
 
         self._q_des = self._robot.data.joint_pos[:, :6].clone()
 
-        # anchors from reset pose
         self._reset_xyz_mm = torch.zeros((self._num_envs, 3), device=self._device, dtype=torch.float32)
         self._xy_anchor_mm = torch.zeros((self._num_envs, 2), device=self._device, dtype=torch.float32)
         self._ori_anchor_wxyz = torch.zeros((self._num_envs, 3), device=self._device, dtype=torch.float32)
 
-        # reference / command z
         self._xd_ref_mm = torch.zeros((self._num_envs,), device=self._device, dtype=torch.float32)
         self._xc_cmd_mm = torch.zeros((self._num_envs,), device=self._device, dtype=torch.float32)
         self._z_center_mm = torch.zeros((self._num_envs,), device=self._device, dtype=torch.float32)
 
-        # contact logic
         self._contact_latched = torch.zeros((self._num_envs,), device=self._device, dtype=torch.bool)
         self._contact_counter = torch.zeros((self._num_envs,), device=self._device, dtype=torch.long)
         self._fz_abs_lpf = torch.zeros((self._num_envs,), device=self._device, dtype=torch.float32)
 
-        # optional HDF5 read only for debug / fallback
-        self._fixed_target_force = torch.tensor([0.0, 0.0, float(cfg.target_fz_n)], device=self._device, dtype=torch.float32)
-        if cfg.hdf5_file_path != "":
-            try:
-                with h5py.File(cfg.hdf5_file_path, "r") as f:
-                    if cfg.force_dataset_key in f:
-                        frc = f[cfg.force_dataset_key][:]
-                        if frc.ndim == 2 and frc.shape[0] >= 1 and frc.shape[1] == 3:
-                            tmp_force = torch.tensor(frc[0], device=self._device, dtype=torch.float32)
-                            tmp_force[2] = float(cfg.target_fz_n)
-                            self._fixed_target_force = tmp_force
-            except Exception:
-                pass
-
-        # keep termination harmless
         self.path_done = torch.zeros((self._num_envs,), device=self._device, dtype=torch.bool)
 
     @property
@@ -177,15 +179,14 @@ class AdmittanceControlAction(ActionTerm):
         self._ori_anchor_wxyz[env_ids] = current_wxyz[env_ids]
 
         self._z_center_mm[env_ids] = current_xyz_mm[env_ids, 2]
-        self._xd_ref_mm[env_ids] = current_xyz_mm[env_ids, 2] + float(self.cfg.initial_z_offset_mm)
-        self._xc_cmd_mm[env_ids] = self._xd_ref_mm[env_ids]
+        self._xd_ref_mm[env_ids] = current_xyz_mm[env_ids, 2]
+        self._xc_cmd_mm[env_ids] = current_xyz_mm[env_ids, 2]
 
         self._contact_latched[env_ids] = False
         self._contact_counter[env_ids] = 0
         self._fz_abs_lpf[env_ids] = 0.0
         self.path_done[env_ids] = False
 
-        # reset C++ controller states
         env_ids_cpu = env_ids.detach().cpu().tolist()
         for i in env_ids_cpu:
             self._adm_1d[i].set_mdk(float(self.cfg.mass), float(self.cfg.damping), float(self.cfg.stiffness))
@@ -194,7 +195,7 @@ class AdmittanceControlAction(ActionTerm):
         return {}
 
     def process_actions(self, actions: torch.Tensor):
-        # not used in this single-point test
+        # RL action is intentionally unused
         self._raw_actions[:] = actions.to(self._device)
         self._processed_actions[:] = self._raw_actions
 
@@ -228,7 +229,7 @@ class AdmittanceControlAction(ActionTerm):
         raw_fz = current_force[:, 2]
         raw_fz_abs = torch.abs(raw_fz)
 
-        alpha = float(self.cfg.force_lpf_alpha)
+        alpha = float(self.FORCE_LPF_ALPHA)
         self._fz_abs_lpf = alpha * self._fz_abs_lpf + (1.0 - alpha) * raw_fz_abs
 
         cmd_pose = torch.zeros((self._num_envs, 6), device=self._device, dtype=torch.float32)
@@ -236,50 +237,37 @@ class AdmittanceControlAction(ActionTerm):
         cmd_pose[:, 1] = self._xy_anchor_mm[:, 1]
         cmd_pose[:, 3:6] = self._ori_anchor_wxyz
 
-        fd_target = float(abs(self.cfg.target_fz_n))
-
         for i in range(self._num_envs):
-            fext = float(raw_fz[i].item())          # raw external force
+            fext = float(raw_fz[i].item())
             fext_abs_f = float(self._fz_abs_lpf[i].item())
 
-            # -------------------------
             # contact detection
-            # -------------------------
             if not bool(self._contact_latched[i].item()):
-                if fext_abs_f >= float(self.cfg.contact_force_threshold_n):
+                if fext_abs_f >= float(self.CONTACT_FORCE_THRESHOLD_N):
                     self._contact_counter[i] += 1
                 else:
                     self._contact_counter[i] = 0
 
-                if int(self._contact_counter[i].item()) >= int(self.cfg.contact_debounce_steps):
+                if int(self._contact_counter[i].item()) >= int(self.CONTACT_DEBOUNCE_STEPS):
                     self._contact_latched[i] = True
-                    # IMPORTANT:
-                    # keep xd_ref where it was; do NOT jump xd_ref to current_z
-                    # this avoids losing contact right after latch
+                    # contact 순간의 현재 z를 reference로 다시 잡음
+                    self._xd_ref_mm[i] = current_xyz_mm[i, 2]
+                    self._adm_1d[i].reset(float(self._xd_ref_mm[i].item()))
                 else:
-                    self._xd_ref_mm[i] = self._xd_ref_mm[i] - float(self.cfg.approach_step_mm)
+                    self._xd_ref_mm[i] = self._xd_ref_mm[i] - float(self.APPROACH_STEP_MM)
 
-            # -------------------------
-            # desired force selection
-            # -------------------------
-            if bool(self._contact_latched[i].item()):
-                fd = fd_target
-            else:
-                fd = 0.0
+            fd = float(self.TARGET_FZ_N) if bool(self._contact_latched[i].item()) else 0.0
 
-            # safety clamp on xd reference
-            z_min = float(self._z_center_mm[i].item()) - float(self.cfg.z_down_limit_mm)
-            z_max = float(self._z_center_mm[i].item()) + float(self.cfg.z_up_limit_mm)
+            z_min = float(self._z_center_mm[i].item()) - float(self.Z_DOWN_LIMIT_MM)
+            z_max = float(self._z_center_mm[i].item()) + float(self.Z_UP_LIMIT_MM)
             self._xd_ref_mm[i] = torch.clamp(self._xd_ref_mm[i], min=z_min, max=z_max)
 
-            # C++ admittance step
             xc = self._adm_1d[i].step(
                 float(self._xd_ref_mm[i].item()),
                 float(fd),
                 float(fext),
             )
 
-            # optional command clamp
             xc = max(z_min, min(z_max, float(xc)))
             self._xc_cmd_mm[i] = float(xc)
 
@@ -288,14 +276,14 @@ class AdmittanceControlAction(ActionTerm):
         self._solve_ik_batch(cmd_pose)
         self.path_done[:] = False
 
-        if self.cfg.enable_debug_print:
+        if self.ENABLE_DEBUG_PRINT:
             step = int(getattr(self._env, "common_step_counter", 0))
-            if step % int(self.cfg.debug_print_interval) == 0:
-                env_id = int(self.cfg.debug_env_id)
+            if step % int(self.DEBUG_PRINT_INTERVAL) == 0:
+                env_id = int(self.DEBUG_ENV_ID)
                 env_id = max(0, min(env_id, self._num_envs - 1))
 
-                z_min = float(self._z_center_mm[env_id].item()) - float(self.cfg.z_down_limit_mm)
-                z_max = float(self._z_center_mm[env_id].item()) + float(self.cfg.z_up_limit_mm)
+                z_min = float(self._z_center_mm[env_id].item()) - float(self.Z_DOWN_LIMIT_MM)
+                z_max = float(self._z_center_mm[env_id].item()) + float(self.Z_UP_LIMIT_MM)
                 phase = "force" if bool(self._contact_latched[env_id].item()) else "approach"
 
                 pos_err_norm = torch.norm(cmd_pose[env_id, 0:3] - current_xyz_mm[env_id]).item()
@@ -311,7 +299,7 @@ class AdmittanceControlAction(ActionTerm):
                     f"z_min={z_min:.6f} | z_max={z_max:.6f} | "
                     f"raw_fz={float(raw_fz[env_id].item()):.6f} | "
                     f"filt_abs_fz={float(self._fz_abs_lpf[env_id].item()):.6f} | "
-                    f"target_fz={fd_target:.6f}"
+                    f"target_fz={float(self.TARGET_FZ_N):.6f}"
                 )
 
                 local_debug.print_action_debug_status(
@@ -322,10 +310,10 @@ class AdmittanceControlAction(ActionTerm):
                     waypoint_steps=1,
                     path_done=False,
                     raw_target_xyz=cmd_pose[env_id, 0:3],
-                    raw_target_force=torch.tensor([0.0, 0.0, fd_target], device=self._device),
+                    raw_target_force=torch.tensor([0.0, 0.0, self.TARGET_FZ_N], device=self._device),
                     target_xyz=cmd_pose[env_id, 0:3],
                     target_wxyz=cmd_pose[env_id, 3:6],
-                    target_force=torch.tensor([0.0, 0.0, fd_target], device=self._device),
+                    target_force=torch.tensor([0.0, 0.0, self.TARGET_FZ_N], device=self._device),
                     current_xyz=current_xyz_mm[env_id, 0:3],
                     current_wxyz=current_wxyz[env_id, 0:3],
                     pos_err_norm=float(pos_err_norm),
@@ -333,7 +321,7 @@ class AdmittanceControlAction(ActionTerm):
                     reward_total=None,
                     reward_score=None,
                     penalty_score=None,
-                    dt=float(self.cfg.control_dt_debug),
+                    dt=float(self.CONTROL_DT_DEBUG),
                 )
 
 
@@ -341,43 +329,15 @@ class AdmittanceControlAction(ActionTerm):
 class AdmittanceControlActionCfg(ActionTermCfg):
     class_type: type[ActionTerm] = AdmittanceControlAction
 
+    # Isaac Lab 연결용 필수 항목
     asset_name: str = "robot"
     body_name: str = "spindle_link"
-
-    hdf5_file_path: str = ""
-    position_dataset_key: str = "position"
-    force_dataset_key: str = "force"
-
     fixed_joint_name: str = "tool0_to_spindle"
     joint_prim_relpath: str = "joints"
-
-    # keep skrl happy
     action_dim: int = 2
 
-    # target force
-    target_fz_n: float = 10.0
-
-    # 1D admittance parameters (same style as C++ API)
+    # C++ Admittance1D와 직접 대응되는 cfg만 유지
     adm_dt: float = 0.008
     mass: float = 2.0
     damping: float = 80.0
     stiffness: float = 0.0
-
-    # reset / approach
-    initial_z_offset_mm: float = 0.0
-    contact_force_threshold_n: float = 8.0
-    contact_debounce_steps: int = 5
-    approach_step_mm: float = 0.02
-
-    # only for contact detection robustness
-    force_lpf_alpha: float = 0.8
-
-    # safety clamp around reset current z
-    z_down_limit_mm: float = 150.0
-    z_up_limit_mm: float = 5.0
-
-    # debug
-    control_dt_debug: float = 0.008
-    enable_debug_print: bool = True
-    debug_print_interval: int = 10
-    debug_env_id: int = 0

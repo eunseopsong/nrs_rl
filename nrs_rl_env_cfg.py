@@ -77,39 +77,16 @@ class ActionsCfg:
     arm_action = local_action.AdmittanceControlActionCfg(
         asset_name="robot",
         body_name="spindle_link",
-
-        hdf5_file_path=HDF5_TRAJ_PATH,
-        position_dataset_key="position",
-        force_dataset_key="force",
-
-        action_dim=2,
-
         fixed_joint_name="tool0_to_spindle",
         joint_prim_relpath="joints",
+        action_dim=2,
 
-        target_fz_n=10.0,
-
+        # C++ Admittance1D direct params
         adm_dt=0.008,
-        mass=2.0,
-        damping=80.0,
+        mass=5.0,
+        damping=500.0,
         stiffness=0.0,
-
-        initial_z_offset_mm=0.0,
-        contact_force_threshold_n=8.0,
-        contact_debounce_steps=5,
-        approach_step_mm=0.02,
-
-        force_lpf_alpha=0.8,
-
-        z_down_limit_mm=150.0,
-        z_up_limit_mm=5.0,
-
-        control_dt_debug=0.008,
-        enable_debug_print=True,
-        debug_print_interval=10,
-        debug_env_id=0,
     )
-
 
 @configclass
 class ObservationCfg:
