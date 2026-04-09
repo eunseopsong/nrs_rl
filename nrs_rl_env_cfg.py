@@ -240,6 +240,19 @@ class TerminationsCfg:
         func=local_terms.trajectory_finished,
     )
 
+# ============================================================
+# [26.04.10 추가] Visualization Configuration
+# ============================================================
+@configclass
+class VisualizationCfg:
+    """[26.04.10 추가] visualization.py 모듈을 위한 설정 그룹"""
+    enable_visualizer: bool = True
+    save_interval_episodes: int = 1  # 매 에피소드마다 저장
+    # 가공량 계산을 위한 물리 상수
+    force_threshold: float = 0.5    # N
+    speed_threshold: float = 0.1    # mm/s
+    # 로그 파일 경로 설정 등은 visualization.py 내부 설정을 따름
+# ============================================================
 
 @configclass
 class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
@@ -249,6 +262,9 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
     events: EventCfg = EventCfg()
+    
+    # [26.04.10 추가] Visualization 설정 연결
+    visualization: VisualizationCfg = VisualizationCfg()
 
     def __post_init__(self):
         self.decimation = 1
