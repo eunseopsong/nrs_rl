@@ -40,7 +40,9 @@ def _resolve_env0_robot_prim_path(robot) -> str:
     if "{ENV_REGEX_NS}" in prim_path:
         return prim_path.replace("{ENV_REGEX_NS}", "/World/envs/env_0")
 
+    # e.g. /World/envs/env_.*/Robot -> /World/envs/env_0/Robot
     prim_path = re.sub(r"/env_\.\*", "/env_0", prim_path)
+
     return prim_path
 
 
@@ -72,11 +74,6 @@ def _find_existing_joint_prim_path(
         "[get_6axis_ft_fixed_joint] Joint prim not found. "
         f"Tried: {candidates}"
     )
-
-
-def _init_ft_step_cache(env: "ManagerBasedRLEnv"):
-    if not hasattr(env, "_ft6_step_cache"):
-        env._ft6_step_cache = {}
 
 
 def _init_fixed_joint_ft_cache(
@@ -147,66 +144,6 @@ def _init_fixed_joint_ft_cache(
     return cache
 
 
-def _read_raw_link_incoming_force(
-    env: "ManagerBasedRLEnv",
-    robot,
-    child_link_index: int,
-) -> torch.Tensor:
-    """
-    child link index 기반으로 raw 6축 wrench 읽기
-    return: (N, 6)
-    """
-    physx_view = getattr(robot, "root_physx_view", None)
-    if physx_view is None:
-        raise RuntimeError("[get_6axis_ft_fixed_joint] robot.root_physx_view is missing")
-
-    forces = None
-
-    # 1) preferred path
-    if hasattr(physx_view, "get_link_incoming_joint_force"):
-        forces = physx_view.get_link_incoming_joint_force()
-
-    # 2) robot wrapper fallback
-    elif hasattr(robot, "get_measured_joint_forces"):
-        forces = robot.get_measured_joint_forces()
-
-    # 3) physx view fallback
-    elif hasattr(physx_view, "get_measured_joint_forces"):
-        forces = physx_view.get_measured_joint_forces()
-
-    else:
-        raise RuntimeError(
-            "[get_6axis_ft_fixed_joint] No available FT API. "
-            "Checked: root_physx_view.get_link_incoming_joint_force(), "
-            "robot.get_measured_joint_forces(), "
-            "root_physx_view.get_measured_joint_forces()"
-        )
-
-    if forces is None:
-        return torch.zeros((env.num_envs, 6), device=env.device, dtype=torch.float32)
-
-    if not isinstance(forces, torch.Tensor):
-        forces = torch.tensor(forces, device=env.device, dtype=torch.float32)
-    else:
-        forces = forces.to(device=env.device, dtype=torch.float32)
-
-    if forces.ndim == 2:
-        wrench = forces[child_link_index, :].unsqueeze(0).repeat(env.num_envs, 1)
-    elif forces.ndim == 3:
-        wrench = forces[:, child_link_index, :]
-    else:
-        raise RuntimeError(
-            f"[get_6axis_ft_fixed_joint] Unexpected force tensor shape: {tuple(forces.shape)}"
-        )
-
-    if wrench.shape[-1] != 6:
-        raise RuntimeError(
-            f"[get_6axis_ft_fixed_joint] Expected last dim=6, got {tuple(wrench.shape)}"
-        )
-
-    return wrench
-
-
 def get_6axis_ft_fixed_joint(
     env: "ManagerBasedRLEnv",
     asset_name: str = "robot",
@@ -215,34 +152,13 @@ def get_6axis_ft_fixed_joint(
     verbose: bool = False,
 ) -> torch.Tensor:
     """
-    Raw-only FT reader for axis verification.
-
-    - No sign flip
-    - No scaling
-    - No filtering
-    - No frame transform
-    - No bias compensation
-    - No EMA
-    - No deadband
+    Read 6-axis FT from a fixed joint by mapping:
+      fixed joint prim -> child link -> measured joint force row
 
     Returns:
-      (num_envs, 6) = raw [Fx, Fy, Fz, Tx, Ty, Tz]
+      [num_envs, 6] = [Fx, Fy, Fz, Tx, Ty, Tz]
     """
     try:
-        _init_ft_step_cache(env)
-
-        cache_key = (asset_name, fixed_joint_name, joint_prim_relpath)
-        current_step = int(getattr(env, "common_step_counter", 0))
-
-        # same step -> return cached raw wrench
-        if cache_key in env._ft6_step_cache:
-            step_cache = env._ft6_step_cache[cache_key]
-            if step_cache["step"] == current_step:
-                cached = step_cache["wrench"]
-                local_debug.print_ft_sensor_debug(current_step, cached[0])
-                return cached
-
-        # new step -> read once
         cache = _init_fixed_joint_ft_cache(
             env=env,
             asset_name=asset_name,
@@ -254,19 +170,63 @@ def get_6axis_ft_fixed_joint(
         robot = cache["robot"]
         child_link_index = cache["child_link_index"]
 
-        raw_wrench = _read_raw_link_incoming_force(
-            env=env,
-            robot=robot,
-            child_link_index=child_link_index,
-        )
+        physx_view = getattr(robot, "root_physx_view", None)
+        if physx_view is None:
+            raise RuntimeError(
+                "[get_6axis_ft_fixed_joint] robot.root_physx_view is missing"
+            )
 
-        env._ft6_step_cache[cache_key] = {
-            "step": current_step,
-            "wrench": raw_wrench.clone(),
-        }
+        forces = None
 
-        local_debug.print_ft_sensor_debug(current_step, raw_wrench[0])
-        return raw_wrench
+        # 1) preferred path
+        if hasattr(physx_view, "get_link_incoming_joint_force"):
+            forces = physx_view.get_link_incoming_joint_force()
+
+        # 2) robot wrapper fallback
+        elif hasattr(robot, "get_measured_joint_forces"):
+            forces = robot.get_measured_joint_forces()
+
+        # 3) physx view fallback
+        elif hasattr(physx_view, "get_measured_joint_forces"):
+            forces = physx_view.get_measured_joint_forces()
+
+        else:
+            raise RuntimeError(
+                "[get_6axis_ft_fixed_joint] No available FT API. "
+                "Checked: root_physx_view.get_link_incoming_joint_force(), "
+                "robot.get_measured_joint_forces(), "
+                "root_physx_view.get_measured_joint_for_view.get_measured_joint_forces()"
+            )
+
+        if forces is None:
+            return torch.zeros((env.num_envs, 6), device=env.device, dtype=torch.float32)
+
+        if not isinstance(forces, torch.Tensor):
+            forces = torch.tensor(forces, device=env.device, dtype=torch.float32)
+        else:
+            forces = forces.to(device=env.device, dtype=torch.float32)
+
+        # expected:
+        #   (num_envs, num_links, 6)
+        #   (num_envs, num_joints, 6)
+        #   (num_links, 6)
+        if forces.ndim == 2:
+            wrench = forces[child_link_index, :].unsqueeze(0)
+        elif forces.ndim == 3:
+            wrench = forces[:, child_link_index, :]
+        else:
+            raise RuntimeError(
+                f"[get_6axis_ft_fixed_joint] Unexpected force tensor shape: {tuple(forces.shape)}"
+            )
+
+        if wrench.shape[-1] != 6:
+            raise RuntimeError(
+                f"[get_6axis_ft_fixed_joint] Expected last dim=6, got {tuple(wrench.shape)}"
+            )
+
+        local_debug.print_ft_sensor_debug(int(env.common_step_counter), wrench[0])
+
+        return wrench
 
     except Exception as e:
         local_debug.print_fixed_joint_ft_failed(e)
