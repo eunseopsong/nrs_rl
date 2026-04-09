@@ -277,14 +277,14 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
     events: EventCfg = EventCfg()
 
     def __post_init__(self):
-        self.decimation = 2
+        self.decimation = 1
         self.sim.render_interval = self.decimation
 
         # termination is controlled by trajectory_finished()
         self.episode_length_s = 9999.0
 
         self.viewer.eye = (3.5, 3.5, 3.5)
-        self.sim.dt = 1.0 / 60.0
+        self.sim.dt = 1.0 / 125.0
 
         self.sim.physx.gpu_max_rigid_patch_count = 1024 * 1024 * 16
         self.sim.physx.gpu_max_rigid_contact_count = 1024 * 1024 * 16
