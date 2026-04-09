@@ -80,13 +80,12 @@ class ActionsCfg:
         fixed_joint_name="tool0_to_spindle",
         joint_prim_relpath="joints",
         action_dim=2,
-
-        # C++ Admittance1D direct params
         adm_dt=0.008,
-        mass=5.0,
-        damping=500.0,
-        stiffness=0.0,
+        mass=2.0,
+        damping=80.0,
+        free_stiffness=3000.0,
     )
+
 
 @configclass
 class ObservationCfg:

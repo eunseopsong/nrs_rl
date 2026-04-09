@@ -34,7 +34,7 @@ JOINT_NAMES = [
     "wrist_3_joint",
 ]
 
-TCP_LENGTH_MM = 108.0
+TCP_LENGTH_MM = 111.0
 
 EE2TCP = [
     [-1.0,  0.0,  0.0,   0.0],

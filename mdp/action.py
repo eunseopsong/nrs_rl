@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 import importlib
+import math
 import torch
 
 from isaaclab.managers import ActionTerm, ActionTermCfg
@@ -82,32 +83,23 @@ def _build_target_htm_torch(pos_mm: torch.Tensor, spatial: torch.Tensor) -> torc
 
 
 class AdmittanceControlAction(ActionTerm):
-    """
-    Minimal single-point controller using C++ Admittance1D directly.
-
-    cfg에 남기는 control parameter:
-      - adm_dt
-      - mass
-      - damping
-      - stiffness
-
-    나머지 상수(contact threshold, approach step 등)는
-    C++ 함수 파라미터가 아니므로 action 내부 상수로 고정.
-    """
-
     cfg: "AdmittanceControlActionCfg"
 
-    # -----------------------------
-    # Internal fixed constants
-    # -----------------------------
     TARGET_FZ_N = 10.0
+
     CONTACT_FORCE_THRESHOLD_N = 8.0
     CONTACT_DEBOUNCE_STEPS = 5
-    APPROACH_STEP_MM = 0.05
     FORCE_LPF_ALPHA = 0.8
+    APPROACH_STEP_MM = 0.05
+
+    # 새로 추가
+    FORCE_DROPOUT_THRESHOLD_N = 2.0
+    FORCE_DROPOUT_STEPS = 5
+    TANGENTIAL_RATIO_LIMIT = 0.8
+    REAPPROACH_OFFSET_MM = 0.5
 
     Z_DOWN_LIMIT_MM = 150.0
-    Z_UP_LIMIT_MM = 5.0
+    Z_UP_LIMIT_MM = 10.0
 
     ENABLE_DEBUG_PRINT = True
     DEBUG_PRINT_INTERVAL = 10
@@ -129,25 +121,24 @@ class AdmittanceControlAction(ActionTerm):
             ee2tcp=y2_cfg.EE2TCP,
         )
 
-        # C++ Admittance1D per env
         self._adm_1d = [y2_pb.Admittance1D(float(cfg.adm_dt)) for _ in range(self._num_envs)]
-        for adm in self._adm_1d:
-            adm.set_mdk(float(cfg.mass), float(cfg.damping), float(cfg.stiffness))
-
         self._q_des = self._robot.data.joint_pos[:, :6].clone()
 
         self._reset_xyz_mm = torch.zeros((self._num_envs, 3), device=self._device, dtype=torch.float32)
         self._xy_anchor_mm = torch.zeros((self._num_envs, 2), device=self._device, dtype=torch.float32)
         self._ori_anchor_wxyz = torch.zeros((self._num_envs, 3), device=self._device, dtype=torch.float32)
 
+        self._z_center_mm = torch.zeros((self._num_envs,), device=self._device, dtype=torch.float32)
         self._xd_ref_mm = torch.zeros((self._num_envs,), device=self._device, dtype=torch.float32)
         self._xc_cmd_mm = torch.zeros((self._num_envs,), device=self._device, dtype=torch.float32)
-        self._z_center_mm = torch.zeros((self._num_envs,), device=self._device, dtype=torch.float32)
+        self._z_contact_mm = torch.zeros((self._num_envs,), device=self._device, dtype=torch.float32)
 
         self._contact_latched = torch.zeros((self._num_envs,), device=self._device, dtype=torch.bool)
         self._contact_counter = torch.zeros((self._num_envs,), device=self._device, dtype=torch.long)
         self._fz_abs_lpf = torch.zeros((self._num_envs,), device=self._device, dtype=torch.float32)
+        self._force_dropout_counter = torch.zeros((self._num_envs,), device=self._device, dtype=torch.long)
 
+        self._using_contact_mode = torch.zeros((self._num_envs,), device=self._device, dtype=torch.bool)
         self.path_done = torch.zeros((self._num_envs,), device=self._device, dtype=torch.bool)
 
     @property
@@ -161,6 +152,31 @@ class AdmittanceControlAction(ActionTerm):
     @property
     def processed_actions(self) -> torch.Tensor:
         return self._processed_actions
+
+    def _set_free_mode(self, env_id: int, xd: float):
+        self._adm_1d[env_id].set_mdk(
+            float(self.cfg.mass),
+            float(self.cfg.damping),
+            float(self.cfg.free_stiffness),
+        )
+        self._adm_1d[env_id].reset(float(xd))
+        self._using_contact_mode[env_id] = False
+
+    def _set_contact_mode(self, env_id: int, xd: float):
+        self._adm_1d[env_id].set_mdk(
+            float(self.cfg.mass),
+            float(self.cfg.damping),
+            0.0,
+        )
+        self._adm_1d[env_id].reset(float(xd))
+        self._using_contact_mode[env_id] = True
+
+    def _drop_to_approach_mode(self, env_id: int, current_z: float):
+        self._contact_latched[env_id] = False
+        self._contact_counter[env_id] = 0
+        self._force_dropout_counter[env_id] = 0
+        self._xd_ref_mm[env_id] = current_z - float(self.REAPPROACH_OFFSET_MM)
+        self._set_free_mode(env_id, float(self._xd_ref_mm[env_id].item()))
 
     def reset(self, env_ids=None) -> dict[str, torch.Tensor]:
         if env_ids is None:
@@ -181,21 +197,21 @@ class AdmittanceControlAction(ActionTerm):
         self._z_center_mm[env_ids] = current_xyz_mm[env_ids, 2]
         self._xd_ref_mm[env_ids] = current_xyz_mm[env_ids, 2]
         self._xc_cmd_mm[env_ids] = current_xyz_mm[env_ids, 2]
+        self._z_contact_mm[env_ids] = current_xyz_mm[env_ids, 2]
 
         self._contact_latched[env_ids] = False
         self._contact_counter[env_ids] = 0
         self._fz_abs_lpf[env_ids] = 0.0
+        self._force_dropout_counter[env_ids] = 0
+        self._using_contact_mode[env_ids] = False
         self.path_done[env_ids] = False
 
-        env_ids_cpu = env_ids.detach().cpu().tolist()
-        for i in env_ids_cpu:
-            self._adm_1d[i].set_mdk(float(self.cfg.mass), float(self.cfg.damping), float(self.cfg.stiffness))
-            self._adm_1d[i].reset(float(self._xd_ref_mm[i].item()))
+        for i in env_ids.detach().cpu().tolist():
+            self._set_free_mode(i, float(self._xd_ref_mm[i].item()))
 
         return {}
 
     def process_actions(self, actions: torch.Tensor):
-        # RL action is intentionally unused
         self._raw_actions[:] = actions.to(self._device)
         self._processed_actions[:] = self._raw_actions
 
@@ -238,10 +254,12 @@ class AdmittanceControlAction(ActionTerm):
         cmd_pose[:, 3:6] = self._ori_anchor_wxyz
 
         for i in range(self._num_envs):
+            fx = float(current_force[i, 0].item())
+            fy = float(current_force[i, 1].item())
             fext = float(raw_fz[i].item())
             fext_abs_f = float(self._fz_abs_lpf[i].item())
 
-            # contact detection
+            # approach mode
             if not bool(self._contact_latched[i].item()):
                 if fext_abs_f >= float(self.CONTACT_FORCE_THRESHOLD_N):
                     self._contact_counter[i] += 1
@@ -250,11 +268,28 @@ class AdmittanceControlAction(ActionTerm):
 
                 if int(self._contact_counter[i].item()) >= int(self.CONTACT_DEBOUNCE_STEPS):
                     self._contact_latched[i] = True
-                    # contact 순간의 현재 z를 reference로 다시 잡음
+                    self._z_contact_mm[i] = current_xyz_mm[i, 2]
                     self._xd_ref_mm[i] = current_xyz_mm[i, 2]
-                    self._adm_1d[i].reset(float(self._xd_ref_mm[i].item()))
+                    self._force_dropout_counter[i] = 0
+                    self._set_contact_mode(i, float(self._xd_ref_mm[i].item()))
                 else:
                     self._xd_ref_mm[i] = self._xd_ref_mm[i] - float(self.APPROACH_STEP_MM)
+
+            # force mode dropout logic
+            else:
+                tangential = math.sqrt(fx * fx + fy * fy)
+                normal = abs(float(fext))
+
+                dropout_by_low_force = normal < float(self.FORCE_DROPOUT_THRESHOLD_N)
+                dropout_by_slip = tangential > float(self.TANGENTIAL_RATIO_LIMIT) * max(normal, 1e-6)
+
+                if dropout_by_low_force or dropout_by_slip:
+                    self._force_dropout_counter[i] += 1
+                else:
+                    self._force_dropout_counter[i] = 0
+
+                if int(self._force_dropout_counter[i].item()) >= int(self.FORCE_DROPOUT_STEPS):
+                    self._drop_to_approach_mode(i, float(current_xyz_mm[i, 2].item()))
 
             fd = float(self.TARGET_FZ_N) if bool(self._contact_latched[i].item()) else 0.0
 
@@ -272,7 +307,6 @@ class AdmittanceControlAction(ActionTerm):
             self._xc_cmd_mm[i] = float(xc)
 
         cmd_pose[:, 2] = self._xc_cmd_mm
-
         self._solve_ik_batch(cmd_pose)
         self.path_done[:] = False
 
@@ -282,10 +316,7 @@ class AdmittanceControlAction(ActionTerm):
                 env_id = int(self.DEBUG_ENV_ID)
                 env_id = max(0, min(env_id, self._num_envs - 1))
 
-                z_min = float(self._z_center_mm[env_id].item()) - float(self.Z_DOWN_LIMIT_MM)
-                z_max = float(self._z_center_mm[env_id].item()) + float(self.Z_UP_LIMIT_MM)
                 phase = "force" if bool(self._contact_latched[env_id].item()) else "approach"
-
                 pos_err_norm = torch.norm(cmd_pose[env_id, 0:3] - current_xyz_mm[env_id]).item()
                 rot_err_norm = torch.norm(cmd_pose[env_id, 3:6] - current_wxyz[env_id]).item()
 
@@ -293,13 +324,11 @@ class AdmittanceControlAction(ActionTerm):
                     f"[ForceCtrl Internal] step={step} | env={env_id} | phase={phase} | "
                     f"latched={bool(self._contact_latched[env_id].item())} | "
                     f"counter={int(self._contact_counter[env_id].item())} | "
+                    f"drop_counter={int(self._force_dropout_counter[env_id].item())} | "
                     f"xd_ref={float(self._xd_ref_mm[env_id].item()):.6f} | "
                     f"xc_cmd={float(self._xc_cmd_mm[env_id].item()):.6f} | "
-                    f"z_center={float(self._z_center_mm[env_id].item()):.6f} | "
-                    f"z_min={z_min:.6f} | z_max={z_max:.6f} | "
                     f"raw_fz={float(raw_fz[env_id].item()):.6f} | "
-                    f"filt_abs_fz={float(self._fz_abs_lpf[env_id].item()):.6f} | "
-                    f"target_fz={float(self.TARGET_FZ_N):.6f}"
+                    f"filt_abs_fz={float(self._fz_abs_lpf[env_id].item()):.6f}"
                 )
 
                 local_debug.print_action_debug_status(
@@ -329,15 +358,13 @@ class AdmittanceControlAction(ActionTerm):
 class AdmittanceControlActionCfg(ActionTermCfg):
     class_type: type[ActionTerm] = AdmittanceControlAction
 
-    # Isaac Lab 연결용 필수 항목
     asset_name: str = "robot"
     body_name: str = "spindle_link"
     fixed_joint_name: str = "tool0_to_spindle"
     joint_prim_relpath: str = "joints"
     action_dim: int = 2
 
-    # C++ Admittance1D와 직접 대응되는 cfg만 유지
     adm_dt: float = 0.008
     mass: float = 2.0
     damping: float = 80.0
-    stiffness: float = 0.0
+    free_stiffness: float = 3000.0
