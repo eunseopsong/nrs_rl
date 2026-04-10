@@ -37,6 +37,9 @@ local_ft_sensor = importlib.import_module(
 local_rewards = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.mdp.rewards"
 )
+local_vis = importlib.import_module(
+    "nrs_rl.tasks.manager_based.nrs_rl.utils.visualization"
+)
 
 from nrs_rl.tasks.manager_based.nrs_rl.assets.assets.robots.ur10e_w_spindle import (
     UR10E_W_SPINDLE_HIGH_PD_CFG,
@@ -105,6 +108,7 @@ class ActionsCfg:
         debug_env_id=0,
     )
 
+
 @configclass
 class ObservationCfg:
     @configclass
@@ -165,6 +169,17 @@ class ObservationCfg:
             },
         )
 
+        # visualization step hook
+        visualization_step = ObsTerm(
+            func=local_vis.rl_step_hook,
+            params={
+                "action_term_name": "arm_action",
+                "asset_name": "robot",
+                "fixed_joint_name": "tool0_to_spindle",
+                "joint_prim_relpath": "joints",
+            },
+        )
+
         def __post_init__(self):
             self.enable_corruption = False
             self.concatenate_terms = True
@@ -189,6 +204,13 @@ class EventCfg:
             "position_dataset_key": "position",
             "force_dataset_key": "force",
         },
+    )
+
+    # visualization episode-end hook
+    finalize_visualization_episode = EventTerm(
+        func=local_vis.on_episode_reset,
+        mode="reset",
+        params={},
     )
 
 
@@ -258,19 +280,14 @@ class TerminationsCfg:
         func=local_terms.trajectory_finished,
     )
 
-# ============================================================
-# [26.04.10 추가] Visualization Configuration
-# ============================================================
+
 @configclass
 class VisualizationCfg:
-    """[26.04.10 추가] visualization.py 모듈을 위한 설정 그룹"""
     enable_visualizer: bool = True
-    save_interval_episodes: int = 1  # 매 에피소드마다 저장
-    # 가공량 계산을 위한 물리 상수
-    force_threshold: float = 0.5    # N
-    speed_threshold: float = 0.1    # mm/s
-    # 로그 파일 경로 설정 등은 visualization.py 내부 설정을 따름
-# ============================================================
+    save_interval_episodes: int = 1
+    force_threshold: float = 0.5
+    speed_threshold: float = 0.1
+
 
 @configclass
 class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
@@ -280,8 +297,7 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
     events: EventCfg = EventCfg()
-    
-    # [26.04.10 추가] Visualization 설정 연결
+
     visualization: VisualizationCfg = VisualizationCfg()
 
     def __post_init__(self):

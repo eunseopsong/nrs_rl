@@ -3,14 +3,8 @@
 
 from __future__ import annotations
 
-import os
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-
-# [26.04.10 추가] 에피소드 번호를 추적하기 위한 전역 변수
-_current_episode_count = 1
 
 _last_ft_debug = {
     "step": None,
@@ -136,8 +130,6 @@ def print_action_debug_status(
     penalty_score: float | None = None,
     dt: float = 0.02,
 ):
-    global _current_episode_count # [26.04.10 추가] 전역 변수 참조
-
     raw_target_xyz = _as_float_list(raw_target_xyz)
     raw_target_force = _as_float_list(raw_target_force)
     target_xyz = _as_float_list(target_xyz)
@@ -163,10 +155,9 @@ def print_action_debug_status(
 
     print("\n" + "=" * 100)
 
-    # 1) Action Debug
-    # [26.04.10 수정] 에피소드 번호를 출력의 가장 앞에 명시
     print(
-        f"[Episode {_current_episode_count}] env={env_id} | step={global_step} | "
+        f"[Action Debug ] env={env_id} | "
+        f"step={global_step} | "
         f"h5_index={path_index}/{max(traj_length - 1, 0)} | "
         f"waypoint_steps={waypoint_steps} | "
         f"done={path_done} | "
@@ -174,21 +165,18 @@ def print_action_debug_status(
         f"rot_err_norm={rot_err_norm:.6f}"
     )
 
-    # 2) Current Pose
     print(
         "[Current Pose ] "
         f"x={current_xyz[0]: .6f}, y={current_xyz[1]: .6f}, z={current_xyz[2]: .6f}, "
         f"wx={current_wxyz[0]: .6f}, wy={current_wxyz[1]: .6f}, wz={current_wxyz[2]: .6f}"
     )
 
-    # 3) Target Pose
     print(
         "[Target Pose  ] "
         f"x={target_xyz[0]: .6f}, y={target_xyz[1]: .6f}, z={target_xyz[2]: .6f}, "
         f"wx={target_wxyz[0]: .6f}, wy={target_wxyz[1]: .6f}, wz={target_wxyz[2]: .6f}"
     )
 
-    # 4) Current Force
     if _last_ft_debug["wrench"] is not None:
         fx, fy, fz, tx, ty, tz = _last_ft_debug["wrench"]
         ft_step = _last_ft_debug["step"]
@@ -201,13 +189,11 @@ def print_action_debug_status(
     else:
         print("[Current Force] No cached 6-axis FT data")
 
-    # 5) Target Force
     print(
         "[Target Force ] "
         f"Fx={target_force[0]: .6f}, Fy={target_force[1]: .6f}, Fz={target_force[2]: .6f}"
     )
 
-    # 6) Polishing
     if _last_polishing_debug["metrics"] is not None:
         pm_step = _last_polishing_debug["step"]
         pm = _last_polishing_debug["metrics"]
@@ -236,7 +222,6 @@ def print_action_debug_status(
     else:
         print("[Polishing    ] No cached polishing metrics")
 
-    # 7) RL Score
     if reward_total is None or reward_score is None or penalty_score is None:
         print("[RL Score     ] N/A (actual reward not connected)")
     else:
@@ -246,130 +231,4 @@ def print_action_debug_status(
             f"PENALTY(-)= {penalty_score: .6f}"
         )
 
-    # [26.04.10 추가] 에피소드가 종료(경로 완료)되면 카운트 증가
-    if path_done:
-        _current_episode_count += 1
-
     print("=" * 100)
-
-
-class PolishingLoggerAndVisualizer:
-    def __init__(
-        self,
-        target_force: float = 10.0,
-        grid_size: int = 50,
-        save_dir: str = "./logs/polishing_results",
-        dt: float = 0.02,
-    ):
-        self.target_force = target_force
-        self.grid_size = grid_size
-        self.save_dir = save_dir
-        self.dt = dt
-        os.makedirs(self.save_dir, exist_ok=True)
-
-        self.current_forces = []
-        self.current_velocities = []
-        self.current_rewards = []
-        self.surface_map = np.zeros((self.grid_size, self.grid_size))
-        self.current_reward_sum = 0.0
-        self.prev_xyz = None
-
-        self.best_reward = -float("inf")
-        self.best_forces = []
-        self.best_velocities = []
-        self.best_rewards = []
-        self.best_surface_map = None
-
-    def step_log(
-        self,
-        current_xyz: list,
-        x_idx: int,
-        y_idx: int,
-        force: float,
-        reward: float | None = None,
-    ):
-        if self.prev_xyz is None:
-            velocity = 0.0
-        else:
-            dist = np.linalg.norm(np.array(current_xyz) - np.array(self.prev_xyz))
-            velocity = dist / self.dt
-
-        self.prev_xyz = current_xyz
-
-        self.current_forces.append(float(force))
-        self.current_velocities.append(float(velocity))
-
-        if reward is None:
-            self.current_rewards.append(np.nan)
-        else:
-            reward = float(reward)
-            self.current_rewards.append(reward)
-            if np.isfinite(reward):
-                self.current_reward_sum += reward
-
-        K = 0.001
-        removal_amount = K * max(0.0, float(force)) * float(velocity)
-
-        x_idx = np.clip(int(x_idx), 0, self.grid_size - 1)
-        y_idx = np.clip(int(y_idx), 0, self.grid_size - 1)
-
-        self.surface_map[x_idx, y_idx] -= removal_amount
-
-    def end_episode(self):
-        finite_rewards = [r for r in self.current_rewards if np.isfinite(r)]
-        episode_reward_sum = float(np.sum(finite_rewards)) if len(finite_rewards) > 0 else None
-
-        if episode_reward_sum is not None and episode_reward_sum > self.best_reward:
-            self.best_reward = episode_reward_sum
-            self.best_forces = list(self.current_forces)
-            self.best_velocities = list(self.current_velocities)
-            self.best_rewards = list(self.current_rewards)
-            self.best_surface_map = np.copy(self.surface_map)
-            print(f"[Polishing Logger] ⭐ New Best Episode Recorded! Reward Sum: {self.best_reward:.4f}")
-
-        self.current_forces = []
-        self.current_velocities = []
-        self.current_rewards = []
-        self.surface_map = np.zeros((self.grid_size, self.grid_size))
-        self.current_reward_sum = 0.0
-        self.prev_xyz = None
-
-    def visualize_best_case(self):
-        if self.best_surface_map is None:
-            print("[Polishing Logger] 저장된 베스트 에피소드가 없어 시각화를 건너뜁니다.")
-            return
-
-        fig = plt.figure(figsize=(18, 5))
-
-        ax1 = fig.add_subplot(1, 3, 1, projection="3d")
-        X, Y = np.meshgrid(range(self.grid_size), range(self.grid_size))
-        surf = ax1.plot_surface(X, Y, self.best_surface_map, cmap="viridis", edgecolor="none")
-        ax1.set_title("Best Uniform Surface Yield (MRR)")
-        ax1.set_xlabel("Surface X")
-        ax1.set_ylabel("Surface Y")
-        ax1.set_zlabel("Depth")
-        fig.colorbar(surf, ax=ax1, shrink=0.5, aspect=5)
-
-        ax2 = fig.add_subplot(1, 3, 2)
-        ax2.plot(self.best_forces, color="red", label="Actual Force (Fz)")
-        ax2.axhline(self.target_force, color="blue", linestyle="--", label=f"Target Force ({self.target_force}N)")
-        ax2.set_title("Force Tracking Profile")
-        ax2.set_xlabel("Time Step")
-        ax2.set_ylabel("Force (N)")
-        ax2.legend()
-        ax2.grid(True)
-
-        ax3 = fig.add_subplot(1, 3, 3)
-        ax3.plot(self.best_rewards, color="green")
-        ax3.set_title("Reward Step History (Best Episode)")
-        ax3.set_xlabel("Time Step")
-        ax3.set_ylabel("Reward")
-        ax3.grid(True)
-
-        plt.tight_layout()
-        save_path = os.path.join(self.save_dir, "best_polishing_result.png")
-        plt.savefig(save_path)
-        print(f"\n[Polishing Logger] ✅ Visualization successfully saved to: {save_path}\n")
-
-
-polishing_logger = PolishingLoggerAndVisualizer(target_force=10.0, dt=0.02)
