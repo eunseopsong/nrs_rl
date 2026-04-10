@@ -6,6 +6,9 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+# ============================================================
+# Global caches
+# ============================================================
 _last_ft_debug = {
     "step": None,
     "wrench": None,  # [Fx, Fy, Fz, Tx, Ty, Tz]
@@ -25,6 +28,9 @@ _last_polishing_debug = {
 }
 
 
+# ============================================================
+# Utils
+# ============================================================
 def _as_float_list(x):
     if isinstance(x, torch.Tensor):
         return x.detach().cpu().reshape(-1).tolist()
@@ -33,6 +39,9 @@ def _as_float_list(x):
     return [float(x)]
 
 
+# ============================================================
+# Simple info prints
+# ============================================================
 def print_hdf5_positions_loaded(shape, file_path: str):
     print(f"[INFO] Loaded HDF5 positions of shape {shape} from {file_path}")
 
@@ -87,7 +96,14 @@ def print_camera_normals(step: int, normals_mean_env0):
     print(f"[Camera DEBUG] Step {step}: Mean surface normal = [{nx:.6f} {ny:.6f} {nz:.6f}]")
 
 
+# ============================================================
+# Cache-only debug recorders
+# ============================================================
 def print_ft_sensor_debug(step: int, wrench_env0):
+    """
+    콘솔 출력하지 않고 캐시에만 저장.
+    최종 통합 출력은 print_action_debug_status()에서만 수행.
+    """
     global _last_ft_debug
 
     vals = _as_float_list(wrench_env0)
@@ -99,6 +115,10 @@ def print_ft_sensor_debug(step: int, wrench_env0):
 
 
 def print_polishing_metrics_debug(step: int, metrics_env0):
+    """
+    콘솔 출력하지 않고 캐시에만 저장.
+    최종 통합 출력은 print_action_debug_status()에서만 수행.
+    """
     global _last_polishing_debug
 
     vals = _as_float_list(metrics_env0)
@@ -109,6 +129,9 @@ def print_polishing_metrics_debug(step: int, metrics_env0):
     _last_polishing_debug["metrics"] = vals[:8]
 
 
+# ============================================================
+# Unified debug print
+# ============================================================
 def print_action_debug_status(
     env_id: int,
     global_step: int,
@@ -125,10 +148,10 @@ def print_action_debug_status(
     current_wxyz,
     pos_err_norm: float,
     rot_err_norm: float,
+    episode_count: int | None = None,
     reward_total: float | None = None,
     reward_score: float | None = None,
     penalty_score: float | None = None,
-    dt: float = 0.02,
 ):
     raw_target_xyz = _as_float_list(raw_target_xyz)
     raw_target_force = _as_float_list(raw_target_force)
@@ -155,15 +178,26 @@ def print_action_debug_status(
 
     print("\n" + "=" * 100)
 
-    print(
-        f"[Action Debug ] env={env_id} | "
-        f"step={global_step} | "
-        f"h5_index={path_index}/{max(traj_length - 1, 0)} | "
-        f"waypoint_steps={waypoint_steps} | "
-        f"done={path_done} | "
-        f"pos_err_norm={pos_err_norm:.6f} | "
-        f"rot_err_norm={rot_err_norm:.6f}"
-    )
+    if episode_count is None:
+        print(
+            f"[Action Debug ] env={env_id} | "
+            f"step={global_step} | "
+            f"h5_index={path_index}/{max(traj_length - 1, 0)} | "
+            f"waypoint_steps={waypoint_steps} | "
+            f"done={path_done} | "
+            f"pos_err_norm={pos_err_norm:.6f} | "
+            f"rot_err_norm={rot_err_norm:.6f}"
+        )
+    else:
+        print(
+            f"[Episode {episode_count}] env={env_id} | "
+            f"step={global_step} | "
+            f"h5_index={path_index}/{max(traj_length - 1, 0)} | "
+            f"waypoint_steps={waypoint_steps} | "
+            f"done={path_done} | "
+            f"pos_err_norm={pos_err_norm:.6f} | "
+            f"rot_err_norm={rot_err_norm:.6f}"
+        )
 
     print(
         "[Current Pose ] "
