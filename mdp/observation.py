@@ -46,6 +46,13 @@ _hdf5_traj_len: int = 0
 # ------------------------------------------------------
 _y2_kin_solver = None
 
+# ------------------------------------------------------
+# Orientation convention calibration
+# Home pose should be shown as [0, 0, 1.5708]
+# ------------------------------------------------------
+_HOME_Q = [0.5585, -2.0949, -1.5711, -1.0472, 1.5708, 0.5585]
+_orientation_offset_rotm: torch.Tensor | None = None
+
 
 def _get_y2_kin_solver():
     global _y2_kin_solver
@@ -105,12 +112,54 @@ def _spatial_angle_to_quat_torch(spatial: torch.Tensor) -> torch.Tensor:
     xyz = axis * torch.sin(half)
 
     quat = torch.cat([qw, xyz], dim=-1)
-    # for zero-angle, return identity
     zero_mask = (angle.squeeze(-1) <= eps)
     if torch.any(zero_mask):
         quat[zero_mask, 0] = 1.0
         quat[zero_mask, 1:] = 0.0
     return quat
+
+
+def _spatial_angle_to_rotmat_torch(spatial: torch.Tensor) -> torch.Tensor:
+    """
+    spatial: (N, 3) = [wx wy wz]
+    return : (N, 3, 3)
+    """
+    device = spatial.device
+    dtype = spatial.dtype
+    n = spatial.shape[0]
+
+    angle = torch.norm(spatial, dim=-1, keepdim=True)
+    eps = 1e-10
+
+    axis = torch.where(angle > eps, spatial / angle, torch.zeros_like(spatial))
+    ax = axis[:, 0]
+    ay = axis[:, 1]
+    az = axis[:, 2]
+    th = angle[:, 0]
+
+    c = torch.cos(th)
+    s = torch.sin(th)
+    one_c = 1.0 - c
+
+    R = torch.zeros((n, 3, 3), device=device, dtype=dtype)
+
+    R[:, 0, 0] = c + ax * ax * one_c
+    R[:, 0, 1] = ax * ay * one_c - az * s
+    R[:, 0, 2] = ax * az * one_c + ay * s
+
+    R[:, 1, 0] = ay * ax * one_c + az * s
+    R[:, 1, 1] = c + ay * ay * one_c
+    R[:, 1, 2] = ay * az * one_c - ax * s
+
+    R[:, 2, 0] = az * ax * one_c - ay * s
+    R[:, 2, 1] = az * ay * one_c + ax * s
+    R[:, 2, 2] = c + az * az * one_c
+
+    zero_mask = angle[:, 0] <= eps
+    if torch.any(zero_mask):
+        R[zero_mask] = torch.eye(3, device=device, dtype=dtype)
+
+    return R
 
 
 def _rotmat_to_spatial_angle_torch(R: torch.Tensor) -> torch.Tensor:
@@ -186,6 +235,30 @@ def _rotmat_to_spatial_angle_torch(R: torch.Tensor) -> torch.Tensor:
         out[normal_mask, 2] = axis_z * ang
 
     return out
+
+
+def _get_orientation_offset_rotm(device: torch.device) -> torch.Tensor:
+    """
+    Build fixed orientation offset so that the home pose becomes
+    [wx wy wz] = [0, 0, 1.5708]
+    """
+    global _orientation_offset_rotm
+
+    if _orientation_offset_rotm is not None:
+        return _orientation_offset_rotm.to(device=device)
+
+    kin = _get_y2_kin_solver()
+    T_home = kin.forward_kinematics(_HOME_Q)
+    T_home = torch.tensor(T_home, dtype=torch.float32, device=device)
+
+    R_home_fk = T_home[:3, :3]
+
+    desired_home_spatial = torch.tensor([[0.0, 0.0, 1.5708]], dtype=torch.float32, device=device)
+    R_home_desired = _spatial_angle_to_rotmat_torch(desired_home_spatial).squeeze(0)
+
+    # R_offset * R_home_fk = R_home_desired
+    _orientation_offset_rotm = R_home_desired @ R_home_fk.T
+    return _orientation_offset_rotm
 
 
 def _get_target_pose_for_polishing(env: "ManagerBasedRLEnv") -> tuple[torch.Tensor, torch.Tensor]:
@@ -264,6 +337,8 @@ def get_ee_pose(env: "ManagerBasedRLEnv", asset_name: str = "robot") -> torch.Te
     Returns end-effector pose (x, y, z, wx, wy, wz)
 
     - Reads q1~q6 and runs FK via y2_control_pybind.UR10eKinematics
+    - Applies a fixed rotation offset so that the home pose becomes:
+        [wx wy wz] = [0, 0, 1.5708]
     - Output: (num_envs, 6) torch tensor on env device
     """
     robot = env.scene[asset_name]
@@ -273,6 +348,7 @@ def get_ee_pose(env: "ManagerBasedRLEnv", asset_name: str = "robot") -> torch.Te
     num_envs = q.shape[0]
 
     kin = _get_y2_kin_solver()
+    R_offset = _get_orientation_offset_rotm(device=device)
 
     ee_pose_list = []
     q_cpu = q.detach().cpu().to(torch.float64)
@@ -281,11 +357,12 @@ def get_ee_pose(env: "ManagerBasedRLEnv", asset_name: str = "robot") -> torch.Te
         q_i = q_cpu[i].tolist()
 
         T = kin.forward_kinematics(q_i)
-        T_t = torch.tensor(T, dtype=torch.float64)
+        T_t = torch.tensor(T, dtype=torch.float32, device=device)
 
         pos = T_t[:3, 3]
-        R = T_t[:3, :3]
-        spatial = _rotmat_to_spatial_angle_torch(R.unsqueeze(0)).squeeze(0)
+        R_fk = T_t[:3, :3]
+        R_corr = R_offset @ R_fk
+        spatial = _rotmat_to_spatial_angle_torch(R_corr.unsqueeze(0)).squeeze(0)
 
         ee_pose_list.append(
             [
@@ -399,8 +476,8 @@ def get_hdf5_target_positions(env: "ManagerBasedRLEnv", horizon: int = 5) -> tor
     if _hdf5_position is None:
         return torch.zeros((env.num_envs, horizon * 6), device=env.device, dtype=torch.float32)
 
-    idx = _get_traj_indices(env, horizon=horizon)  # (N, H)
-    rows = _hdf5_position[idx]                      # (N, H, 6)
+    idx = _get_traj_indices(env, horizon=horizon)
+    rows = _hdf5_position[idx]
     return rows.reshape(env.num_envs, horizon * 6)
 
 
@@ -414,8 +491,8 @@ def get_hdf5_target_forces(env: "ManagerBasedRLEnv", horizon: int = 5) -> torch.
     if _hdf5_force is None:
         return torch.zeros((env.num_envs, horizon * 3), device=env.device, dtype=torch.float32)
 
-    idx = _get_traj_indices(env, horizon=horizon)  # (N, H)
-    rows = _hdf5_force[idx]                         # (N, H, 3)
+    idx = _get_traj_indices(env, horizon=horizon)
+    rows = _hdf5_force[idx]
     return rows.reshape(env.num_envs, horizon * 3)
 
 
@@ -435,18 +512,12 @@ def get_hdf5_target_pose_force(env: "ManagerBasedRLEnv") -> torch.Tensor:
     return torch.cat([pos, frc], dim=-1)
 
 
-# ------------------------------------------------------
-# 로봇 현재 속도 Observation
-# ------------------------------------------------------
 def get_joint_velocities(env: "ManagerBasedRLEnv", asset_name: str = "robot") -> torch.Tensor:
     robot = env.scene[asset_name]
     joint_vel = robot.data.joint_vel[:, :6]
     return joint_vel
 
 
-# ------------------------------------------------------
-# Observation: 속도 기반 동적 타겟 경로
-# ------------------------------------------------------
 def get_velocity_adjusted_target_positions(
     env: "ManagerBasedRLEnv",
     horizon: int = 5,
@@ -460,7 +531,7 @@ def get_velocity_adjusted_target_positions(
     robot = env.scene["robot"]
 
     current_vel = robot.data.joint_vel[:, :6]
-    vel_magnitude = torch.norm(current_vel, dim=-1)  # (N,)
+    vel_magnitude = torch.norm(current_vel, dim=-1)
 
     if _hdf5_traj_len <= 0:
         return torch.zeros((env.num_envs, horizon * 6), device=env.device, dtype=torch.float32)
@@ -482,9 +553,6 @@ def get_velocity_adjusted_target_positions(
     return future_targets
 
 
-# ------------------------------------------------------
-# Camera distance & normals
-# ------------------------------------------------------
 def get_camera_distance(
     env: "ManagerBasedRLEnv",
     sensor_name: str = "camera",
