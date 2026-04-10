@@ -22,8 +22,10 @@ from scipy.signal import savgol_filter  # [26.04.10 추가] 신호 정제(Smooth
 version = "v30_meeting_ref_refined"
 _run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-# [26.04.10 추가] 호환성 체크: logs 경로를 실행 위치 기준으로 고정
-BASE_LOG_DIR = Path(os.getcwd()) / "logs"
+# [26.04.10 경로 재생성] Isaac Sim 실행 환경에 상관없이 nrs_rl/logs 경로를 정확히 타겟팅
+# __file__을 사용하여 현재 스크립트 위치 기준으로 절대 경로 산출
+CURRENT_FILE_PATH = Path(__file__).resolve()
+BASE_LOG_DIR = CURRENT_FILE_PATH.parent / "logs"
 
 # [26.04.10 수정] 메모리 효율을 위해 사전 할당(Pre-allocation) 구조 도입 제안 (선택 사항)
 _rl_time_buffers = {}   # env별 시간 분리
@@ -49,9 +51,9 @@ def smooth_signal(data, window=11):
 def compute_velocity_mm_s(t, xyz):
     """260406 랩미팅: 속도, 가속도, 저크 계산을 위한 물리 로직"""
     # [26.04.10 수정] np.gradient를 사용하여 서준님 코드의 미분 방식과 동기화
-    dt = np.diff(t, prepend=t[0])
-    dt = np.clip(dt, 1e-6, None)
-
+    # t가 정지 상태일 때 (dt=0) 발생하는 RuntimeWarning 방지
+    dt_arr = np.diff(t, prepend=t[0] - 0.01) 
+    
     vxyz = np.zeros_like(xyz)
     if len(xyz) >= 2:
         # [26.04.10 수정] 각 축별 성분 미분으로 정밀도 향상
@@ -61,7 +63,7 @@ def compute_velocity_mm_s(t, xyz):
     axyz = np.gradient(vxyz, axis=0)
     jxyz = np.gradient(axyz, axis=0)
 
-    return vxyz, axyz, jxyz, dt
+    return vxyz, axyz, jxyz, dt_arr
 
 
 def compute_removal(t, state6, force3):
@@ -82,6 +84,7 @@ def compute_removal(t, state6, force3):
     removal_rate = np.zeros_like(fn)
     removal_rate[contact] = fn[contact] * speed[contact]
 
+    # 가공량 누적 (시간 간격 곱)
     dremoval = removal_rate * dt
 
     return dremoval, removal_rate, xyz, wxyz, vxyz, axyz, jxyz
@@ -102,16 +105,20 @@ def record_step(env_ids, state6, force3, sim_time):
 
     t_rel = sim_time - _rl_start_time
 
-    for i, idx in enumerate(env_ids):
-        # [26.04.10 추가] env별 time buffer 분리
+    # [26.04.10 수정] 넘파이 배열로 변환하여 처리 속도 향상
+    env_ids_np = env_ids.cpu().numpy() if hasattr(env_ids, 'cpu') else np.array(env_ids)
+    state6_np = state6.cpu().numpy() if hasattr(state6, 'cpu') else np.array(state6)
+    force3_np = force3.cpu().numpy() if hasattr(force3, 'cpu') else np.array(force3)
+
+    for i, idx in enumerate(env_ids_np):
         if idx not in _rl_time_buffers:
             _rl_time_buffers[idx] = []
             _rl_state_buffers[idx] = []
             _rl_force_buffers[idx] = []
 
         _rl_time_buffers[idx].append(t_rel)
-        _rl_state_buffers[idx].append(state6[i].copy())
-        _rl_force_buffers[idx].append(force3[i].copy())
+        _rl_state_buffers[idx].append(state6_np[i])
+        _rl_force_buffers[idx].append(force3_np[i])
 
 
 # ============================================================
@@ -122,6 +129,7 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, axyz, j
     """
     260406 랩미팅: 서준님 코드 스타일 이식
     """
+    # [26.04.10 경로 재생성] 폴더 생성 재확인
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -129,9 +137,8 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, axyz, j
 
     # 1️⃣ 가공량 히트맵
     plt.figure(figsize=(6, 5))
-    # [26.04.10 수정] hexbin 적용
-    plt.hexbin(xyz[:, 0], xyz[:, 1], C=dremoval, gridsize=30, cmap='jet')
-    plt.colorbar(label="Removal Amount")
+    hb = plt.hexbin(xyz[:, 0], xyz[:, 1], C=dremoval, gridsize=30, cmap='jet')
+    plt.colorbar(hb, label="Removal Amount")
     plt.title("Removal Heatmap (Top View)")
     plt.savefig(out_dir / "01_removal_heatmap.png")
     plt.close()
@@ -150,24 +157,27 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, axyz, j
     # 3️⃣ 속도 / 가속도 / 저크 / 힘
     fig, axs = plt.subplots(4, 1, figsize=(10, 12), sharex=True)
 
-    # [26.04.10 추가] 신호 Smoothing
     v_norm = smooth_signal(np.linalg.norm(vxyz, axis=1))
     a_norm = smooth_signal(np.linalg.norm(axyz, axis=1))
     j_norm = smooth_signal(np.linalg.norm(jxyz, axis=1))
 
     axs[0].plot(t, v_norm, color='g')
+    axs[0].set_ylabel("Vel (mm/s)")
     axs[0].set_title("Velocity Magnitude (Filtered)")
     axs[0].grid(True, alpha=0.3)
 
     axs[1].plot(t, a_norm, color='r')
+    axs[1].set_ylabel("Acc (mm/s^2)")
     axs[1].set_title("Acceleration Magnitude (Filtered)")
     axs[1].grid(True, alpha=0.3)
 
     axs[2].plot(t, j_norm, color='orange')
+    axs[2].set_ylabel("Jerk (mm/s^3)")
     axs[2].set_title("Jerk Magnitude (Filtered)")
     axs[2].grid(True, alpha=0.3)
 
     axs[3].plot(t, force3[:, 2], color='purple')
+    axs[3].set_ylabel("Force (N)")
     axs[3].set_title("Normal Force (Z)")
     axs[3].grid(True, alpha=0.3)
 
@@ -193,55 +203,44 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, axyz, j
 
 def process_episode():
     """
-    260406 랩미팅: 임시방편으로 0번 로봇 데이터 추출 (보상 로직 주석 처리)
+    260406 랩미팅: 리워드가 가장 높은 로봇의 데이터를 추출하여 시각화
     """
     global _rl_time_buffers, _rl_state_buffers, _rl_force_buffers
     global _rl_start_time, _episode_counter, _best_reward
 
     if not _rl_state_buffers:
+        print("[Warning] No data recorded in this episode.")
         return 0.0
 
-    target_env_id = 0 # [26.04.10 임시] 0번 로봇 고정
+    target_env_id = None
+    max_total_removal = -np.inf
     best_data = None
-    
-    # ------------------------------------------------------------
-    # [주석 처리] 보상 기반 최적 로봇 선별 로직 (rewards.py 수정 중)
-    # max_ep_reward = -np.inf
-    # for env_id, states in _rl_state_buffers.items():
-    #     t_arr = np.array(_rl_time_buffers[env_id])
-    #     s_arr = np.array(states)
-    #     f_arr = np.array(_rl_force_buffers[env_id])
-    #     if len(t_arr) < 5: continue
-    #     drem, _, _, _, _, _, _ = compute_removal(t_arr, s_arr, f_arr)
-    #     current_reward = np.sum(drem)
-    #     if current_reward > max_ep_reward:
-    #         max_ep_reward = current_reward
-    #         target_env_id = env_id
-    # ------------------------------------------------------------
 
-    # [26.04.10 추가] 0번 로봇 데이터가 존재하는지 확인 후 처리
-    if target_env_id in _rl_state_buffers:
-        t = np.array(_rl_time_buffers[target_env_id])
-        states_np = np.array(_rl_state_buffers[target_env_id])
-        forces_np = np.array(_rl_force_buffers[target_env_id])
+    # [26.04.10 수정] 모든 로봇 중 가공량(리워드)이 가장 큰 로봇 탐색
+    for env_id in _rl_state_buffers.keys():
+        t_arr = np.array(_rl_time_buffers[env_id])
+        s_arr = np.array(_rl_state_buffers[env_id])
+        f_arr = np.array(_rl_force_buffers[env_id])
 
-        if len(t) >= 5:
-            drem, r_rate, xyz, wxyz, vxyz, axyz, jxyz = compute_removal(
-                t, states_np, forces_np
-            )
-            best_data = (t, states_np, forces_np, drem, r_rate, vxyz, axyz, jxyz)
-            
-            # [주석 처리용] 임시 리워드 계산
-            temp_reward = np.sum(drem)
-        else:
-            temp_reward = 0.0
-    else:
-        temp_reward = 0.0
+        if len(t_arr) < 5:
+            continue
 
-    if best_data:
+        # 가공량 계산 루틴
+        drem, r_rate, xyz, wxyz, vxyz, axyz, jxyz = compute_removal(t_arr, s_arr, f_arr)
+        total_removal = np.sum(drem)
+
+        if total_removal > max_total_removal:
+            max_total_removal = total_removal
+            target_env_id = env_id
+            best_data = (t_arr, s_arr, f_arr, drem, r_rate, vxyz, axyz, jxyz)
+
+    # [26.04.10 추가] 최적 로봇 데이터 저장 (없을 경우 0번 시도)
+    if best_data is not None:
         save_dir = BASE_LOG_DIR / _run_timestamp / f"ep{_episode_counter + 1}"
         save_plots(save_dir, *best_data)
-        print(f"[Log] Episode {_episode_counter+1} saved | Target Env: {target_env_id} (Fixed)")
+        print(f"[Log] Episode {_episode_counter+1} saved | Best Env: {target_env_id} | Total Removal: {max_total_removal:.4f}")
+    else:
+        print(f"[Log] Episode {_episode_counter+1} skipped (Insufficient data)")
 
     # 버퍼 초기화
     _rl_time_buffers.clear()
@@ -250,7 +249,7 @@ def process_episode():
     _rl_start_time = None
     _episode_counter += 1
 
-    return temp_reward
+    return max_total_removal if max_total_removal != -np.inf else 0.0
 
 
 # ============================================================

@@ -1,3 +1,6 @@
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 import os
@@ -6,6 +9,8 @@ import torch
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
+# [26.04.10 추가] 에피소드 번호를 추적하기 위한 전역 변수
+_current_episode_count = 1
 
 _last_ft_debug = {
     "step": None,
@@ -131,6 +136,8 @@ def print_action_debug_status(
     penalty_score: float | None = None,
     dt: float = 0.02,
 ):
+    global _current_episode_count # [26.04.10 추가] 전역 변수 참조
+
     raw_target_xyz = _as_float_list(raw_target_xyz)
     raw_target_force = _as_float_list(raw_target_force)
     target_xyz = _as_float_list(target_xyz)
@@ -157,8 +164,9 @@ def print_action_debug_status(
     print("\n" + "=" * 100)
 
     # 1) Action Debug
+    # [26.04.10 수정] 에피소드 번호를 출력의 가장 앞에 명시
     print(
-        f"[Action Debug] env={env_id} | step={global_step} | "
+        f"[Episode {_current_episode_count}] env={env_id} | step={global_step} | "
         f"h5_index={path_index}/{max(traj_length - 1, 0)} | "
         f"waypoint_steps={waypoint_steps} | "
         f"done={path_done} | "
@@ -237,6 +245,10 @@ def print_action_debug_status(
             f"REWARD(+)= {reward_score: .6f} | "
             f"PENALTY(-)= {penalty_score: .6f}"
         )
+
+    # [26.04.10 추가] 에피소드가 종료(경로 완료)되면 카운트 증가
+    if path_done:
+        _current_episode_count += 1
 
     print("=" * 100)
 
