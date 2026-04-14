@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""
-Observation utilities for UR10e spindle environment.
-
-- Integrated with y2_control_pybind (C++ FK module)
-- HDF5 trajectory loader for position/force
-- Includes EE pose (x, y, z, wx, wy, wz), target position/force, and camera sensors
-
-Important behavior:
-- If action term "arm_action" exists and exposes current_target_index/path_index,
-  observation targets follow the action term index.
-- Therefore, debug/observation target stays synchronized with action.py.
-"""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -29,9 +16,6 @@ local_ft_sensor = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.assets.assets.sensors.six_axis_ft_sensor"
 )
 
-# ------------------------------------------------------
-# y2_control_pybind import
-# ------------------------------------------------------
 y2_cfg = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.y2_control_pybind.y2_control_py.config"
 )
@@ -39,21 +23,12 @@ y2_pb = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.y2_control_pybind.y2_control_py._y2_control_pybind"
 )
 
-# ------------------------------------------------------
-# Global buffers
-# ------------------------------------------------------
 _hdf5_position: torch.Tensor | None = None
 _hdf5_force: torch.Tensor | None = None
 _hdf5_traj_len: int = 0
 
-# ------------------------------------------------------
-# Global singleton-like FK solver
-# ------------------------------------------------------
 _y2_kin_solver = None
 
-# ------------------------------------------------------
-# Orientation convention calibration
-# ------------------------------------------------------
 _HOME_Q = [0.5585, -2.0949, -1.5711, -1.0472, 1.5708, 0.5585]
 _orientation_offset_rotm: torch.Tensor | None = None
 
@@ -326,7 +301,7 @@ def _update_debug_cache(step: int, wrench_env0: torch.Tensor | None = None, metr
             local_debug._last_polishing_debug["step"] = int(step)
             local_debug._last_polishing_debug["metrics"] = metrics_env0.detach().cpu().clone()
     except Exception as e:
-        print(f"[OBS DEBUG CACHE ERROR] step={step} | {repr(e)}")
+        local_debug.print_exception("OBS DEBUG CACHE ERROR", e)
 
 
 def _call_debug_printers(step: int, wrench_env0: torch.Tensor | None = None, metrics_env0: torch.Tensor | None = None):
@@ -335,14 +310,14 @@ def _call_debug_printers(step: int, wrench_env0: torch.Tensor | None = None, met
             if hasattr(local_debug, "print_ft_sensor_debug"):
                 local_debug.print_ft_sensor_debug(int(step), wrench_env0)
         except Exception as e:
-            print(f"[FT DEBUG PRINT ERROR] step={step} | {repr(e)}")
+            local_debug.print_exception("FT DEBUG PRINT ERROR", e)
 
     if metrics_env0 is not None:
         try:
             if hasattr(local_debug, "print_polishing_metrics_debug"):
                 local_debug.print_polishing_metrics_debug(int(step), metrics_env0)
         except Exception as e:
-            print(f"[POLISHING DEBUG PRINT ERROR] step={step} | {repr(e)}")
+            local_debug.print_exception("POLISHING DEBUG PRINT ERROR", e)
 
 
 def get_ee_pose(env: "ManagerBasedRLEnv", asset_name: str = "robot") -> torch.Tensor:
@@ -699,7 +674,7 @@ def get_processed_polishing_target(
                 reward=env0_reward,
             )
     except Exception as e:
-        print(f"[POLISHING LOGGER ERROR] step={step_i} | {repr(e)}")
+        local_debug.print_exception("POLISHING LOGGER ERROR", e)
 
     out = torch.cat(
         [

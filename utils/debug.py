@@ -6,25 +6,18 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+
 # ============================================================
 # Global caches
 # ============================================================
 _last_ft_debug = {
     "step": None,
-    "wrench": None,  # [Fx, Fy, Fz, Tx, Ty, Tz]
+    "wrench": None,
 }
 
 _last_polishing_debug = {
     "step": None,
     "metrics": None,
-    # [0] cartesian_speed
-    # [1] Fz
-    # [2] abs_fz
-    # [3] contact_flag
-    # [4] effective_normal_force
-    # [5] removal_rate
-    # [6] cumulative_removal
-    # [7] contact_distance
 }
 
 
@@ -37,6 +30,17 @@ def _as_float_list(x):
     if isinstance(x, (list, tuple, np.ndarray)):
         return [float(v) for v in np.array(x).reshape(-1).tolist()]
     return [float(x)]
+
+
+# ============================================================
+# Generic print helpers
+# ============================================================
+def print_exception(context: str, error):
+    print(f"[{context}] {repr(error)}")
+
+
+def print_info(msg: str):
+    print(msg)
 
 
 # ============================================================
@@ -68,8 +72,6 @@ def print_action_init(
     hdf5_file_path: str,
     position_dataset_key: str,
     traj_shape,
-    stride: int,
-    used_traj_shape,
     body_name: str,
     ee_idx: int,
     num_envs: int,
@@ -78,8 +80,7 @@ def print_action_init(
 ):
     print(f"[Action] HDF5 file: {hdf5_file_path}")
     print(f"[Action] dataset key: {position_dataset_key}")
-    print(f"[Action] full traj shape: {traj_shape}")
-    print(f"[Action] stride: {stride} -> used traj shape: {used_traj_shape}")
+    print(f"[Action] traj shape: {traj_shape}")
     print(f"[Action] EE body_name: {body_name}, ee_idx: {ee_idx}")
     print(f"[Action] num_envs: {num_envs}")
     print(f"[Action] TCP length offset: {tcp_length_offset_m} m")
@@ -100,10 +101,6 @@ def print_camera_normals(step: int, normals_mean_env0):
 # Cache-only debug recorders
 # ============================================================
 def print_ft_sensor_debug(step: int, wrench_env0):
-    """
-    콘솔 출력하지 않고 캐시에만 저장.
-    최종 통합 출력은 print_action_debug_status()에서만 수행.
-    """
     global _last_ft_debug
 
     vals = _as_float_list(wrench_env0)
@@ -115,10 +112,6 @@ def print_ft_sensor_debug(step: int, wrench_env0):
 
 
 def print_polishing_metrics_debug(step: int, metrics_env0):
-    """
-    콘솔 출력하지 않고 캐시에만 저장.
-    최종 통합 출력은 print_action_debug_status()에서만 수행.
-    """
     global _last_polishing_debug
 
     vals = _as_float_list(metrics_env0)
@@ -130,84 +123,56 @@ def print_polishing_metrics_debug(step: int, metrics_env0):
 
 
 # ============================================================
-# Unified debug print
+# Unified action runtime print
 # ============================================================
-def print_action_debug_status(
+def print_action_runtime(
     env_id: int,
     global_step: int,
-    path_index: int,
+    current_index: int,
+    next_index: int,
     traj_length: int,
-    waypoint_steps: int,
     path_done: bool,
-    raw_target_xyz,
-    raw_target_force,
+    pos_err_norm: float,
+    rot_err_norm: float,
+    pybind_called: bool,
+    pybind_success: bool,
+    inner_iters: int,
+    dq_norm: float,
+    current_xyz,
+    current_wxyz,
     target_xyz,
     target_wxyz,
     target_force,
-    current_xyz,
-    current_wxyz,
-    pos_err_norm: float,
-    rot_err_norm: float,
-    episode_count: int | None = None,
-    reward_total: float | None = None,
-    reward_score: float | None = None,
-    penalty_score: float | None = None,
+    q_now,
+    q_cmd,
 ):
-    raw_target_xyz = _as_float_list(raw_target_xyz)
-    raw_target_force = _as_float_list(raw_target_force)
+    current_xyz = _as_float_list(current_xyz)
+    current_wxyz = _as_float_list(current_wxyz)
     target_xyz = _as_float_list(target_xyz)
     target_wxyz = _as_float_list(target_wxyz)
     target_force = _as_float_list(target_force)
-    current_xyz = _as_float_list(current_xyz)
-    current_wxyz = _as_float_list(current_wxyz)
-
-    while len(raw_target_xyz) < 3:
-        raw_target_xyz.append(0.0)
-    while len(raw_target_force) < 3:
-        raw_target_force.append(0.0)
-    while len(target_xyz) < 3:
-        target_xyz.append(0.0)
-    while len(target_wxyz) < 3:
-        target_wxyz.append(0.0)
-    while len(target_force) < 3:
-        target_force.append(0.0)
-    while len(current_xyz) < 3:
-        current_xyz.append(0.0)
-    while len(current_wxyz) < 3:
-        current_wxyz.append(0.0)
+    q_now = _as_float_list(q_now)
+    q_cmd = _as_float_list(q_cmd)
 
     print("\n" + "=" * 100)
-
-    if episode_count is None:
-        print(
-            f"[Action Debug ] env={env_id} | "
-            f"step={global_step} | "
-            f"h5_index={path_index}/{max(traj_length - 1, 0)} | "
-            f"waypoint_steps={waypoint_steps} | "
-            f"done={path_done} | "
-            f"pos_err_norm={pos_err_norm:.6f} | "
-            f"rot_err_norm={rot_err_norm:.6f}"
-        )
-    else:
-        print(
-            f"[Episode {episode_count}] env={env_id} | "
-            f"step={global_step} | "
-            f"h5_index={path_index}/{max(traj_length - 1, 0)} | "
-            f"waypoint_steps={waypoint_steps} | "
-            f"done={path_done} | "
-            f"pos_err_norm={pos_err_norm:.6f} | "
-            f"rot_err_norm={rot_err_norm:.6f}"
-        )
-
     print(
-        "[Current Pose ] "
-        f"x={current_xyz[0]: .6f}, y={current_xyz[1]: .6f}, z={current_xyz[2]: .6f}, "
+        f"[Pybind IK   ] called={pybind_called} success={pybind_success} "
+        f"inner_iters={inner_iters} dq_norm={dq_norm:.6f}"
+    )
+    print(
+        f"[Action Debug ] env={env_id} | step={global_step} "
+        f"| h5_index={current_index}/{traj_length} "
+        f"| next_index={next_index}/{traj_length} "
+        f"| done={path_done} "
+        f"| pos_err_norm={pos_err_norm:.6f} "
+        f"| rot_err_norm={rot_err_norm:.6f}"
+    )
+    print(
+        f"[Current Pose ] x={current_xyz[0]: .6f}, y={current_xyz[1]: .6f}, z={current_xyz[2]: .6f}, "
         f"wx={current_wxyz[0]: .6f}, wy={current_wxyz[1]: .6f}, wz={current_wxyz[2]: .6f}"
     )
-
     print(
-        "[Target Pose  ] "
-        f"x={target_xyz[0]: .6f}, y={target_xyz[1]: .6f}, z={target_xyz[2]: .6f}, "
+        f"[Target Pose  ] x={target_xyz[0]: .6f}, y={target_xyz[1]: .6f}, z={target_xyz[2]: .6f}, "
         f"wx={target_wxyz[0]: .6f}, wy={target_wxyz[1]: .6f}, wz={target_wxyz[2]: .6f}"
     )
 
@@ -215,8 +180,7 @@ def print_action_debug_status(
         fx, fy, fz, tx, ty, tz = _last_ft_debug["wrench"]
         ft_step = _last_ft_debug["step"]
         print(
-            "[Current Force] "
-            f"step={ft_step}, "
+            f"[Current Force] step={ft_step}, "
             f"Fx={fx: .6f}, Fy={fy: .6f}, Fz={fz: .6f}, "
             f"Tx={tx: .6f}, Ty={ty: .6f}, Tz={tz: .6f}"
         )
@@ -224,8 +188,7 @@ def print_action_debug_status(
         print("[Current Force] No cached 6-axis FT data")
 
     print(
-        "[Target Force ] "
-        f"Fx={target_force[0]: .6f}, Fy={target_force[1]: .6f}, Fz={target_force[2]: .6f}"
+        f"[Target Force ] Fx={target_force[0]: .6f}, Fy={target_force[1]: .6f}, Fz={target_force[2]: .6f}"
     )
 
     if _last_polishing_debug["metrics"] is not None:
@@ -242,8 +205,7 @@ def print_action_debug_status(
         contact_distance = pm[7]
 
         print(
-            "[Polishing    ] "
-            f"step={pm_step}, "
+            f"[Polishing    ] step={pm_step}, "
             f"contact={contact_flag}, "
             f"cartesian_speed={cartesian_speed: .6f} m/s, "
             f"Fz={fz_polish: .6f} N, "
@@ -256,13 +218,5 @@ def print_action_debug_status(
     else:
         print("[Polishing    ] No cached polishing metrics")
 
-    if reward_total is None or reward_score is None or penalty_score is None:
-        print("[RL Score     ] N/A (actual reward not connected)")
-    else:
-        print(
-            f"[RL Score     ] TOTAL={reward_total: .6f} | "
-            f"REWARD(+)= {reward_score: .6f} | "
-            f"PENALTY(-)= {penalty_score: .6f}"
-        )
-
+    print(f"[Joint Cmd    ] q_now={np.array(q_now)} | q_cmd={np.array(q_cmd)}")
     print("=" * 100)

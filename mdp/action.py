@@ -15,40 +15,19 @@ from isaaclab.utils import configclass
 
 from ..utils import debug as local_debug
 
-
-# =========================================================
-# pybind import
-# =========================================================
 y2_cfg = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.y2_control_pybind.y2_control_py.config"
 )
 y2_pb = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.y2_control_pybind.y2_control_py._y2_control_pybind"
 )
+local_ft_sensor = importlib.import_module(
+    "nrs_rl.tasks.manager_based.nrs_rl.assets.assets.sensors.six_axis_ft_sensor"
+)
 
 
-# =========================================================
-# Math utils
-# =========================================================
 def normalize_quat(q: torch.Tensor) -> torch.Tensor:
     return q / torch.clamp(torch.linalg.norm(q, dim=-1, keepdim=True), min=1e-8)
-
-
-def quat_conjugate(q: torch.Tensor) -> torch.Tensor:
-    out = q.clone()
-    out[:, 1:] = -out[:, 1:]
-    return out
-
-
-def quat_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
-    w1, x1, y1, z1 = q1[:, 0], q1[:, 1], q1[:, 2], q1[:, 3]
-    w2, x2, y2, z2 = q2[:, 0], q2[:, 1], q2[:, 2], q2[:, 3]
-
-    w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
-    x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
-    y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
-    z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-    return torch.stack([w, x, y, z], dim=-1)
 
 
 def quat_to_rotmat(q: torch.Tensor) -> torch.Tensor:
@@ -152,10 +131,6 @@ def spatial_to_rotmat(spatial: torch.Tensor) -> torch.Tensor:
     return R
 
 
-def spatial_to_quat(spatial: torch.Tensor) -> torch.Tensor:
-    return rotmat_to_quat(spatial_to_rotmat(spatial))
-
-
 def rotmat_to_spatial(R: torch.Tensor) -> torch.Tensor:
     trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]
     cos_angle = (trace - 1.0) / 2.0
@@ -218,32 +193,13 @@ def rotmat_to_spatial(R: torch.Tensor) -> torch.Tensor:
     return out
 
 
-# =========================================================
-# Fixed orientation calibration
-# =========================================================
 _HOME_Q = torch.tensor(
     [0.5585, -2.0949, -1.5711, -1.0472, 1.5708, 0.5585],
     dtype=torch.float32,
 )
 
 
-# =========================================================
-# Action Term
-# =========================================================
 class AdmittanceControlAction(ActionTerm):
-    """
-    Multi-env HDF5 pose path follower using pybind FK/Jacobian inner-loop IK.
-
-    Unit convention:
-    - position    : mm
-    - orientation : rad
-    - force       : N
-
-    Important behavior:
-    - one apply_actions() call -> one HDF5 index increment
-    - if callback/control rate is 125 Hz, trajectory is consumed at 125 index/sec
-    """
-
     cfg: "AdmittanceControlActionCfg"
 
     def __init__(self, cfg, env: ManagerBasedRLEnv):
@@ -256,41 +212,37 @@ class AdmittanceControlAction(ActionTerm):
 
         body_ids = self.robot.find_bodies(self.cfg.body_name)[0]
         if len(body_ids) == 0:
-            raise ValueError(
-                f"[Action] body_name='{self.cfg.body_name}' not found. "
-                f"Available bodies: {self.robot.body_names}"
-            )
+            raise ValueError(f"[Action] body_name='{self.cfg.body_name}' not found.")
         self.ee_idx = int(body_ids[0])
 
         self._raw_actions = torch.zeros((self._num_envs_local, self.cfg.action_dim), device=self.device)
         self._processed_actions = torch.zeros_like(self._raw_actions)
 
-        traj_full = self._load_hdf5_positions(
-            self.cfg.hdf5_file_path,
-            self.cfg.position_dataset_key,
-        )
-        force_full = self._load_hdf5_forces(
-            self.cfg.hdf5_file_path,
-            self.cfg.force_dataset_key,
-            traj_full.shape[0],
-        )
+        traj_full = self._load_hdf5_positions(self.cfg.hdf5_file_path, self.cfg.position_dataset_key)
+        force_full = self._load_hdf5_forces(self.cfg.hdf5_file_path, self.cfg.force_dataset_key, traj_full.shape[0])
 
-        stride = max(1, int(self.cfg.waypoint_stride))
-        self.traj_positions = traj_full[::stride].contiguous()
-        self.traj_forces = force_full[::stride].contiguous()
+        self.traj_positions = traj_full.contiguous()
+        self.traj_forces = force_full.contiguous()
         self.traj_length = self.traj_positions.shape[0]
 
-        # next index to consume
         self.path_index = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
-        # index actually used in the current/last command
         self.current_target_index = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
-
-        self.steps_at_waypoint = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
         self.path_done = torch.zeros(self._num_envs_local, dtype=torch.bool, device=self.device)
+
+        # 0: approach first point, 1: contact search, 2: force track
+        self.control_phase = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
+
+        self.search_anchor_xyz_mm = torch.zeros((self._num_envs_local, 3), dtype=torch.float32, device=self.device)
+        self.search_step_count = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
+        self.search_direction = torch.full((self._num_envs_local,), float(self.cfg.contact_search_direction), dtype=torch.float32, device=self.device)
+        self.search_flip_used = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
 
         self.des_pos_mm_raw = torch.zeros((self._num_envs_local, 3), device=self.device)
         self.des_wxyz_raw = torch.zeros((self._num_envs_local, 3), device=self.device)
         self.des_force = torch.zeros((self._num_envs_local, 3), device=self.device)
+
+        # actual command target used by IK
+        self.cmd_target_xyz_mm = torch.zeros((self._num_envs_local, 3), dtype=torch.float32, device=self.device)
 
         self.prev_q_cmd_6 = torch.zeros((self._num_envs_local, 6), device=self.device)
         self.prev_valid = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
@@ -304,15 +256,42 @@ class AdmittanceControlAction(ActionTerm):
                 [0.0, 0.0, 0.0, 1.0],
             ]),
         )
-
         self.R_offset = self._get_orientation_offset_rotm(self.device)
+
+        model_path = getattr(y2_cfg, "CONTEXT_NAF_MDGRADI_CKPT", None) or getattr(y2_cfg, "FORCECON_MODEL_PATH", None)
+        if not model_path:
+            raise RuntimeError("ForceCon model path not found in y2_control_pybind config.")
+
+        self.force_controllers = []
+        for _ in range(self._num_envs_local):
+            self.force_controllers.append(
+                y2_pb.ForceCon1DMode5(
+                    model_path,
+                    float(self._step_dt_local),
+                    1,
+                    "cpu",
+                    float(self.cfg.force_md_ratio),
+                    float(self.cfg.force_fc_fext),
+                    float(self.cfg.force_free_mass),
+                    float(self.cfg.force_free_damping),
+                    float(self.cfg.force_free_stiffness),
+                    float(self.cfg.force_contact_stiffness),
+                    float(self.cfg.force_recovery_tau),
+                    list(self.cfg.force_action_low),
+                    list(self.cfg.force_action_high),
+                    float(self.cfg.force_mass_min),
+                    float(self.cfg.force_mass_max),
+                    float(self.cfg.force_alpha_min),
+                    float(self.cfg.force_alpha_max),
+                    float(self.cfg.force_alpha_rate_up),
+                    float(self.cfg.force_alpha_rate_down),
+                )
+            )
 
         local_debug.print_action_init(
             hdf5_file_path=self.cfg.hdf5_file_path,
             position_dataset_key=self.cfg.position_dataset_key,
             traj_shape=tuple(traj_full.shape),
-            stride=stride,
-            used_traj_shape=tuple(self.traj_positions.shape),
             body_name=self.cfg.body_name,
             ee_idx=self.ee_idx,
             num_envs=self._num_envs_local,
@@ -333,100 +312,45 @@ class AdmittanceControlAction(ActionTerm):
         return self._processed_actions
 
     def _load_hdf5_positions(self, file_path: str, dataset_key: str) -> torch.Tensor:
-        if not file_path:
-            raise ValueError("[Action] hdf5_file_path is empty.")
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"[Action] HDF5 file not found: {file_path}")
-
         with h5py.File(file_path, "r") as f:
-            if dataset_key in f:
-                data = f[dataset_key][:]
-            elif "target_positions" in f:
-                data = f["target_positions"][:]
-            elif "positions" in f:
-                data = f["positions"][:]
-            else:
-                keys = list(f.keys())
-                if len(keys) == 0:
-                    raise KeyError("[Action] HDF5 file has no datasets.")
-                data = f[keys[0]][:]
-
+            data = f[dataset_key][:] if dataset_key in f else f[list(f.keys())[0]][:]
         data = torch.tensor(data, dtype=torch.float32, device=self.device)
-
-        if data.ndim != 2:
-            raise ValueError(f"[Action] expected [T, D], got {tuple(data.shape)}")
-        if data.shape[1] < 6:
-            raise ValueError(f"[Action] expected at least 6 columns, got {data.shape[1]}")
-
         return data[:, :6]
 
     def _load_hdf5_forces(self, file_path: str, dataset_key: str, expected_rows: int) -> torch.Tensor:
-        if not file_path:
-            raise ValueError("[Action] hdf5_file_path is empty.")
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"[Action] HDF5 file not found: {file_path}")
-
         with h5py.File(file_path, "r") as f:
-            if dataset_key in f:
-                data = f[dataset_key][:]
-            else:
-                data = torch.zeros((expected_rows, 3), dtype=torch.float32).cpu().numpy()
-
+            data = f[dataset_key][:] if dataset_key in f else torch.zeros((expected_rows, 3), dtype=torch.float32).cpu().numpy()
         data = torch.tensor(data, dtype=torch.float32, device=self.device)
-
-        if data.ndim != 2 or data.shape[1] < 3:
-            raise ValueError(f"[Action] expected force dataset [T, >=3], got {tuple(data.shape)}")
-
-        data = data[:, :3]
-
-        if data.shape[0] != expected_rows:
-            raise ValueError(
-                f"[Action] position/force row mismatch: {expected_rows} vs {data.shape[0]}"
-            )
-
-        return data
+        return data[:, :3]
 
     def _get_orientation_offset_rotm(self, device: torch.device) -> torch.Tensor:
         T_home = self.kin.forward_kinematics(_HOME_Q.detach().cpu().tolist())
         T_home = torch.tensor(T_home, dtype=torch.float32, device=device)
-
         R_home_fk = T_home[:3, :3]
         desired_home_spatial = torch.tensor([[0.0, 0.0, 1.5708]], dtype=torch.float32, device=device)
         R_home_desired = spatial_to_rotmat(desired_home_spatial).squeeze(0)
-
         return R_home_desired @ R_home_fk.T
 
     def _fk_pose_pybind_corrected(self, q6: torch.Tensor):
         T = self.kin.forward_kinematics(q6.detach().cpu().to(torch.float64).tolist())
         T = torch.tensor(T, dtype=torch.float32, device=self.device)
-
         pos_mm = T[:3, 3]
         R_fk = T[:3, :3]
         R_corr = self.R_offset @ R_fk
-
         quat_corr = rotmat_to_quat(R_corr.unsqueeze(0)).squeeze(0)
         wxyz_corr = rotmat_to_spatial(R_corr.unsqueeze(0)).squeeze(0)
-
         return pos_mm, quat_corr, wxyz_corr, R_corr
 
-    def _solve_pybind_iterative_ik(
-        self,
-        q_seed: torch.Tensor,
-        target_pos_mm: torch.Tensor,
-        target_rotm: torch.Tensor,
-        inner_iters: int = 5,
-    ):
+    def _solve_pybind_iterative_ik(self, q_seed: torch.Tensor, target_pos_mm: torch.Tensor, target_rotm: torch.Tensor, inner_iters: int):
         q_iter = q_seed.clone()
-
         last_pos_err_norm_mm = torch.tensor(0.0, device=self.device)
         last_rot_err_norm_rad = torch.tensor(0.0, device=self.device)
         last_dq_norm = 0.0
 
-        q_min = None
-        q_max = None
-        if self.cfg.joint_lower_limits is not None and self.cfg.joint_upper_limits is not None:
-            q_min = torch.tensor(self.cfg.joint_lower_limits, device=self.device, dtype=torch.float32)
-            q_max = torch.tensor(self.cfg.joint_upper_limits, device=self.device, dtype=torch.float32)
+        q_min = torch.tensor(self.cfg.joint_lower_limits, device=self.device, dtype=torch.float32) if self.cfg.joint_lower_limits is not None else None
+        q_max = torch.tensor(self.cfg.joint_upper_limits, device=self.device, dtype=torch.float32) if self.cfg.joint_upper_limits is not None else None
 
         for _ in range(inner_iters):
             T = self.kin.forward_kinematics(q_iter.detach().cpu().to(torch.float64).tolist())
@@ -442,16 +366,8 @@ class AdmittanceControlAction(ActionTerm):
             last_pos_err_norm_mm = torch.linalg.norm(pos_err_mm)
             last_rot_err_norm_rad = torch.linalg.norm(rot_err_rad)
 
-            pos_err_mm = torch.clamp(
-                pos_err_mm,
-                -self.cfg.max_pos_err * 1000.0,
-                self.cfg.max_pos_err * 1000.0,
-            )
-            rot_err_rad = torch.clamp(
-                rot_err_rad,
-                -self.cfg.max_rot_err,
-                self.cfg.max_rot_err,
-            )
+            pos_err_mm = torch.clamp(pos_err_mm, -self.cfg.max_pos_err * 1000.0, self.cfg.max_pos_err * 1000.0)
+            rot_err_rad = torch.clamp(rot_err_rad, -self.cfg.max_rot_err, self.cfg.max_rot_err)
 
             err_6 = torch.cat([pos_err_mm, rot_err_rad], dim=0)
 
@@ -466,25 +382,29 @@ class AdmittanceControlAction(ActionTerm):
             last_dq_norm = float(torch.linalg.norm(dq).item())
 
             q_iter = q_iter + self.cfg.ik_step_size * dq
-
             if q_min is not None and q_max is not None:
                 q_iter = torch.clamp(q_iter, q_min, q_max)
 
         return q_iter, last_pos_err_norm_mm, last_rot_err_norm_rad, last_dq_norm
 
+    def _reset_force_controller_for_env(self, env_id: int, xd_mm: float):
+        self.force_controllers[env_id].reset(float(xd_mm))
+
     def reset(self, env_ids=None):
         super().reset(env_ids)
-
         if env_ids is None:
             env_ids = torch.arange(self._num_envs_local, device=self.device)
 
         self._raw_actions[env_ids] = 0.0
         self._processed_actions[env_ids] = 0.0
-
         self.path_index[env_ids] = 0
         self.current_target_index[env_ids] = 0
-        self.steps_at_waypoint[env_ids] = 0
         self.path_done[env_ids] = False
+        self.control_phase[env_ids] = 0
+        self.search_anchor_xyz_mm[env_ids] = 0.0
+        self.search_step_count[env_ids] = 0
+        self.search_direction[env_ids] = float(self.cfg.contact_search_direction)
+        self.search_flip_used[env_ids] = False
 
         des = self.traj_positions[0].unsqueeze(0).repeat(len(env_ids), 1)
         frc = self.traj_forces[0].unsqueeze(0).repeat(len(env_ids), 1)
@@ -492,9 +412,14 @@ class AdmittanceControlAction(ActionTerm):
         self.des_pos_mm_raw[env_ids] = des[:, 0:3]
         self.des_wxyz_raw[env_ids] = des[:, 3:6]
         self.des_force[env_ids] = frc
+        self.cmd_target_xyz_mm[env_ids] = des[:, 0:3]
 
         self.prev_q_cmd_6[env_ids] = 0.0
         self.prev_valid[env_ids] = False
+
+        for env_id in env_ids.tolist():
+            xd0 = float(self.traj_positions[0, 2].item() + self.cfg.z_target_offset_m * 1000.0)
+            self._reset_force_controller_for_env(env_id, xd0)
 
     def process_actions(self, actions: torch.Tensor):
         self._raw_actions = torch.nan_to_num(actions.clone(), nan=0.0)
@@ -504,16 +429,13 @@ class AdmittanceControlAction(ActionTerm):
         q_all = self.robot.data.joint_pos
         q = q_all[:, :6]
 
-        # consume exactly one index per apply_actions call
-        cmd_index = self.path_index.clone()
-        self.current_target_index = cmd_index.clone()
-
-        des = self.traj_positions[cmd_index]
-        frc = self.traj_forces[cmd_index]
-
-        self.des_pos_mm_raw = des[:, 0:3].clone()
-        self.des_wxyz_raw = des[:, 3:6].clone()
-        self.des_force = frc
+        wrench6 = local_ft_sensor.get_6axis_ft_fixed_joint(
+            env=self._env,
+            asset_name=self.cfg.asset_name,
+            fixed_joint_name=self.cfg.fixed_joint_name,
+            joint_prim_relpath=self.cfg.joint_prim_relpath,
+            verbose=False,
+        )
 
         q_cmd_all = q_all.clone()
         pos_err_norm_mm = torch.zeros((self._num_envs_local,), device=self.device)
@@ -525,103 +447,181 @@ class AdmittanceControlAction(ActionTerm):
 
         for env_id in range(self._num_envs_local):
             q_seed = self.prev_q_cmd_6[env_id] if self.prev_valid[env_id] else q[env_id]
+            cur_pos_mm, _, _, _ = self._fk_pose_pybind_corrected(q_seed)
 
-            target_pos_mm = self.des_pos_mm_raw[env_id].clone()
-            target_pos_mm[2] += self.cfg.z_target_offset_m * 1000.0
+            raw_fz = float(wrench6[env_id, 2].item())
+            measured_fz = float(self.cfg.fz_sign * raw_fz)
+            phase = int(self.control_phase[env_id].item())
 
-            target_rotm = spatial_to_rotmat(self.des_wxyz_raw[env_id : env_id + 1]).squeeze(0)
+            if phase == 0:
+                idx = 0
+                self.current_target_index[env_id] = idx
+                self.des_pos_mm_raw[env_id] = self.traj_positions[idx, 0:3]
+                self.des_wxyz_raw[env_id] = self.traj_positions[idx, 3:6]
+                self.des_force[env_id] = self.traj_forces[idx]
 
-            pybind_called = True
-            q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_iterative_ik(
-                q_seed=q_seed,
-                target_pos_mm=target_pos_mm,
-                target_rotm=target_rotm,
-                inner_iters=5,
-            )
-            pybind_success = True
-            pybind_dq_norm = dq_norm
+                target_pos_mm = self.traj_positions[idx, 0:3].clone()
+                target_pos_mm[2] += self.cfg.z_target_offset_m * 1000.0
+                self.cmd_target_xyz_mm[env_id] = target_pos_mm
 
-            pos_err_norm_mm[env_id] = pos_e_mm
-            rot_err_norm_rad[env_id] = rot_e_rad
+                target_rotm = spatial_to_rotmat(self.traj_positions[idx, 3:6].view(1, 3)).squeeze(0)
+
+                pybind_called = True
+                q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_iterative_ik(
+                    q_seed, target_pos_mm, target_rotm, self.cfg.ik_inner_iters
+                )
+                pybind_success = True
+                pybind_dq_norm = dq_norm
+
+                pos_err_norm_mm[env_id] = pos_e_mm
+                rot_err_norm_rad[env_id] = rot_e_rad
+
+                if (pos_e_mm.item() < self.cfg.approach_pos_tol_mm) and (rot_e_rad.item() < self.cfg.approach_rot_tol_rad):
+                    self.control_phase[env_id] = 1
+                    self.search_anchor_xyz_mm[env_id] = cur_pos_mm
+                    self.search_step_count[env_id] = 0
+                    self.search_direction[env_id] = float(self.cfg.contact_search_direction)
+                    self.search_flip_used[env_id] = False
+                    self.path_index[env_id] = 0
+
+            elif phase == 1:
+                idx = int(self.path_index[env_id].item())
+                self.current_target_index[env_id] = idx
+
+                self.des_pos_mm_raw[env_id] = self.traj_positions[idx, 0:3]
+                self.des_wxyz_raw[env_id] = self.traj_positions[idx, 3:6]
+                self.des_force[env_id] = self.traj_forces[idx]
+
+                target_rotm = spatial_to_rotmat(self.traj_positions[idx, 3:6].view(1, 3)).squeeze(0)
+
+                target_pos_mm = self.search_anchor_xyz_mm[env_id].clone()
+                search_offset = float(self.search_step_count[env_id].item()) * self.cfg.contact_search_step_mm
+                search_offset = min(search_offset, self.cfg.contact_search_max_offset_mm)
+                target_pos_mm[2] = float(self.search_anchor_xyz_mm[env_id, 2].item()) + float(self.search_direction[env_id].item()) * search_offset
+                self.cmd_target_xyz_mm[env_id] = target_pos_mm
+
+                pybind_called = True
+                q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_iterative_ik(
+                    q_seed, target_pos_mm, target_rotm, self.cfg.ik_inner_iters
+                )
+                pybind_success = True
+                pybind_dq_norm = dq_norm
+
+                pos_err_norm_mm[env_id] = pos_e_mm
+                rot_err_norm_rad[env_id] = rot_e_rad
+                self.search_step_count[env_id] += 1
+
+                if measured_fz >= self.cfg.contact_on_threshold_n:
+                    self.control_phase[env_id] = 2
+                    self._reset_force_controller_for_env(env_id, float(cur_pos_mm[2].item()))
+                else:
+                    if (search_offset >= self.cfg.contact_search_max_offset_mm) and (not bool(self.search_flip_used[env_id].item())):
+                        self.search_direction[env_id] = -self.search_direction[env_id]
+                        self.search_step_count[env_id] = 0
+                        self.search_flip_used[env_id] = True
+
+            else:
+                idx = int(self.path_index[env_id].item())
+                self.current_target_index[env_id] = idx
+
+                self.des_pos_mm_raw[env_id] = self.traj_positions[idx, 0:3]
+                self.des_wxyz_raw[env_id] = self.traj_positions[idx, 3:6]
+                self.des_force[env_id] = self.traj_forces[idx]
+
+                nominal_pos_mm = self.traj_positions[idx, 0:3].clone()
+                nominal_pos_mm[2] += self.cfg.z_target_offset_m * 1000.0
+                target_rotm = spatial_to_rotmat(self.traj_positions[idx, 3:6].view(1, 3)).squeeze(0)
+
+                fd = float(self.traj_forces[idx, 2].item())
+                fext = float(measured_fz)
+
+                fc_out = self.force_controllers[env_id].step(
+                    float(nominal_pos_mm[2].item()),
+                    float(cur_pos_mm[2].item()),
+                    float(fd),
+                    float(fext),
+                )
+
+                xc_z_mm = float(fc_out[0])
+
+                target_pos_mm = nominal_pos_mm.clone()
+                target_pos_mm[2] = xc_z_mm
+                self.cmd_target_xyz_mm[env_id] = target_pos_mm
+
+                pybind_called = True
+                q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_iterative_ik(
+                    q_seed, target_pos_mm, target_rotm, self.cfg.ik_inner_iters
+                )
+                pybind_success = True
+                pybind_dq_norm = dq_norm
+
+                pos_err_norm_mm[env_id] = pos_e_mm
+                rot_err_norm_rad[env_id] = rot_e_rad
+
+                if measured_fz >= self.cfg.contact_off_threshold_n:
+                    if idx >= (self.traj_length - 1):
+                        self.path_done[env_id] = True
+                    else:
+                        self.path_index[env_id] += 1
+                else:
+                    self.control_phase[env_id] = 1
+                    self.search_anchor_xyz_mm[env_id] = cur_pos_mm
+                    self.search_step_count[env_id] = 0
+                    self.search_direction[env_id] = float(self.cfg.contact_search_direction)
+                    self.search_flip_used[env_id] = False
 
             self.prev_q_cmd_6[env_id] = q_cmd6
             self.prev_valid[env_id] = True
-
             q_cmd_all[env_id, :6] = q_cmd6
 
         self.robot.set_joint_position_target(q_cmd_all)
-
-        # no waypoint reaching logic:
-        # exactly +1 index per callback until the last row
-        can_advance = ~self.path_done
-        next_index = torch.where(
-            can_advance,
-            torch.clamp(self.path_index + 1, max=self.traj_length - 1),
-            self.path_index,
-        )
-        done_now = self.path_index >= (self.traj_length - 1)
-
-        self.path_done = self.path_done | done_now
-        self.path_index = next_index
-        self.steps_at_waypoint.zero_()
 
         if self.cfg.enable_debug_print:
             global_step = int(self._env.episode_length_buf[0].item())
             if self.cfg.debug_print_interval <= 0 or global_step % self.cfg.debug_print_interval == 0:
                 env_id = min(self.cfg.debug_env_id, self._num_envs_local - 1)
-
                 cur_pos_mm, _, cur_wxyz, _ = self._fk_pose_pybind_corrected(q[env_id])
 
-                print("=" * 100)
-                print(
-                    f"[Pybind IK   ] called={pybind_called} success={pybind_success} "
-                    f"inner_iters=5 dq_norm={pybind_dq_norm:.6f}"
+                phase = int(self.control_phase[env_id].item())
+                mode_name = ["position_approach", "contact_search", "force_track"][phase]
+
+                local_debug.print_action_runtime(
+                    env_id=env_id,
+                    global_step=global_step,
+                    current_index=int(self.current_target_index[env_id].item()),
+                    next_index=int(self.path_index[env_id].item()),
+                    traj_length=self.traj_length,
+                    path_done=bool(self.path_done[env_id].item()),
+                    pos_err_norm=float(pos_err_norm_mm[env_id].item()),
+                    rot_err_norm=float(rot_err_norm_rad[env_id].item()),
+                    pybind_called=pybind_called,
+                    pybind_success=pybind_success,
+                    inner_iters=self.cfg.ik_inner_iters,
+                    dq_norm=pybind_dq_norm,
+                    current_xyz=cur_pos_mm.detach().cpu(),
+                    current_wxyz=cur_wxyz.detach().cpu(),
+                    target_xyz=self.cmd_target_xyz_mm[env_id].detach().cpu(),
+                    target_wxyz=self.des_wxyz_raw[env_id].detach().cpu(),
+                    target_force=self.des_force[env_id].detach().cpu(),
+                    q_now=q[env_id].detach().cpu(),
+                    q_cmd=q_cmd_all[env_id, :6].detach().cpu(),
                 )
-                print(
-                    f"[Action Debug ] env={env_id} | step={global_step} "
-                    f"| h5_index={int(self.current_target_index[env_id].item())}/{self.traj_length} "
-                    f"| next_index={int(self.path_index[env_id].item())}/{self.traj_length} "
-                    f"| done={bool(self.path_done[env_id].item())} "
-                    f"| pos_err_norm={float(pos_err_norm_mm[env_id].item()):.6f} "
-                    f"| rot_err_norm={float(rot_err_norm_rad[env_id].item()):.6f}"
+                local_debug.print_info(
+                    f"[Action Mode ] env={env_id} mode={mode_name} "
+                    f"| phase={phase} | raw_fz={float(wrench6[env_id,2].item()):.6f} "
+                    f"| measured_fz={float(self.cfg.fz_sign * wrench6[env_id,2].item()):.6f}"
                 )
-                print(
-                    f"[Current Pose ] x={float(cur_pos_mm[0]): .6f}, "
-                    f"y={float(cur_pos_mm[1]): .6f}, "
-                    f"z={float(cur_pos_mm[2]): .6f}, "
-                    f"wx={float(cur_wxyz[0]): .6f}, "
-                    f"wy={float(cur_wxyz[1]): .6f}, "
-                    f"wz={float(cur_wxyz[2]): .6f}"
-                )
-                print(
-                    f"[Target Pose  ] x={float(self.des_pos_mm_raw[env_id, 0]): .6f}, "
-                    f"y={float(self.des_pos_mm_raw[env_id, 1]): .6f}, "
-                    f"z={float(self.des_pos_mm_raw[env_id, 2] + self.cfg.z_target_offset_m * 1000.0): .6f}, "
-                    f"wx={float(self.des_wxyz_raw[env_id, 0]): .6f}, "
-                    f"wy={float(self.des_wxyz_raw[env_id, 1]): .6f}, "
-                    f"wz={float(self.des_wxyz_raw[env_id, 2]): .6f}"
-                )
-                print(
-                    f"[Target Force ] Fx={float(self.des_force[env_id, 0]): .6f}, "
-                    f"Fy={float(self.des_force[env_id, 1]): .6f}, "
-                    f"Fz={float(self.des_force[env_id, 2]): .6f}"
-                )
-                print(
-                    f"[Joint Cmd    ] q_now={q[env_id].detach().cpu().numpy()} | "
-                    f"q_cmd={q_cmd_all[env_id, :6].detach().cpu().numpy()}"
-                )
-                print("=" * 100)
 
 
-# =========================================================
-# Config
-# =========================================================
 @configclass
 class AdmittanceControlActionCfg(ActionTermCfg):
     class_type: type = AdmittanceControlAction
 
     asset_name: str = "robot"
     body_name: str = "spindle_link"
+
+    fixed_joint_name: str = "tool0_to_spindle"
+    joint_prim_relpath: str = "joints"
 
     hdf5_file_path: str = ""
     position_dataset_key: str = "position"
@@ -632,19 +632,44 @@ class AdmittanceControlActionCfg(ActionTermCfg):
     dls_lambda: float = 0.10
     ik_step_size: float = 0.60
     max_dq: float = 0.08
+    ik_inner_iters: int = 5
 
     max_pos_err: float = 0.05
     max_rot_err: float = 0.30
 
-    waypoint_stride: int = 1
-    waypoint_pos_tol: float = 0.02
-    waypoint_rot_tol: float = 0.20
-    max_steps_per_waypoint: int = 120
-
     tcp_length_offset_m: float = 0.20
     tcp_offset_axis: str = "local_z_neg"
-
     z_target_offset_m: float = 0.0
+
+    approach_pos_tol_mm: float = 2.0
+    approach_rot_tol_rad: float = 0.05
+
+    # contact search
+    contact_on_threshold_n: float = 1.0
+    contact_off_threshold_n: float = 0.5
+    contact_search_step_mm: float = 0.20
+    contact_search_max_offset_mm: float = 10.0
+    contact_search_direction: float = 1.0
+
+    # make compression positive
+    fz_sign: float = -1.0
+
+    # ForceCon1DMode5
+    force_md_ratio: float = 1000.0
+    force_fc_fext: float = 50.0
+    force_free_mass: float = 2.0
+    force_free_damping: float = 6000.0
+    force_free_stiffness: float = 2000.0
+    force_contact_stiffness: float = 0.0
+    force_recovery_tau: float = 3.0
+    force_action_low: tuple = (-0.25, -0.25)
+    force_action_high: tuple = (0.25, 0.25)
+    force_mass_min: float = 0.5
+    force_mass_max: float = 5.0
+    force_alpha_min: float = 0.5
+    force_alpha_max: float = 3.0
+    force_alpha_rate_up: float = 4.0
+    force_alpha_rate_down: float = 4.0
 
     enable_debug_print: bool = True
     debug_print_interval: int = 10

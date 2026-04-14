@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-Unified RL + Polishing Removal + Visualization + Debug Module
+Unified RL + Polishing Removal + Visualization Module
 
-[수정 사항]
+역할:
 1. 저장 경로:
    nrs_rl/logs/polishing_results/<timestamp>/epN/
-2. debug 출력은 여기서 하나로 통합
-3. utils/logs 가 아니라 nrs_rl/logs/polishing_results 사용
+2. visualization 기록 및 episode 종료 시 plot 저장
+3. debug 출력은 담당하지 않음
 """
 
 from __future__ import annotations
@@ -22,9 +22,6 @@ import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
 import torch
 
-# ============================================================
-# Optional imports
-# ============================================================
 local_obs = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.mdp.observation"
 )
@@ -35,25 +32,16 @@ local_debug = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.utils.debug"
 )
 
-# ============================================================
-# GLOBAL CONFIG & PATHS
-# ============================================================
 _run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 CURRENT_FILE_PATH = Path(__file__).resolve()
-
-# utils/visualization.py -> nrs_rl/ 까지 올라감
-# .../nrs_rl/utils/visualization.py 기준 parent.parent = .../nrs_rl
 PROJECT_ROOT_DIR = CURRENT_FILE_PATH.parent.parent
 
 BASE_LOG_DIR = PROJECT_ROOT_DIR / "logs" / "polishing_results"
 RUN_LOG_DIR = BASE_LOG_DIR / _run_timestamp
 RUN_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-print(f"[Init] Polishing log directory created: {RUN_LOG_DIR}")
+local_debug.print_info(f"[Init] Polishing log directory created: {RUN_LOG_DIR}")
 
-# ============================================================
-# Buffers
-# ============================================================
 _rl_time_buffer = []
 _rl_state_buffer = []
 _rl_force_buffer = []
@@ -63,11 +51,7 @@ _episode_counter = 1
 _has_seen_any_step = False
 
 
-# ============================================================
-# ------------------ RECORDING & PROCESSING ------------------
-# ============================================================
 def record_step(env_ids, state6, force3, sim_time):
-    """env0 데이터 기록"""
     global _rl_time_buffer, _rl_state_buffer, _rl_force_buffer
     global _rl_start_time, _has_seen_any_step
 
@@ -95,11 +79,10 @@ def record_step(env_ids, state6, force3, sim_time):
         _rl_force_buffer.append(f_val.copy())
 
     except Exception as e:
-        print(f"[Visualization] record_step failed: {e}")
+        local_debug.print_exception("Visualization record_step failed", e)
 
 
 def process_episode():
-    """에피소드 종료 시 그래프 저장"""
     global _rl_time_buffer, _rl_state_buffer, _rl_force_buffer
     global _rl_start_time, _episode_counter
 
@@ -129,7 +112,7 @@ def process_episode():
     ep_dir = RUN_LOG_DIR / f"ep{_episode_counter}"
     save_plots(ep_dir, t, s_arr, f_arr, dremoval, removal_rate, vxyz)
 
-    print(f"\n[STAMP] Episode {_episode_counter} results saved to: {ep_dir}\n")
+    local_debug.print_info(f"\n[STAMP] Episode {_episode_counter} results saved to: {ep_dir}\n")
 
     _episode_counter += 1
 
@@ -142,11 +125,9 @@ def process_episode():
 
 
 def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz):
-    """그래프 저장"""
     out_dir.mkdir(parents=True, exist_ok=True)
     xyz = state6[:, :3]
 
-    # 1. Heatmap
     plt.figure(figsize=(6, 5))
     plt.hexbin(xyz[:, 0], xyz[:, 1], C=dremoval, gridsize=30, cmap="jet")
     plt.colorbar(label="Removal")
@@ -154,7 +135,6 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz):
     plt.savefig(out_dir / "01_removal_heatmap.png")
     plt.close()
 
-    # 2. Rate vs Time
     plt.figure(figsize=(10, 4))
     plt.plot(t, removal_rate)
     plt.grid(True, alpha=0.3)
@@ -164,7 +144,6 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz):
     plt.savefig(out_dir / "02_heatmap_value_vs_time.png")
     plt.close()
 
-    # 3. Signals
     fig, axs = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
 
     v_norm_raw = np.linalg.norm(vxyz, axis=1)
@@ -182,7 +161,6 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz):
     plt.savefig(out_dir / "03_signals_subplot.png")
     plt.close()
 
-    # 4. 3D Path
     fig = plt.figure(figsize=(8, 7))
     ax = fig.add_subplot(111, projection="3d")
     ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], c=t, cmap="viridis", s=2)
@@ -194,9 +172,6 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz):
     plt.close()
 
 
-# ============================================================
-# ------------------ RL INTERFACE ----------------------------
-# ============================================================
 def rl_step(env_ids, state6, force3, sim_time):
     record_step(env_ids, state6, force3, sim_time)
 
@@ -205,9 +180,6 @@ def rl_episode_done():
     return process_episode()
 
 
-# ============================================================
-# -------- Hooks for env_cfg: observation-step / reset -------
-# ============================================================
 def _safe_get_action_term(env, action_term_name: str = "arm_action"):
     am = env.action_manager
     if hasattr(am, "get_term"):
@@ -234,19 +206,13 @@ def rl_step_hook(
     fixed_joint_name: str = "tool0_to_spindle",
     joint_prim_relpath: str = "joints",
 ):
-    """
-    ObservationTerm으로 매 step 호출되는 훅.
-    - visualization 기록
-    - debug 통합 출력
-    """
     try:
         num_envs = env.num_envs
         device = env.device
 
         env_ids = torch.arange(num_envs, device=device, dtype=torch.long)
 
-        # observation pose (user convention)
-        state6 = local_obs.get_ee_pose(env, asset_name=asset_name)  # (N,6), xyz + wx wy wz
+        state6 = local_obs.get_ee_pose(env, asset_name=asset_name)
         wrench6 = local_ft_sensor.get_6axis_ft_fixed_joint(
             env=env,
             asset_name=asset_name,
@@ -256,29 +222,10 @@ def rl_step_hook(
         )
         force3 = wrench6[:, :3]
 
-        term = _safe_get_action_term(env, action_term_name=action_term_name)
+        _ = _safe_get_action_term(env, action_term_name=action_term_name)
 
-        step = int(env.episode_length_buf[0].item()) if hasattr(env, "episode_length_buf") else 0
         sim_time = float(getattr(env, "common_step_counter", 0)) * float(getattr(env, "step_dt", 0.02))
 
-        path_idx = int(term.path_index[0].item()) if hasattr(term, "path_index") else 0
-        traj_len = int(getattr(term, "traj_length", 0))
-        done = bool(term.path_done[0].item()) if hasattr(term, "path_done") else False
-
-        # position error for display only
-        if hasattr(term, "des_pos"):
-            current_xyz_m = state6[0, :3] * 0.001   # state6 xyz is mm
-            target_xyz_m = term.des_pos[0]
-            pos_err_mm = float((torch.linalg.norm(target_xyz_m - current_xyz_m) * 1000.0).item())
-        else:
-            pos_err_mm = 0.0
-
-        if hasattr(term, "des_force"):
-            target_force = term.des_force[0].detach().cpu()
-        else:
-            target_force = torch.zeros(3)
-
-        # visualization record
         rl_step(
             env_ids=env_ids,
             state6=state6,
@@ -286,55 +233,13 @@ def rl_step_hook(
             sim_time=sim_time,
         )
 
-        # unified debug print
-        if hasattr(term, "cfg") and getattr(term.cfg, "enable_debug_print", False):
-            interval = int(getattr(term.cfg, "debug_print_interval", 10))
-            debug_env_id = int(getattr(term.cfg, "debug_env_id", 0))
-
-            if interval <= 0 or (step % interval == 0):
-                raw_target_xyz = term.des_pos_mm_raw[debug_env_id].detach().cpu() if hasattr(term, "des_pos_mm_raw") else torch.zeros(3)
-                target_xyz = (term.des_pos[debug_env_id] * 1000.0).detach().cpu() if hasattr(term, "des_pos") else torch.zeros(3)
-                target_wxyz = term.des_wxyz_raw[debug_env_id].detach().cpu() if hasattr(term, "des_wxyz_raw") else torch.zeros(3)
-
-                current_xyz = state6[debug_env_id, :3].detach().cpu()
-                current_wxyz = state6[debug_env_id, 3:6].detach().cpu()
-
-                local_debug.print_action_debug_status(
-                    env_id=debug_env_id,
-                    global_step=step,
-                    path_index=path_idx,
-                    traj_length=traj_len,
-                    waypoint_steps=int(term.steps_at_waypoint[debug_env_id].item()) if hasattr(term, "steps_at_waypoint") else 0,
-                    path_done=done,
-                    raw_target_xyz=raw_target_xyz,
-                    raw_target_force=target_force,
-                    target_xyz=target_xyz,
-                    target_wxyz=target_wxyz,
-                    target_force=target_force,
-                    current_xyz=current_xyz,
-                    current_wxyz=current_wxyz,
-                    pos_err_norm=pos_err_mm,
-                    rot_err_norm=float(torch.linalg.norm(
-                        local_obs._spatial_angle_to_quat_torch(target_wxyz.view(1, 3))[:, 1:4]
-                    ).item()) if hasattr(local_obs, "_spatial_angle_to_quat_torch") else 0.0,
-                    episode_count=_episode_counter,
-                    reward_total=None,
-                    reward_score=None,
-                    penalty_score=None,
-                )
-
     except Exception as e:
-        print(f"[Visualization] rl_step_hook failed: {e}")
+        local_debug.print_exception("Visualization rl_step_hook failed", e)
 
-    # dummy observation term output
     return torch.zeros((env.num_envs, 1), device=env.device, dtype=torch.float32)
 
 
 def on_episode_reset(env, env_ids=None):
-    """
-    EventTerm(mode='reset')에서 호출되는 종료 훅.
-    초기 reset에서는 저장하지 않고, 실제 에피소드가 진행된 후 reset될 때만 저장.
-    """
     global _has_seen_any_step
 
     try:
@@ -345,4 +250,4 @@ def on_episode_reset(env, env_ids=None):
             rl_episode_done()
 
     except Exception as e:
-        print(f"[Visualization] on_episode_reset failed: {e}")
+        local_debug.print_exception("Visualization on_episode_reset failed", e)

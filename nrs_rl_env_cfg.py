@@ -80,6 +80,9 @@ class ActionsCfg:
     arm_action = local_action.AdmittanceControlActionCfg(
         asset_name="robot",
         body_name="spindle_link",
+        fixed_joint_name="tool0_to_spindle",
+        joint_prim_relpath="joints",
+
         hdf5_file_path=HDF5_TRAJ_PATH,
         position_dataset_key="position",
         force_dataset_key="force",
@@ -89,19 +92,33 @@ class ActionsCfg:
         dls_lambda=0.10,
         ik_step_size=0.60,
         max_dq=0.08,
+        ik_inner_iters=5,
 
         max_pos_err=0.05,
         max_rot_err=0.30,
 
-        waypoint_stride=1,
-        waypoint_pos_tol=0.02,
-        waypoint_rot_tol=0.20,
-        max_steps_per_waypoint=120,
-
         tcp_length_offset_m=0.20,
         tcp_offset_axis="local_z_neg",
-
         z_target_offset_m=0.0,
+
+        approach_pos_tol_mm=2.0,
+        approach_rot_tol_rad=0.05,
+
+        force_md_ratio=1000.0,
+        force_fc_fext=50.0,
+        force_free_mass=2.0,
+        force_free_damping=6000.0,
+        force_free_stiffness=2000.0,
+        force_contact_stiffness=0.0,
+        force_recovery_tau=3.0,
+        force_action_low=(-0.25, -0.25),
+        force_action_high=(0.25, 0.25),
+        force_mass_min=0.5,
+        force_mass_max=5.0,
+        force_alpha_min=0.5,
+        force_alpha_max=3.0,
+        force_alpha_rate_up=4.0,
+        force_alpha_rate_down=4.0,
 
         enable_debug_print=True,
         debug_print_interval=10,
@@ -169,7 +186,6 @@ class ObservationCfg:
             },
         )
 
-        # visualization step hook
         visualization_step = ObsTerm(
             func=local_vis.rl_step_hook,
             params={
@@ -206,7 +222,6 @@ class EventCfg:
         },
     )
 
-    # visualization episode-end hook
     finalize_visualization_episode = EventTerm(
         func=local_vis.on_episode_reset,
         mode="reset",
@@ -304,7 +319,6 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
         self.decimation = 1
         self.sim.render_interval = self.decimation
 
-        # termination is controlled by trajectory_finished()
         self.episode_length_s = 9999.0
 
         self.viewer.eye = (3.5, 3.5, 3.5)
