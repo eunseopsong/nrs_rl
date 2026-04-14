@@ -14,6 +14,28 @@ from pxr import UsdPhysics
 from ....utils import debug as local_debug
 
 
+# ============================================================
+# FT preprocessing config
+# ============================================================
+# If your contact should be positive but raw sensor reports negative,
+# keep this as -1.0. If the opposite happens, change to +1.0.
+FT_FZ_SIGN = -1.0
+
+# Number of initial samples used to estimate static bias.
+FT_BIAS_INIT_SAMPLES = 100
+
+# EMA for Fz only (main signal used by force control).
+FT_USE_FZ_EMA = True
+FT_FZ_EMA_ALPHA = 0.07
+
+# Small-signal deadbands.
+FT_FORCE_DEADBAND = 0.05   # N
+FT_TORQUE_DEADBAND = 0.005 # Nm (or sensor torque unit)
+
+# Whether to also estimate/remove static bias for all 6 channels.
+FT_USE_FULL_WRENCH_BIAS = True
+
+
 def _to_scalar_index(idx_obj):
     if isinstance(idx_obj, int):
         return idx_obj
@@ -128,6 +150,127 @@ def _init_fixed_joint_ft_cache(
     return cache
 
 
+def _maybe_reset_filter_state(env: "ManagerBasedRLEnv", cache_key, num_envs: int, device):
+    if not hasattr(env, "_ft6_filter_state"):
+        env._ft6_filter_state = {}
+
+    need_init = cache_key not in env._ft6_filter_state
+    if need_init:
+        env._ft6_filter_state[cache_key] = {
+            "bias_accum": torch.zeros((num_envs, 6), device=device, dtype=torch.float32),
+            "bias_count": torch.zeros((num_envs,), device=device, dtype=torch.long),
+            "bias": torch.zeros((num_envs, 6), device=device, dtype=torch.float32),
+            "bias_ready": torch.zeros((num_envs,), device=device, dtype=torch.bool),
+            "fz_ema": torch.zeros((num_envs,), device=device, dtype=torch.float32),
+            "fz_ema_ready": torch.zeros((num_envs,), device=device, dtype=torch.bool),
+        }
+        return env._ft6_filter_state[cache_key]
+
+    state = env._ft6_filter_state[cache_key]
+
+    # Episode reset handling
+    if hasattr(env, "episode_length_buf"):
+        reset_mask = (env.episode_length_buf == 0)
+        if torch.any(reset_mask):
+            state["bias_accum"][reset_mask] = 0.0
+            state["bias_count"][reset_mask] = 0
+            state["bias"][reset_mask] = 0.0
+            state["bias_ready"][reset_mask] = False
+            state["fz_ema"][reset_mask] = 0.0
+            state["fz_ema_ready"][reset_mask] = False
+
+    return state
+
+
+def _apply_deadband(wrench: torch.Tensor) -> torch.Tensor:
+    out = wrench.clone()
+
+    # force deadband
+    out[:, 0:3] = torch.where(
+        torch.abs(out[:, 0:3]) < FT_FORCE_DEADBAND,
+        torch.zeros_like(out[:, 0:3]),
+        out[:, 0:3],
+    )
+
+    # torque deadband
+    out[:, 3:6] = torch.where(
+        torch.abs(out[:, 3:6]) < FT_TORQUE_DEADBAND,
+        torch.zeros_like(out[:, 3:6]),
+        out[:, 3:6],
+    )
+    return out
+
+
+def _preprocess_wrench(env: "ManagerBasedRLEnv", cache_key, wrench: torch.Tensor) -> torch.Tensor:
+    """
+    Preprocess fixed-joint FT wrench.
+
+    Applied operations:
+    1) static bias initialization/removal
+    2) Fz sign convention
+    3) Fz EMA
+    4) deadband
+    """
+    state = _maybe_reset_filter_state(env, cache_key, wrench.shape[0], wrench.device)
+
+    out = wrench.clone()
+
+    # --------------------------------------------------------
+    # 1) Static bias init / removal
+    # --------------------------------------------------------
+    bias_ready = state["bias_ready"]
+    not_ready = ~bias_ready
+
+    if torch.any(not_ready):
+        state["bias_accum"][not_ready] += out[not_ready]
+        state["bias_count"][not_ready] += 1
+
+        enough = state["bias_count"] >= FT_BIAS_INIT_SAMPLES
+        newly_ready = enough & (~state["bias_ready"])
+        if torch.any(newly_ready):
+            counts = state["bias_count"][newly_ready].to(dtype=torch.float32).unsqueeze(-1)
+            state["bias"][newly_ready] = state["bias_accum"][newly_ready] / counts
+            state["bias_ready"][newly_ready] = True
+            state["fz_ema_ready"][newly_ready] = False
+
+    if FT_USE_FULL_WRENCH_BIAS:
+        ready_mask = state["bias_ready"]
+        if torch.any(ready_mask):
+            out[ready_mask] = out[ready_mask] - state["bias"][ready_mask]
+    else:
+        ready_mask = state["bias_ready"]
+        if torch.any(ready_mask):
+            out[ready_mask, 2] = out[ready_mask, 2] - state["bias"][ready_mask, 2]
+
+    # --------------------------------------------------------
+    # 2) Fz sign convention
+    # --------------------------------------------------------
+    out[:, 2] = FT_FZ_SIGN * out[:, 2]
+
+    # --------------------------------------------------------
+    # 3) Fz EMA
+    # --------------------------------------------------------
+    if FT_USE_FZ_EMA:
+        fz = out[:, 2].clone()
+        ema_ready = state["fz_ema_ready"]
+
+        init_mask = ~ema_ready
+        if torch.any(init_mask):
+            state["fz_ema"][init_mask] = fz[init_mask]
+            state["fz_ema_ready"][init_mask] = True
+
+        alpha = FT_FZ_EMA_ALPHA
+        state["fz_ema"] = alpha * fz + (1.0 - alpha) * state["fz_ema"]
+        out[:, 2] = state["fz_ema"]
+
+    # --------------------------------------------------------
+    # 4) deadband
+    # --------------------------------------------------------
+    out = _apply_deadband(out)
+
+    return out
+
+
 def get_6axis_ft_fixed_joint(
     env: "ManagerBasedRLEnv",
     asset_name: str = "robot",
@@ -139,8 +282,16 @@ def get_6axis_ft_fixed_joint(
     Read 6-axis wrench entering the child link through the fixed joint.
     Physically this is the reaction wrench transmitted by `fixed_joint_name`
     onto the child link (body1 side).
+
+    Returned wrench is preprocessed with:
+    - bias removal
+    - Fz sign convention
+    - Fz EMA
+    - deadband
     """
     try:
+        cache_key = (asset_name, fixed_joint_name, joint_prim_relpath)
+
         cache = _init_fixed_joint_ft_cache(
             env=env,
             asset_name=asset_name,
@@ -177,6 +328,8 @@ def get_6axis_ft_fixed_joint(
 
         if wrench.shape[-1] != 6:
             raise RuntimeError(f"[FT] Expected last dim=6, got {tuple(wrench.shape)}")
+
+        wrench = _preprocess_wrench(env, cache_key, wrench)
 
         local_debug.print_ft_sensor_debug(int(env.common_step_counter), wrench[0])
         return wrench

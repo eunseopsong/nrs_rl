@@ -201,10 +201,10 @@ _HOME_Q = torch.tensor(
 
 class AdmittanceControlAction(ActionTerm):
     """
-    XY + orientation: always path tracking
+    XY + orientation : always path tracking
     Z:
-      - phase 0: short contact acquisition
-      - phase 1: pybind force control
+      - phase 0 : explicit incremental contact search
+      - phase 1 : pybind z-force control
     """
 
     cfg: "AdmittanceControlActionCfg"
@@ -236,22 +236,28 @@ class AdmittanceControlAction(ActionTerm):
         self.current_target_index = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
         self.path_done = torch.zeros(self._num_envs_local, dtype=torch.bool, device=self.device)
 
-        # 0: contact acquisition, 1: z-force control
         self.z_control_phase = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
-
-        self.search_anchor_z_mm = torch.zeros(self._num_envs_local, dtype=torch.float32, device=self.device)
-        self.search_step_count = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
-        self.search_direction = torch.full((self._num_envs_local,), float(self.cfg.contact_search_direction), dtype=torch.float32, device=self.device)
+        self.search_direction = torch.full(
+            (self._num_envs_local,),
+            float(self.cfg.contact_search_direction),
+            dtype=torch.float32,
+            device=self.device,
+        )
         self.search_flip_used = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
+        self.search_total_offset_mm = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
 
         self.des_pos_mm_raw = torch.zeros((self._num_envs_local, 3), device=self.device)
         self.des_wxyz_raw = torch.zeros((self._num_envs_local, 3), device=self.device)
         self.des_force = torch.zeros((self._num_envs_local, 3), device=self.device)
 
         self.cmd_target_xyz_mm = torch.zeros((self._num_envs_local, 3), dtype=torch.float32, device=self.device)
+        self.prev_cmd_target_xyz_mm = torch.zeros((self._num_envs_local, 3), dtype=torch.float32, device=self.device)
 
         self.prev_q_cmd_6 = torch.zeros((self._num_envs_local, 6), device=self.device)
         self.prev_valid = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
+
+        self.contact_on_count = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
+        self.contact_off_count = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
 
         self.kin = y2_pb.UR10eKinematics(
             dt=float(getattr(y2_cfg, "CONTROL_PERIOD", self._step_dt_local)),
@@ -396,6 +402,15 @@ class AdmittanceControlAction(ActionTerm):
     def _reset_force_controller_for_env(self, env_id: int, xd_mm: float):
         self.force_controllers[env_id].reset(float(xd_mm))
 
+    def _limit_z_slew(self, env_id: int, target_pos_mm: torch.Tensor) -> torch.Tensor:
+        out = target_pos_mm.clone()
+        prev_z = float(self.prev_cmd_target_xyz_mm[env_id, 2].item())
+        cur_z = float(target_pos_mm[2].item())
+        dz = cur_z - prev_z
+        dz = max(min(dz, self.cfg.max_z_cmd_step_mm), -self.cfg.max_z_cmd_step_mm)
+        out[2] = prev_z + dz
+        return out
+
     def reset(self, env_ids=None):
         super().reset(env_ids)
         if env_ids is None:
@@ -409,10 +424,9 @@ class AdmittanceControlAction(ActionTerm):
         self.path_done[env_ids] = False
 
         self.z_control_phase[env_ids] = 0
-        self.search_anchor_z_mm[env_ids] = 0.0
-        self.search_step_count[env_ids] = 0
         self.search_direction[env_ids] = float(self.cfg.contact_search_direction)
         self.search_flip_used[env_ids] = False
+        self.search_total_offset_mm[env_ids] = 0.0
 
         des = self.traj_positions[0].unsqueeze(0).repeat(len(env_ids), 1)
         frc = self.traj_forces[0].unsqueeze(0).repeat(len(env_ids), 1)
@@ -421,9 +435,13 @@ class AdmittanceControlAction(ActionTerm):
         self.des_wxyz_raw[env_ids] = des[:, 3:6]
         self.des_force[env_ids] = frc
         self.cmd_target_xyz_mm[env_ids] = des[:, 0:3]
+        self.prev_cmd_target_xyz_mm[env_ids] = des[:, 0:3]
 
         self.prev_q_cmd_6[env_ids] = 0.0
         self.prev_valid[env_ids] = False
+
+        self.contact_on_count[env_ids] = 0
+        self.contact_off_count[env_ids] = 0
 
         for env_id in env_ids.tolist():
             xd0 = float(self.traj_positions[0, 2].item() + self.cfg.z_target_offset_m * 1000.0)
@@ -460,8 +478,9 @@ class AdmittanceControlAction(ActionTerm):
             q_seed = self.prev_q_cmd_6[env_id] if self.prev_valid[env_id] else q[env_id]
             cur_pos_mm, _, _, _ = self._fk_pose_pybind_corrected(q_seed)
 
-            raw_fz = float(wrench6[env_id, 2].item())
-            measured_fz = float(self.cfg.fz_sign * raw_fz)
+            # sensor output is already preprocessed in six_axis_ft_sensor.py
+            measured_fz = float(wrench6[env_id, 2].item())
+            abs_fz = abs(measured_fz)
 
             self.des_pos_mm_raw[env_id] = self.traj_positions[idx, 0:3]
             self.des_wxyz_raw[env_id] = self.traj_positions[idx, 3:6]
@@ -472,37 +491,40 @@ class AdmittanceControlAction(ActionTerm):
             target_rotm = spatial_to_rotmat(self.traj_positions[idx, 3:6].view(1, 3)).squeeze(0)
 
             z_phase = int(self.z_control_phase[env_id].item())
-
-            # XY/orientation always follow path
             target_pos_mm = nominal_pos_mm.clone()
 
             if z_phase == 0:
-                # short contact acquisition on Z only
-                if self.search_step_count[env_id].item() == 0:
-                    self.search_anchor_z_mm[env_id] = cur_pos_mm[2]
+                # explicit incremental search: always move current z by one step
+                delta = float(self.search_direction[env_id].item()) * self.cfg.contact_search_step_mm
+                new_total = float(self.search_total_offset_mm[env_id].item()) + delta
 
-                search_offset = float(self.search_step_count[env_id].item()) * self.cfg.contact_search_step_mm
-                search_offset = min(search_offset, self.cfg.contact_search_max_offset_mm)
-
-                z_cmd = float(self.search_anchor_z_mm[env_id].item()) + float(self.search_direction[env_id].item()) * search_offset
-                target_pos_mm[2] = z_cmd
-
-                self.cmd_target_xyz_mm[env_id] = target_pos_mm
-                self.search_step_count[env_id] += 1
-
-                if measured_fz >= self.cfg.contact_on_threshold_n:
-                    self.z_control_phase[env_id] = 1
-                    self._reset_force_controller_for_env(env_id, float(cur_pos_mm[2].item()))
-                else:
-                    if (search_offset >= self.cfg.contact_search_max_offset_mm) and (not bool(self.search_flip_used[env_id].item())):
+                if abs(new_total) > self.cfg.contact_search_max_offset_mm:
+                    if not bool(self.search_flip_used[env_id].item()):
                         self.search_direction[env_id] = -self.search_direction[env_id]
-                        self.search_step_count[env_id] = 0
                         self.search_flip_used[env_id] = True
+                        delta = float(self.search_direction[env_id].item()) * self.cfg.contact_search_step_mm
+                        new_total = 0.0
+                    else:
+                        delta = 0.0
+
+                target_pos_mm[2] = float(cur_pos_mm[2].item()) + delta
+                target_pos_mm = self._limit_z_slew(env_id, target_pos_mm)
+                self.cmd_target_xyz_mm[env_id] = target_pos_mm
+                self.search_total_offset_mm[env_id] = new_total
+
+                if abs_fz >= self.cfg.contact_on_threshold_n:
+                    self.contact_on_count[env_id] += 1
+                else:
+                    self.contact_on_count[env_id] = 0
+
+                if int(self.contact_on_count[env_id].item()) >= int(self.cfg.contact_on_dwell_steps):
+                    self.z_control_phase[env_id] = 1
+                    self.contact_off_count[env_id] = 0
+                    self._reset_force_controller_for_env(env_id, float(cur_pos_mm[2].item()))
 
             else:
-                # Z force control only
                 fd = float(self.traj_forces[idx, 2].item())
-                fext = float(measured_fz)
+                fext = float(abs_fz)
 
                 fc_out = self.force_controllers[env_id].step(
                     float(nominal_pos_mm[2].item()),
@@ -512,20 +534,30 @@ class AdmittanceControlAction(ActionTerm):
                 )
 
                 z_cmd = float(fc_out[0])
+                z_cmd = max(
+                    nominal_pos_mm[2].item() - self.cfg.max_force_z_deviation_mm,
+                    min(nominal_pos_mm[2].item() + self.cfg.max_force_z_deviation_mm, z_cmd),
+                )
                 target_pos_mm[2] = z_cmd
+                target_pos_mm = self._limit_z_slew(env_id, target_pos_mm)
                 self.cmd_target_xyz_mm[env_id] = target_pos_mm
 
-                if measured_fz >= self.cfg.contact_off_threshold_n:
+                if abs_fz <= self.cfg.contact_off_threshold_n:
+                    self.contact_off_count[env_id] += 1
+                else:
+                    self.contact_off_count[env_id] = 0
+
+                if int(self.contact_off_count[env_id].item()) >= int(self.cfg.contact_off_dwell_steps):
+                    self.z_control_phase[env_id] = 0
+                    self.contact_on_count[env_id] = 0
+                    self.search_direction[env_id] = float(self.cfg.contact_search_direction)
+                    self.search_flip_used[env_id] = False
+                    self.search_total_offset_mm[env_id] = 0.0
+                else:
                     if idx >= (self.traj_length - 1):
                         self.path_done[env_id] = True
                     else:
                         self.path_index[env_id] += 1
-                else:
-                    self.z_control_phase[env_id] = 0
-                    self.search_anchor_z_mm[env_id] = cur_pos_mm[2]
-                    self.search_step_count[env_id] = 0
-                    self.search_direction[env_id] = float(self.cfg.contact_search_direction)
-                    self.search_flip_used[env_id] = False
 
             pybind_called = True
             q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_iterative_ik(
@@ -540,6 +572,7 @@ class AdmittanceControlAction(ActionTerm):
             self.prev_q_cmd_6[env_id] = q_cmd6
             self.prev_valid[env_id] = True
             q_cmd_all[env_id, :6] = q_cmd6
+            self.prev_cmd_target_xyz_mm[env_id] = self.cmd_target_xyz_mm[env_id]
 
         self.robot.set_joint_position_target(q_cmd_all)
 
@@ -575,8 +608,8 @@ class AdmittanceControlAction(ActionTerm):
                 )
                 local_debug.print_info(
                     f"[Action Mode ] env={env_id} mode={mode_name} "
-                    f"| z_phase={z_phase} | raw_fz={float(wrench6[env_id,2].item()):.6f} "
-                    f"| measured_fz={float(self.cfg.fz_sign * wrench6[env_id,2].item()):.6f}"
+                    f"| z_phase={z_phase} | measured_fz={float(wrench6[env_id,2].item()):.6f} "
+                    f"| abs_fz={abs(float(wrench6[env_id,2].item())):.6f}"
                 )
 
 
@@ -610,12 +643,15 @@ class AdmittanceControlActionCfg(ActionTermCfg):
 
     contact_on_threshold_n: float = 1.0
     contact_off_threshold_n: float = 0.5
+    contact_on_dwell_steps: int = 3
+    contact_off_dwell_steps: int = 5
+
     contact_search_step_mm: float = 0.20
     contact_search_max_offset_mm: float = 10.0
     contact_search_direction: float = 1.0
 
-    # based on current logs, raw_fz positive seems to mean compression
-    fz_sign: float = 1.0
+    max_z_cmd_step_mm: float = 0.30
+    max_force_z_deviation_mm: float = 3.0
 
     force_md_ratio: float = 1000.0
     force_fc_fext: float = 50.0

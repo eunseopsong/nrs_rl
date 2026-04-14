@@ -103,10 +103,14 @@ class ActionsCfg:
 
         contact_on_threshold_n=1.0,
         contact_off_threshold_n=0.5,
+        contact_on_dwell_steps=3,
+        contact_off_dwell_steps=5,
         contact_search_step_mm=0.20,
         contact_search_max_offset_mm=10.0,
         contact_search_direction=1.0,
-        fz_sign=1.0,
+
+        max_z_cmd_step_mm=0.30,
+        max_force_z_deviation_mm=3.0,
 
         force_md_ratio=1000.0,
         force_fc_fext=50.0,
