@@ -112,8 +112,8 @@ UR10E_W_SPINDLE_CFG.ee_frame_name = EE_FRAME_NAME
 # -----------------------------------------------------------------------------
 UR10E_W_SPINDLE_HIGH_PD_CFG = UR10E_W_SPINDLE_CFG.copy()
 UR10E_W_SPINDLE_HIGH_PD_CFG.spawn.rigid_props.disable_gravity = True
-UR10E_W_SPINDLE_HIGH_PD_CFG.actuators["ur10e_arm"].stiffness = 400.0
-UR10E_W_SPINDLE_HIGH_PD_CFG.actuators["ur10e_arm"].damping = 60.0
+UR10E_W_SPINDLE_HIGH_PD_CFG.actuators["ur10e_arm"].stiffness = 3000.0
+UR10E_W_SPINDLE_HIGH_PD_CFG.actuators["ur10e_arm"].damping = 100.0
 UR10E_W_SPINDLE_HIGH_PD_CFG.ee_frame_name = EE_FRAME_NAME
 
 # -----------------------------------------------------------------------------

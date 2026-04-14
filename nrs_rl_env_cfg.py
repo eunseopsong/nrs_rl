@@ -90,11 +90,11 @@ class ActionsCfg:
         ik_step_size=0.60,
         max_dq=0.08,
 
-        max_pos_err=0.05,          # m
+        max_pos_err=0.05,
         max_rot_err=0.30,
 
         waypoint_stride=100,
-        waypoint_pos_tol=0.02,     # m
+        waypoint_pos_tol=0.02,
         waypoint_rot_tol=0.20,
         max_steps_per_waypoint=120,
 

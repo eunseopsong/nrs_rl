@@ -7,12 +7,24 @@ import math
 import os
 import h5py
 import torch
+import importlib
 
 from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.utils import configclass
 
 from ..utils import debug as local_debug
+
+
+# =========================================================
+# pybind import
+# =========================================================
+y2_cfg = importlib.import_module(
+    "nrs_rl.tasks.manager_based.nrs_rl.y2_control_pybind.y2_control_py.config"
+)
+y2_pb = importlib.import_module(
+    "nrs_rl.tasks.manager_based.nrs_rl.y2_control_pybind.y2_control_py._y2_control_pybind"
+)
 
 
 # =========================================================
@@ -29,7 +41,6 @@ def quat_conjugate(q: torch.Tensor) -> torch.Tensor:
 
 
 def quat_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
-    # q = [w, x, y, z]
     w1, x1, y1, z1 = q1[:, 0], q1[:, 1], q1[:, 2], q1[:, 3]
     w2, x2, y2, z2 = q2[:, 0], q2[:, 1], q2[:, 2], q2[:, 3]
 
@@ -38,12 +49,6 @@ def quat_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
     y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
     z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
     return torch.stack([w, x, y, z], dim=-1)
-
-
-def quat_conjugate_single(q: torch.Tensor) -> torch.Tensor:
-    out = q.clone()
-    out[..., 1:] = -out[..., 1:]
-    return out
 
 
 def quat_to_rotmat(q: torch.Tensor) -> torch.Tensor:
@@ -68,10 +73,6 @@ def quat_to_rotmat(q: torch.Tensor) -> torch.Tensor:
 
 
 def rotmat_to_quat(R: torch.Tensor) -> torch.Tensor:
-    """
-    R: [N, 3, 3]
-    return q: [N, 4] = [w, x, y, z]
-    """
     n = R.shape[0]
     q = torch.zeros((n, 4), device=R.device, dtype=R.dtype)
 
@@ -113,10 +114,6 @@ def rotmat_to_quat(R: torch.Tensor) -> torch.Tensor:
 
 
 def spatial_to_rotmat(spatial: torch.Tensor) -> torch.Tensor:
-    """
-    spatial: (N, 3) = [wx wy wz]  (rotation vector / axis-angle vector)
-    return : (N, 3, 3)
-    """
     device = spatial.device
     dtype = spatial.dtype
     n = spatial.shape[0]
@@ -160,10 +157,6 @@ def spatial_to_quat(spatial: torch.Tensor) -> torch.Tensor:
 
 
 def rotmat_to_spatial(R: torch.Tensor) -> torch.Tensor:
-    """
-    R: (N, 3, 3)
-    return: (N, 3) = [wx wy wz]
-    """
     trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]
     cos_angle = (trace - 1.0) / 2.0
     cos_angle = torch.clamp(cos_angle, -1.0, 1.0)
@@ -225,21 +218,8 @@ def rotmat_to_spatial(R: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def orientation_error_world(cur_quat: torch.Tensor, des_quat: torch.Tensor) -> torch.Tensor:
-    cur_quat = normalize_quat(cur_quat)
-    des_quat = normalize_quat(des_quat)
-
-    q_err = quat_multiply(des_quat, quat_conjugate(cur_quat))
-    q_err = normalize_quat(q_err)
-
-    sign = torch.where(q_err[:, 0:1] < 0.0, -1.0, 1.0)
-    q_err = q_err * sign
-    return 2.0 * q_err[:, 1:4]
-
-
 # =========================================================
 # Fixed orientation calibration
-# user frame(home) = [0, 0, 1.5708]
 # =========================================================
 _HOME_Q = torch.tensor(
     [0.5585, -2.0949, -1.5711, -1.0472, 1.5708, 0.5585],
@@ -247,53 +227,17 @@ _HOME_Q = torch.tensor(
 )
 
 
-def _get_user_to_world_quat(device: torch.device) -> torch.Tensor:
-    """
-    Build constant quaternion q_uw such that:
-      R_world = R(q_uw) * R_user
-    where user-home is defined as [0, 0, 1.5708].
-    """
-    q_home_user = spatial_to_quat(
-        torch.tensor([[0.0, 0.0, 1.5708]], dtype=torch.float32, device=device)
-    )
-
-    # world-home from Isaac raw EE quaternion convention
-    # this is treated as the raw home orientation of spindle_link
-    # using the same robot model convention as the simulator.
-    # NOTE: action control uses only this constant transform.
-    # It does not alter positions.
-    #
-    # Since the user requested the same convention as observation/home,
-    # we use this fixed raw-home quaternion derived from the home pose
-    # through observation/FK-consistent convention:
-    #
-    # Here we approximate using the known raw-home orientation observed
-    # from the simulator-side home pose:
-    # [w, x, y, z] equivalent to current home quaternion in raw world frame.
-    #
-    # Instead of hardcoding a numerical quaternion, the transform is kept as:
-    # q_uw = q_world_home * conj(q_user_home)
-    #
-    # The raw world-home is obtained from the actual simulator at runtime
-    # using env body_quat_w on the first apply.
-    raise RuntimeError("q_user_to_world is initialized inside AdmittanceControlAction at runtime.")
-
-
 # =========================================================
 # Action Term
 # =========================================================
 class AdmittanceControlAction(ActionTerm):
     """
-    Multi-env HDF5 pose path follower.
+    Multi-env HDF5 pose path follower using pybind FK/Jacobian inner-loop IK.
 
-    Control:
-    - current EE orientation is used in raw Isaac/world convention
-    - target wx wy wz from HDF5 is converted from USER convention to WORLD convention
-    - this keeps control stable while debug/output can still use USER convention
-
-    HDF5:
-    - position = [x, y, z, wx, wy, wz] with xyz in mm
-    - force    = [fx, fy, fz]
+    Unit convention:
+    - position    : mm
+    - orientation : rad
+    - force       : N
     """
 
     cfg: "AdmittanceControlActionCfg"
@@ -328,30 +272,33 @@ class AdmittanceControlAction(ActionTerm):
         )
 
         stride = max(1, int(self.cfg.waypoint_stride))
-        self.traj_positions = traj_full[::stride].contiguous()   # [T, 6], xyz in mm
-        self.traj_forces = force_full[::stride].contiguous()     # [T, 3]
+        self.traj_positions = traj_full[::stride].contiguous()   # [T, 6] = [mm, mm, mm, rad, rad, rad]
+        self.traj_forces = force_full[::stride].contiguous()     # [T, 3] = [N, N, N]
         self.traj_length = self.traj_positions.shape[0]
 
         self.path_index = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
         self.steps_at_waypoint = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
         self.path_done = torch.zeros(self._num_envs_local, dtype=torch.bool, device=self.device)
 
-        # internal desired target for IK: meters + WORLD quaternion
-        self.des_pos = torch.zeros((self._num_envs_local, 3), device=self.device)   # m
-        self.des_quat_world = torch.zeros((self._num_envs_local, 4), device=self.device)
-        self.des_quat_world[:, 0] = 1.0
-
-        # raw target cache for debug
         self.des_pos_mm_raw = torch.zeros((self._num_envs_local, 3), device=self.device)
         self.des_wxyz_raw = torch.zeros((self._num_envs_local, 3), device=self.device)
         self.des_force = torch.zeros((self._num_envs_local, 3), device=self.device)
 
-        # USER <-> WORLD fixed transform
-        # q_user_to_world satisfies:
-        #   q_world = q_user_to_world * q_user
-        self.q_user_to_world = None
-        self.q_world_to_user = None
-        self._orientation_tf_ready = False
+        self.prev_q_cmd_6 = torch.zeros((self._num_envs_local, 6), device=self.device)
+        self.prev_valid = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
+
+        self.kin = y2_pb.UR10eKinematics(
+            dt=float(getattr(y2_cfg, "CONTROL_PERIOD", self._step_dt_local)),
+            ee2tcp=getattr(y2_cfg, "EE2TCP", [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]),
+        )
+
+        # observation.py와 동일한 orientation correction
+        self.R_offset = self._get_orientation_offset_rotm(self.device)
 
         local_debug.print_action_init(
             hdf5_file_path=self.cfg.hdf5_file_path,
@@ -406,7 +353,6 @@ class AdmittanceControlAction(ActionTerm):
 
         return data[:, :6]
 
-
     def _load_hdf5_forces(self, file_path: str, dataset_key: str, expected_rows: int) -> torch.Tensor:
         if not file_path:
             raise ValueError("[Action] hdf5_file_path is empty.")
@@ -433,31 +379,91 @@ class AdmittanceControlAction(ActionTerm):
 
         return data
 
-    def _init_orientation_transform_if_needed(self, ee_quat_world_raw: torch.Tensor):
-        """
-        Build USER -> WORLD fixed orientation transform from actual simulator home orientation.
+    def _get_orientation_offset_rotm(self, device: torch.device) -> torch.Tensor:
+        T_home = self.kin.forward_kinematics(_HOME_Q.detach().cpu().tolist())
+        T_home = torch.tensor(T_home, dtype=torch.float32, device=device)
 
-        At home, the USER convention should be [0, 0, 1.5708].
-        So:
-            q_user_to_world = q_world_home * conj(q_user_home)
-        """
-        if self._orientation_tf_ready:
-            return
+        R_home_fk = T_home[:3, :3]
+        desired_home_spatial = torch.tensor([[0.0, 0.0, 1.5708]], dtype=torch.float32, device=device)
+        R_home_desired = spatial_to_rotmat(desired_home_spatial).squeeze(0)
 
-        q_world_home = normalize_quat(ee_quat_world_raw[0:1].clone())
-        q_user_home = spatial_to_quat(
-            torch.tensor([[0.0, 0.0, 1.5708]], dtype=torch.float32, device=self.device)
-        )
+        return R_home_desired @ R_home_fk.T
 
-        self.q_user_to_world = normalize_quat(quat_multiply(q_world_home, quat_conjugate(q_user_home)))
-        self.q_world_to_user = normalize_quat(quat_conjugate(self.q_user_to_world))
-        self._orientation_tf_ready = True
+    def _fk_pose_pybind_corrected(self, q6: torch.Tensor):
+        T = self.kin.forward_kinematics(q6.detach().cpu().to(torch.float64).tolist())
+        T = torch.tensor(T, dtype=torch.float32, device=self.device)
 
-    def _user_quat_to_world_quat(self, q_user: torch.Tensor) -> torch.Tensor:
-        return normalize_quat(quat_multiply(self.q_user_to_world.repeat(q_user.shape[0], 1), q_user))
+        pos_mm = T[:3, 3]
+        R_fk = T[:3, :3]
+        R_corr = self.R_offset @ R_fk
 
-    def _world_quat_to_user_quat(self, q_world: torch.Tensor) -> torch.Tensor:
-        return normalize_quat(quat_multiply(self.q_world_to_user.repeat(q_world.shape[0], 1), q_world))
+        quat_corr = rotmat_to_quat(R_corr.unsqueeze(0)).squeeze(0)
+        wxyz_corr = rotmat_to_spatial(R_corr.unsqueeze(0)).squeeze(0)
+
+        return pos_mm, quat_corr, wxyz_corr, R_corr
+
+    def _solve_pybind_iterative_ik(
+        self,
+        q_seed: torch.Tensor,
+        target_pos_mm: torch.Tensor,
+        target_rotm: torch.Tensor,
+        inner_iters: int = 5,
+    ):
+        q_iter = q_seed.clone()
+
+        last_pos_err_norm_mm = torch.tensor(0.0, device=self.device)
+        last_rot_err_norm_rad = torch.tensor(0.0, device=self.device)
+        last_dq_norm = 0.0
+
+        q_min = None
+        q_max = None
+        if self.cfg.joint_lower_limits is not None and self.cfg.joint_upper_limits is not None:
+            q_min = torch.tensor(self.cfg.joint_lower_limits, device=self.device, dtype=torch.float32)
+            q_max = torch.tensor(self.cfg.joint_upper_limits, device=self.device, dtype=torch.float32)
+
+        for _ in range(inner_iters):
+            T = self.kin.forward_kinematics(q_iter.detach().cpu().to(torch.float64).tolist())
+            T = torch.tensor(T, dtype=torch.float32, device=self.device)
+
+            pos_cur_mm = T[:3, 3]
+            R_fk = T[:3, :3]
+            R_cur = self.R_offset @ R_fk
+
+            pos_err_mm = target_pos_mm - pos_cur_mm
+            rot_err_rad = rotmat_to_spatial((target_rotm @ R_cur.T).unsqueeze(0)).squeeze(0)
+
+            last_pos_err_norm_mm = torch.linalg.norm(pos_err_mm)
+            last_rot_err_norm_rad = torch.linalg.norm(rot_err_rad)
+
+            pos_err_mm = torch.clamp(
+                pos_err_mm,
+                -self.cfg.max_pos_err * 1000.0,
+                self.cfg.max_pos_err * 1000.0,
+            )
+            rot_err_rad = torch.clamp(
+                rot_err_rad,
+                -self.cfg.max_rot_err,
+                self.cfg.max_rot_err,
+            )
+
+            err_6 = torch.cat([pos_err_mm, rot_err_rad], dim=0)
+
+            J = self.kin.calculate_jacobian(q_iter.detach().cpu().to(torch.float64).tolist())
+            J = torch.tensor(J, dtype=torch.float32, device=self.device)
+
+            I = torch.eye(6, device=self.device, dtype=torch.float32)
+            dq = J.T @ torch.linalg.solve(J @ J.T + (self.cfg.dls_lambda ** 2) * I, err_6.unsqueeze(-1))
+            dq = dq.squeeze(-1)
+
+            dq = torch.clamp(dq, -self.cfg.max_dq, self.cfg.max_dq)
+            last_dq_norm = float(torch.linalg.norm(dq).item())
+
+            q_iter = q_iter + self.cfg.ik_step_size * dq
+
+            if q_min is not None and q_max is not None:
+                q_iter = torch.clamp(q_iter, q_min, q_max)
+
+        return q_iter, last_pos_err_norm_mm, last_rot_err_norm_rad, last_dq_norm
 
     def reset(self, env_ids=None):
         super().reset(env_ids)
@@ -479,150 +485,63 @@ class AdmittanceControlAction(ActionTerm):
         self.des_wxyz_raw[env_ids] = des[:, 3:6]
         self.des_force[env_ids] = frc
 
-        self.des_pos[env_ids] = des[:, 0:3] * 0.001
-
-        # des_quat_world is initialized later once world<->user transform is known
-        self.des_quat_world[env_ids] = torch.tensor(
-            [1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=self.device
-        )
+        self.prev_q_cmd_6[env_ids] = 0.0
+        self.prev_valid[env_ids] = False
 
     def process_actions(self, actions: torch.Tensor):
         self._raw_actions = torch.nan_to_num(actions.clone(), nan=0.0)
         self._processed_actions.zero_()
 
     def apply_actions(self):
-        # -------------------------------------------------
-        # 1) Current EE pose (world/raw)
-        # -------------------------------------------------
-        ee_pos_w = self.robot.data.body_pos_w[:, self.ee_idx, :]
-        env_origins = self._env.scene.env_origins
-        ee_pos = ee_pos_w - env_origins       # m
-
-        ee_quat_world = normalize_quat(self.robot.data.body_quat_w[:, self.ee_idx, :])
-
-        # build fixed USER<->WORLD transform once
-        self._init_orientation_transform_if_needed(ee_quat_world)
-
-        # -------------------------------------------------
-        # 2) Current joints / Jacobian
-        # -------------------------------------------------
         q_all = self.robot.data.joint_pos
         q = q_all[:, :6]
 
-        jac_all = self.robot.root_physx_view.get_jacobians()
-        jacobian = jac_all[:, self.ee_idx - 1, :, :6]
-
-        # -------------------------------------------------
-        # 3) Raw target from HDF5
-        #    raw_des_pos_mm : mm
-        #    raw_des_wxyz   : USER rotation vector
-        # -------------------------------------------------
         des = self.traj_positions[self.path_index]
         frc = self.traj_forces[self.path_index]
 
-        raw_des_pos_mm = des[:, 0:3].clone()
-        raw_des_wxyz = des[:, 3:6].clone()
-
-        self.des_pos_mm_raw = raw_des_pos_mm
-        self.des_wxyz_raw = raw_des_wxyz
-        self.des_force = frc
-
-        # USER target quaternion from dataset
-        des_quat_user = spatial_to_quat(raw_des_wxyz)
-
-        # WORLD quaternion for actual control
-        self.des_quat_world = self._user_quat_to_world_quat(des_quat_user)
-
-        # -------------------------------------------------
-        # 4) TCP / spindle length compensation
-        #    Keep original logic, but in meters internally
-        # -------------------------------------------------
-        raw_des_pos_m = raw_des_pos_mm * 0.001
-
-        offset_local = self._get_local_tcp_offset(
-            length=self.cfg.tcp_length_offset_m,
-            axis=self.cfg.tcp_offset_axis,
-            dtype=raw_des_pos_m.dtype,
-        )
-        rotm_world = quat_to_rotmat(self.des_quat_world)
-        offset_world_like = torch.bmm(rotm_world, offset_local.unsqueeze(-1)).squeeze(-1)
-
-        self.des_pos = raw_des_pos_m + offset_world_like
-        self.des_pos[:, 2] += self.cfg.z_target_offset_m
-
-        # -------------------------------------------------
-        # 5) IK error in WORLD convention
-        # -------------------------------------------------
-        pos_err = self.des_pos - ee_pos
-        rot_err = orientation_error_world(ee_quat_world, self.des_quat_world)
-
-        pos_err_norm = torch.linalg.norm(pos_err, dim=-1)
-        rot_err_norm = torch.linalg.norm(rot_err, dim=-1)
-
-        pos_err_clamped = torch.clamp(pos_err, -self.cfg.max_pos_err, self.cfg.max_pos_err)
-        rot_err_clamped = torch.clamp(rot_err, -self.cfg.max_rot_err, self.cfg.max_rot_err)
-        err_6d = torch.cat([pos_err_clamped, rot_err_clamped], dim=-1)
-
-        dq = self._solve_dls_ik(jacobian, err_6d, self.cfg.dls_lambda)
-        dq = torch.clamp(dq, -self.cfg.max_dq, self.cfg.max_dq)
-
-        q_cmd_6 = q + self.cfg.ik_step_size * dq
-
-        if self.cfg.joint_lower_limits is not None and self.cfg.joint_upper_limits is not None:
-            q_min = torch.tensor(self.cfg.joint_lower_limits, device=self.device, dtype=q_cmd_6.dtype).unsqueeze(0)
-            q_max = torch.tensor(self.cfg.joint_upper_limits, device=self.device, dtype=q_cmd_6.dtype).unsqueeze(0)
-            q_cmd_6 = torch.clamp(q_cmd_6, q_min, q_max)
+        self.des_pos_mm_raw = des[:, 0:3].clone()   # mm
+        self.des_wxyz_raw = des[:, 3:6].clone()     # rad
+        self.des_force = frc                        # N
 
         q_cmd_all = q_all.clone()
-        q_cmd_all[:, :6] = q_cmd_6
-        q_cmd_all = torch.where(torch.isnan(q_cmd_all), q_all, q_cmd_all)
+        pos_err_norm_mm = torch.zeros((self._num_envs_local,), device=self.device)
+        rot_err_norm_rad = torch.zeros((self._num_envs_local,), device=self.device)
+
+        pybind_called = False
+        pybind_success = False
+        pybind_dq_norm = 0.0
+
+        for env_id in range(self._num_envs_local):
+            q_seed = self.prev_q_cmd_6[env_id] if self.prev_valid[env_id] else q[env_id]
+
+            target_pos_mm = self.des_pos_mm_raw[env_id].clone()
+            target_pos_mm[2] += self.cfg.z_target_offset_m * 1000.0
+
+            target_rotm = spatial_to_rotmat(self.des_wxyz_raw[env_id : env_id + 1]).squeeze(0)
+
+            pybind_called = True
+            q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_iterative_ik(
+                q_seed=q_seed,
+                target_pos_mm=target_pos_mm,
+                target_rotm=target_rotm,
+                inner_iters=5,
+            )
+            pybind_success = True
+            pybind_dq_norm = dq_norm
+
+            pos_err_norm_mm[env_id] = pos_e_mm
+            rot_err_norm_rad[env_id] = rot_e_rad
+
+            self.prev_q_cmd_6[env_id] = q_cmd6
+            self.prev_valid[env_id] = True
+
+            q_cmd_all[env_id, :6] = q_cmd6
 
         self.robot.set_joint_position_target(q_cmd_all)
 
-        # -------------------------------------------------
-        # 6) Env-wise waypoint update
-        # -------------------------------------------------
-        self._update_waypoint_progress(pos_err_norm, rot_err_norm)
-
-        # -------------------------------------------------
-        # 7) Debug
-        #    Show USER convention so home becomes [0,0,1.5708]
-        # -------------------------------------------------
-        self._debug_print_status(
-            ee_pos=ee_pos,
-            ee_quat_world=ee_quat_world,
-            pos_err_norm=pos_err_norm,
-            rot_err_norm=rot_err_norm,
+        reached = (pos_err_norm_mm < self.cfg.waypoint_pos_tol * 1000.0) & (
+            rot_err_norm_rad < self.cfg.waypoint_rot_tol
         )
-
-    def _get_local_tcp_offset(self, length: float, axis: str, dtype: torch.dtype) -> torch.Tensor:
-        offset = torch.zeros((self._num_envs_local, 3), device=self.device, dtype=dtype)
-
-        if abs(length) < 1e-9:
-            return offset
-
-        if axis == "local_x_pos":
-            offset[:, 0] = length
-        elif axis == "local_x_neg":
-            offset[:, 0] = -length
-        elif axis == "local_y_pos":
-            offset[:, 1] = length
-        elif axis == "local_y_neg":
-            offset[:, 1] = -length
-        elif axis == "local_z_pos":
-            offset[:, 2] = length
-        elif axis == "local_z_neg":
-            offset[:, 2] = -length
-        else:
-            raise ValueError(
-                f"[Action] Unsupported tcp_offset_axis='{axis}'. "
-                f"Use one of: local_x_pos, local_x_neg, local_y_pos, local_y_neg, local_z_pos, local_z_neg"
-            )
-
-        return offset
-
-    def _update_waypoint_progress(self, pos_err_norm: torch.Tensor, rot_err_norm: torch.Tensor):
-        reached = (pos_err_norm < self.cfg.waypoint_pos_tol) & (rot_err_norm < self.cfg.waypoint_rot_tol)
         timeout = self.steps_at_waypoint >= self.cfg.max_steps_per_waypoint
         advance = (reached | timeout) & (~self.path_done)
 
@@ -638,52 +557,52 @@ class AdmittanceControlAction(ActionTerm):
             self.steps_at_waypoint + 1,
         )
 
-    def _debug_print_status(self, ee_pos, ee_quat_world, pos_err_norm, rot_err_norm):
-        if not self.cfg.enable_debug_print:
-            return
+        if self.cfg.enable_debug_print:
+            global_step = int(self._env.episode_length_buf[0].item())
+            if self.cfg.debug_print_interval <= 0 or global_step % self.cfg.debug_print_interval == 0:
+                env_id = min(self.cfg.debug_env_id, self._num_envs_local - 1)
 
-        global_step = int(self._env.episode_length_buf[0].item())
-        if self.cfg.debug_print_interval > 0 and (global_step % self.cfg.debug_print_interval != 0):
-            return
+                cur_pos_mm, _, cur_wxyz, _ = self._fk_pose_pybind_corrected(q[env_id])
 
-        env_id = min(self.cfg.debug_env_id, self._num_envs_local - 1)
-
-        raw_target_xyz = self.des_pos_mm_raw[env_id].detach().cpu()
-        target_xyz = (self.des_pos[env_id] * 1000.0).detach().cpu()
-        target_wxyz = self.des_wxyz_raw[env_id].detach().cpu()
-
-        current_xyz = (ee_pos[env_id] * 1000.0).detach().cpu()
-
-        current_quat_user = self._world_quat_to_user_quat(ee_quat_world[env_id:env_id + 1])
-        current_wxyz = rotmat_to_spatial(quat_to_rotmat(current_quat_user)).squeeze(0).detach().cpu()
-
-        local_debug.print_action_debug_status(
-            env_id=env_id,
-            global_step=global_step,
-            path_index=int(self.path_index[env_id].item()),
-            traj_length=self.traj_length,
-            waypoint_steps=int(self.steps_at_waypoint[env_id].item()),
-            path_done=bool(self.path_done[env_id].item()),
-            raw_target_xyz=raw_target_xyz,
-            raw_target_force=self.des_force[env_id].detach().cpu(),
-            target_xyz=target_xyz,
-            target_wxyz=target_wxyz,
-            target_force=self.des_force[env_id].detach().cpu(),
-            current_xyz=current_xyz,
-            current_wxyz=current_wxyz,
-            pos_err_norm=float((pos_err_norm[env_id] * 1000.0).item()),   # mm display
-            rot_err_norm=float(rot_err_norm[env_id].item()),
-        )
-
-    def _solve_dls_ik(self, J: torch.Tensor, e: torch.Tensor, damping: float) -> torch.Tensor:
-        n = J.shape[0]
-        I = torch.eye(6, device=J.device, dtype=J.dtype).unsqueeze(0).repeat(n, 1, 1)
-        JJt = J @ J.transpose(1, 2)
-        A = JJt + (damping ** 2) * I
-        e_col = e.unsqueeze(-1)
-        x = torch.linalg.solve(A, e_col)
-        dq = (J.transpose(1, 2) @ x).squeeze(-1)
-        return dq
+                print("=" * 100)
+                print(
+                    f"[Pybind IK   ] called={pybind_called} success={pybind_success} "
+                    f"inner_iters=5 dq_norm={pybind_dq_norm:.6f}"
+                )
+                print(
+                    f"[Action Debug ] env={env_id} | step={global_step} "
+                    f"| h5_index={int(self.path_index[env_id].item())}/{self.traj_length} "
+                    f"| waypoint_steps={int(self.steps_at_waypoint[env_id].item())} "
+                    f"| done={bool(self.path_done[env_id].item())} "
+                    f"| pos_err_norm={float(pos_err_norm_mm[env_id].item()):.6f} "
+                    f"| rot_err_norm={float(rot_err_norm_rad[env_id].item()):.6f}"
+                )
+                print(
+                    f"[Current Pose ] x={float(cur_pos_mm[0]): .6f}, "
+                    f"y={float(cur_pos_mm[1]): .6f}, "
+                    f"z={float(cur_pos_mm[2]): .6f}, "
+                    f"wx={float(cur_wxyz[0]): .6f}, "
+                    f"wy={float(cur_wxyz[1]): .6f}, "
+                    f"wz={float(cur_wxyz[2]): .6f}"
+                )
+                print(
+                    f"[Target Pose  ] x={float(self.des_pos_mm_raw[env_id, 0]): .6f}, "
+                    f"y={float(self.des_pos_mm_raw[env_id, 1]): .6f}, "
+                    f"z={float(self.des_pos_mm_raw[env_id, 2] + self.cfg.z_target_offset_m * 1000.0): .6f}, "
+                    f"wx={float(self.des_wxyz_raw[env_id, 0]): .6f}, "
+                    f"wy={float(self.des_wxyz_raw[env_id, 1]): .6f}, "
+                    f"wz={float(self.des_wxyz_raw[env_id, 2]): .6f}"
+                )
+                print(
+                    f"[Target Force ] Fx={float(self.des_force[env_id, 0]): .6f}, "
+                    f"Fy={float(self.des_force[env_id, 1]): .6f}, "
+                    f"Fz={float(self.des_force[env_id, 2]): .6f}"
+                )
+                print(
+                    f"[Joint Cmd    ] q_now={q[env_id].detach().cpu().numpy()} | "
+                    f"q_cmd={q_cmd_all[env_id, :6].detach().cpu().numpy()}"
+                )
+                print("=" * 100)
 
 
 # =========================================================
@@ -708,15 +627,15 @@ class AdmittanceControlActionCfg(ActionTermCfg):
     max_dq: float = 0.08
 
     max_pos_err: float = 0.05      # m
-    max_rot_err: float = 0.30
+    max_rot_err: float = 0.30      # rad
 
     # waypoint follower
     waypoint_stride: int = 100
     waypoint_pos_tol: float = 0.02     # m
-    waypoint_rot_tol: float = 0.20
+    waypoint_rot_tol: float = 0.20     # rad
     max_steps_per_waypoint: int = 120
 
-    # TCP / spindle compensation
+    # kept for compatibility
     tcp_length_offset_m: float = 0.20
     tcp_offset_axis: str = "local_z_neg"
 
