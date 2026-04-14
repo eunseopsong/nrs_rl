@@ -200,6 +200,13 @@ _HOME_Q = torch.tensor(
 
 
 class AdmittanceControlAction(ActionTerm):
+    """
+    XY + orientation: always path tracking
+    Z:
+      - phase 0: short contact acquisition
+      - phase 1: pybind force control
+    """
+
     cfg: "AdmittanceControlActionCfg"
 
     def __init__(self, cfg, env: ManagerBasedRLEnv):
@@ -229,10 +236,10 @@ class AdmittanceControlAction(ActionTerm):
         self.current_target_index = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
         self.path_done = torch.zeros(self._num_envs_local, dtype=torch.bool, device=self.device)
 
-        # 0: approach first point, 1: contact search, 2: force track
-        self.control_phase = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
+        # 0: contact acquisition, 1: z-force control
+        self.z_control_phase = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
 
-        self.search_anchor_xyz_mm = torch.zeros((self._num_envs_local, 3), dtype=torch.float32, device=self.device)
+        self.search_anchor_z_mm = torch.zeros(self._num_envs_local, dtype=torch.float32, device=self.device)
         self.search_step_count = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
         self.search_direction = torch.full((self._num_envs_local,), float(self.cfg.contact_search_direction), dtype=torch.float32, device=self.device)
         self.search_flip_used = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
@@ -241,7 +248,6 @@ class AdmittanceControlAction(ActionTerm):
         self.des_wxyz_raw = torch.zeros((self._num_envs_local, 3), device=self.device)
         self.des_force = torch.zeros((self._num_envs_local, 3), device=self.device)
 
-        # actual command target used by IK
         self.cmd_target_xyz_mm = torch.zeros((self._num_envs_local, 3), dtype=torch.float32, device=self.device)
 
         self.prev_q_cmd_6 = torch.zeros((self._num_envs_local, 6), device=self.device)
@@ -397,11 +403,13 @@ class AdmittanceControlAction(ActionTerm):
 
         self._raw_actions[env_ids] = 0.0
         self._processed_actions[env_ids] = 0.0
+
         self.path_index[env_ids] = 0
         self.current_target_index[env_ids] = 0
         self.path_done[env_ids] = False
-        self.control_phase[env_ids] = 0
-        self.search_anchor_xyz_mm[env_ids] = 0.0
+
+        self.z_control_phase[env_ids] = 0
+        self.search_anchor_z_mm[env_ids] = 0.0
         self.search_step_count[env_ids] = 0
         self.search_direction[env_ids] = float(self.cfg.contact_search_direction)
         self.search_flip_used[env_ids] = False
@@ -446,73 +454,44 @@ class AdmittanceControlAction(ActionTerm):
         pybind_dq_norm = 0.0
 
         for env_id in range(self._num_envs_local):
+            idx = int(self.path_index[env_id].item())
+            self.current_target_index[env_id] = idx
+
             q_seed = self.prev_q_cmd_6[env_id] if self.prev_valid[env_id] else q[env_id]
             cur_pos_mm, _, _, _ = self._fk_pose_pybind_corrected(q_seed)
 
             raw_fz = float(wrench6[env_id, 2].item())
             measured_fz = float(self.cfg.fz_sign * raw_fz)
-            phase = int(self.control_phase[env_id].item())
 
-            if phase == 0:
-                idx = 0
-                self.current_target_index[env_id] = idx
-                self.des_pos_mm_raw[env_id] = self.traj_positions[idx, 0:3]
-                self.des_wxyz_raw[env_id] = self.traj_positions[idx, 3:6]
-                self.des_force[env_id] = self.traj_forces[idx]
+            self.des_pos_mm_raw[env_id] = self.traj_positions[idx, 0:3]
+            self.des_wxyz_raw[env_id] = self.traj_positions[idx, 3:6]
+            self.des_force[env_id] = self.traj_forces[idx]
 
-                target_pos_mm = self.traj_positions[idx, 0:3].clone()
-                target_pos_mm[2] += self.cfg.z_target_offset_m * 1000.0
-                self.cmd_target_xyz_mm[env_id] = target_pos_mm
+            nominal_pos_mm = self.traj_positions[idx, 0:3].clone()
+            nominal_pos_mm[2] += self.cfg.z_target_offset_m * 1000.0
+            target_rotm = spatial_to_rotmat(self.traj_positions[idx, 3:6].view(1, 3)).squeeze(0)
 
-                target_rotm = spatial_to_rotmat(self.traj_positions[idx, 3:6].view(1, 3)).squeeze(0)
+            z_phase = int(self.z_control_phase[env_id].item())
 
-                pybind_called = True
-                q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_iterative_ik(
-                    q_seed, target_pos_mm, target_rotm, self.cfg.ik_inner_iters
-                )
-                pybind_success = True
-                pybind_dq_norm = dq_norm
+            # XY/orientation always follow path
+            target_pos_mm = nominal_pos_mm.clone()
 
-                pos_err_norm_mm[env_id] = pos_e_mm
-                rot_err_norm_rad[env_id] = rot_e_rad
+            if z_phase == 0:
+                # short contact acquisition on Z only
+                if self.search_step_count[env_id].item() == 0:
+                    self.search_anchor_z_mm[env_id] = cur_pos_mm[2]
 
-                if (pos_e_mm.item() < self.cfg.approach_pos_tol_mm) and (rot_e_rad.item() < self.cfg.approach_rot_tol_rad):
-                    self.control_phase[env_id] = 1
-                    self.search_anchor_xyz_mm[env_id] = cur_pos_mm
-                    self.search_step_count[env_id] = 0
-                    self.search_direction[env_id] = float(self.cfg.contact_search_direction)
-                    self.search_flip_used[env_id] = False
-                    self.path_index[env_id] = 0
-
-            elif phase == 1:
-                idx = int(self.path_index[env_id].item())
-                self.current_target_index[env_id] = idx
-
-                self.des_pos_mm_raw[env_id] = self.traj_positions[idx, 0:3]
-                self.des_wxyz_raw[env_id] = self.traj_positions[idx, 3:6]
-                self.des_force[env_id] = self.traj_forces[idx]
-
-                target_rotm = spatial_to_rotmat(self.traj_positions[idx, 3:6].view(1, 3)).squeeze(0)
-
-                target_pos_mm = self.search_anchor_xyz_mm[env_id].clone()
                 search_offset = float(self.search_step_count[env_id].item()) * self.cfg.contact_search_step_mm
                 search_offset = min(search_offset, self.cfg.contact_search_max_offset_mm)
-                target_pos_mm[2] = float(self.search_anchor_xyz_mm[env_id, 2].item()) + float(self.search_direction[env_id].item()) * search_offset
+
+                z_cmd = float(self.search_anchor_z_mm[env_id].item()) + float(self.search_direction[env_id].item()) * search_offset
+                target_pos_mm[2] = z_cmd
+
                 self.cmd_target_xyz_mm[env_id] = target_pos_mm
-
-                pybind_called = True
-                q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_iterative_ik(
-                    q_seed, target_pos_mm, target_rotm, self.cfg.ik_inner_iters
-                )
-                pybind_success = True
-                pybind_dq_norm = dq_norm
-
-                pos_err_norm_mm[env_id] = pos_e_mm
-                rot_err_norm_rad[env_id] = rot_e_rad
                 self.search_step_count[env_id] += 1
 
                 if measured_fz >= self.cfg.contact_on_threshold_n:
-                    self.control_phase[env_id] = 2
+                    self.z_control_phase[env_id] = 1
                     self._reset_force_controller_for_env(env_id, float(cur_pos_mm[2].item()))
                 else:
                     if (search_offset >= self.cfg.contact_search_max_offset_mm) and (not bool(self.search_flip_used[env_id].item())):
@@ -521,17 +500,7 @@ class AdmittanceControlAction(ActionTerm):
                         self.search_flip_used[env_id] = True
 
             else:
-                idx = int(self.path_index[env_id].item())
-                self.current_target_index[env_id] = idx
-
-                self.des_pos_mm_raw[env_id] = self.traj_positions[idx, 0:3]
-                self.des_wxyz_raw[env_id] = self.traj_positions[idx, 3:6]
-                self.des_force[env_id] = self.traj_forces[idx]
-
-                nominal_pos_mm = self.traj_positions[idx, 0:3].clone()
-                nominal_pos_mm[2] += self.cfg.z_target_offset_m * 1000.0
-                target_rotm = spatial_to_rotmat(self.traj_positions[idx, 3:6].view(1, 3)).squeeze(0)
-
+                # Z force control only
                 fd = float(self.traj_forces[idx, 2].item())
                 fext = float(measured_fz)
 
@@ -542,21 +511,9 @@ class AdmittanceControlAction(ActionTerm):
                     float(fext),
                 )
 
-                xc_z_mm = float(fc_out[0])
-
-                target_pos_mm = nominal_pos_mm.clone()
-                target_pos_mm[2] = xc_z_mm
+                z_cmd = float(fc_out[0])
+                target_pos_mm[2] = z_cmd
                 self.cmd_target_xyz_mm[env_id] = target_pos_mm
-
-                pybind_called = True
-                q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_iterative_ik(
-                    q_seed, target_pos_mm, target_rotm, self.cfg.ik_inner_iters
-                )
-                pybind_success = True
-                pybind_dq_norm = dq_norm
-
-                pos_err_norm_mm[env_id] = pos_e_mm
-                rot_err_norm_rad[env_id] = rot_e_rad
 
                 if measured_fz >= self.cfg.contact_off_threshold_n:
                     if idx >= (self.traj_length - 1):
@@ -564,11 +521,21 @@ class AdmittanceControlAction(ActionTerm):
                     else:
                         self.path_index[env_id] += 1
                 else:
-                    self.control_phase[env_id] = 1
-                    self.search_anchor_xyz_mm[env_id] = cur_pos_mm
+                    self.z_control_phase[env_id] = 0
+                    self.search_anchor_z_mm[env_id] = cur_pos_mm[2]
                     self.search_step_count[env_id] = 0
                     self.search_direction[env_id] = float(self.cfg.contact_search_direction)
                     self.search_flip_used[env_id] = False
+
+            pybind_called = True
+            q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_iterative_ik(
+                q_seed, target_pos_mm, target_rotm, self.cfg.ik_inner_iters
+            )
+            pybind_success = True
+            pybind_dq_norm = dq_norm
+
+            pos_err_norm_mm[env_id] = pos_e_mm
+            rot_err_norm_rad[env_id] = rot_e_rad
 
             self.prev_q_cmd_6[env_id] = q_cmd6
             self.prev_valid[env_id] = True
@@ -582,8 +549,8 @@ class AdmittanceControlAction(ActionTerm):
                 env_id = min(self.cfg.debug_env_id, self._num_envs_local - 1)
                 cur_pos_mm, _, cur_wxyz, _ = self._fk_pose_pybind_corrected(q[env_id])
 
-                phase = int(self.control_phase[env_id].item())
-                mode_name = ["position_approach", "contact_search", "force_track"][phase]
+                z_phase = int(self.z_control_phase[env_id].item())
+                mode_name = "contact_search" if z_phase == 0 else "z_force_track"
 
                 local_debug.print_action_runtime(
                     env_id=env_id,
@@ -608,7 +575,7 @@ class AdmittanceControlAction(ActionTerm):
                 )
                 local_debug.print_info(
                     f"[Action Mode ] env={env_id} mode={mode_name} "
-                    f"| phase={phase} | raw_fz={float(wrench6[env_id,2].item()):.6f} "
+                    f"| z_phase={z_phase} | raw_fz={float(wrench6[env_id,2].item()):.6f} "
                     f"| measured_fz={float(self.cfg.fz_sign * wrench6[env_id,2].item()):.6f}"
                 )
 
@@ -641,20 +608,15 @@ class AdmittanceControlActionCfg(ActionTermCfg):
     tcp_offset_axis: str = "local_z_neg"
     z_target_offset_m: float = 0.0
 
-    approach_pos_tol_mm: float = 2.0
-    approach_rot_tol_rad: float = 0.05
-
-    # contact search
     contact_on_threshold_n: float = 1.0
     contact_off_threshold_n: float = 0.5
     contact_search_step_mm: float = 0.20
     contact_search_max_offset_mm: float = 10.0
     contact_search_direction: float = 1.0
 
-    # make compression positive
-    fz_sign: float = -1.0
+    # based on current logs, raw_fz positive seems to mean compression
+    fz_sign: float = 1.0
 
-    # ForceCon1DMode5
     force_md_ratio: float = 1000.0
     force_fc_fext: float = 50.0
     force_free_mass: float = 2.0

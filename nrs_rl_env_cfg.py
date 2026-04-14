@@ -101,8 +101,12 @@ class ActionsCfg:
         tcp_offset_axis="local_z_neg",
         z_target_offset_m=0.0,
 
-        approach_pos_tol_mm=2.0,
-        approach_rot_tol_rad=0.05,
+        contact_on_threshold_n=1.0,
+        contact_off_threshold_n=0.5,
+        contact_search_step_mm=0.20,
+        contact_search_max_offset_mm=10.0,
+        contact_search_direction=1.0,
+        fz_sign=1.0,
 
         force_md_ratio=1000.0,
         force_fc_fext=50.0,
