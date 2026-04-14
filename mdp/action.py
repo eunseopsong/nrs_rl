@@ -406,6 +406,7 @@ class AdmittanceControlAction(ActionTerm):
 
         return data[:, :6]
 
+
     def _load_hdf5_forces(self, file_path: str, dataset_key: str, expected_rows: int) -> torch.Tensor:
         if not file_path:
             raise ValueError("[Action] hdf5_file_path is empty.")
