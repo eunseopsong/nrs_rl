@@ -238,6 +238,10 @@ class AdmittanceControlAction(ActionTerm):
     - position    : mm
     - orientation : rad
     - force       : N
+
+    Important behavior:
+    - one apply_actions() call -> one HDF5 index increment
+    - if callback/control rate is 125 Hz, trajectory is consumed at 125 index/sec
     """
 
     cfg: "AdmittanceControlActionCfg"
@@ -272,11 +276,15 @@ class AdmittanceControlAction(ActionTerm):
         )
 
         stride = max(1, int(self.cfg.waypoint_stride))
-        self.traj_positions = traj_full[::stride].contiguous()   # [T, 6] = [mm, mm, mm, rad, rad, rad]
-        self.traj_forces = force_full[::stride].contiguous()     # [T, 3] = [N, N, N]
+        self.traj_positions = traj_full[::stride].contiguous()
+        self.traj_forces = force_full[::stride].contiguous()
         self.traj_length = self.traj_positions.shape[0]
 
+        # next index to consume
         self.path_index = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
+        # index actually used in the current/last command
+        self.current_target_index = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
+
         self.steps_at_waypoint = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
         self.path_done = torch.zeros(self._num_envs_local, dtype=torch.bool, device=self.device)
 
@@ -297,7 +305,6 @@ class AdmittanceControlAction(ActionTerm):
             ]),
         )
 
-        # observation.py와 동일한 orientation correction
         self.R_offset = self._get_orientation_offset_rotm(self.device)
 
         local_debug.print_action_init(
@@ -475,6 +482,7 @@ class AdmittanceControlAction(ActionTerm):
         self._processed_actions[env_ids] = 0.0
 
         self.path_index[env_ids] = 0
+        self.current_target_index[env_ids] = 0
         self.steps_at_waypoint[env_ids] = 0
         self.path_done[env_ids] = False
 
@@ -496,12 +504,16 @@ class AdmittanceControlAction(ActionTerm):
         q_all = self.robot.data.joint_pos
         q = q_all[:, :6]
 
-        des = self.traj_positions[self.path_index]
-        frc = self.traj_forces[self.path_index]
+        # consume exactly one index per apply_actions call
+        cmd_index = self.path_index.clone()
+        self.current_target_index = cmd_index.clone()
 
-        self.des_pos_mm_raw = des[:, 0:3].clone()   # mm
-        self.des_wxyz_raw = des[:, 3:6].clone()     # rad
-        self.des_force = frc                        # N
+        des = self.traj_positions[cmd_index]
+        frc = self.traj_forces[cmd_index]
+
+        self.des_pos_mm_raw = des[:, 0:3].clone()
+        self.des_wxyz_raw = des[:, 3:6].clone()
+        self.des_force = frc
 
         q_cmd_all = q_all.clone()
         pos_err_norm_mm = torch.zeros((self._num_envs_local,), device=self.device)
@@ -539,23 +551,19 @@ class AdmittanceControlAction(ActionTerm):
 
         self.robot.set_joint_position_target(q_cmd_all)
 
-        reached = (pos_err_norm_mm < self.cfg.waypoint_pos_tol * 1000.0) & (
-            rot_err_norm_rad < self.cfg.waypoint_rot_tol
+        # no waypoint reaching logic:
+        # exactly +1 index per callback until the last row
+        can_advance = ~self.path_done
+        next_index = torch.where(
+            can_advance,
+            torch.clamp(self.path_index + 1, max=self.traj_length - 1),
+            self.path_index,
         )
-        timeout = self.steps_at_waypoint >= self.cfg.max_steps_per_waypoint
-        advance = (reached | timeout) & (~self.path_done)
+        done_now = self.path_index >= (self.traj_length - 1)
 
-        next_index = self.path_index + advance.long()
-        done_now = next_index >= (self.traj_length - 1)
-
-        self.path_index = torch.clamp(next_index, max=self.traj_length - 1)
         self.path_done = self.path_done | done_now
-
-        self.steps_at_waypoint = torch.where(
-            advance,
-            torch.zeros_like(self.steps_at_waypoint),
-            self.steps_at_waypoint + 1,
-        )
+        self.path_index = next_index
+        self.steps_at_waypoint.zero_()
 
         if self.cfg.enable_debug_print:
             global_step = int(self._env.episode_length_buf[0].item())
@@ -571,8 +579,8 @@ class AdmittanceControlAction(ActionTerm):
                 )
                 print(
                     f"[Action Debug ] env={env_id} | step={global_step} "
-                    f"| h5_index={int(self.path_index[env_id].item())}/{self.traj_length} "
-                    f"| waypoint_steps={int(self.steps_at_waypoint[env_id].item())} "
+                    f"| h5_index={int(self.current_target_index[env_id].item())}/{self.traj_length} "
+                    f"| next_index={int(self.path_index[env_id].item())}/{self.traj_length} "
                     f"| done={bool(self.path_done[env_id].item())} "
                     f"| pos_err_norm={float(pos_err_norm_mm[env_id].item()):.6f} "
                     f"| rot_err_norm={float(rot_err_norm_rad[env_id].item()):.6f}"
@@ -621,28 +629,23 @@ class AdmittanceControlActionCfg(ActionTermCfg):
 
     action_dim: int = 2
 
-    # IK
     dls_lambda: float = 0.10
     ik_step_size: float = 0.60
     max_dq: float = 0.08
 
-    max_pos_err: float = 0.05      # m
-    max_rot_err: float = 0.30      # rad
+    max_pos_err: float = 0.05
+    max_rot_err: float = 0.30
 
-    # waypoint follower
-    waypoint_stride: int = 100
-    waypoint_pos_tol: float = 0.02     # m
-    waypoint_rot_tol: float = 0.20     # rad
+    waypoint_stride: int = 1
+    waypoint_pos_tol: float = 0.02
+    waypoint_rot_tol: float = 0.20
     max_steps_per_waypoint: int = 120
 
-    # kept for compatibility
     tcp_length_offset_m: float = 0.20
     tcp_offset_axis: str = "local_z_neg"
 
-    # extra trim
     z_target_offset_m: float = 0.0
 
-    # debug
     enable_debug_print: bool = True
     debug_print_interval: int = 10
     debug_env_id: int = 0

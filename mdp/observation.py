@@ -6,6 +6,11 @@ Observation utilities for UR10e spindle environment.
 - Integrated with y2_control_pybind (C++ FK module)
 - HDF5 trajectory loader for position/force
 - Includes EE pose (x, y, z, wx, wy, wz), target position/force, and camera sensors
+
+Important behavior:
+- If action term "arm_action" exists and exposes current_target_index/path_index,
+  observation targets follow the action term index.
+- Therefore, debug/observation target stays synchronized with action.py.
 """
 
 from __future__ import annotations
@@ -37,8 +42,8 @@ y2_pb = importlib.import_module(
 # ------------------------------------------------------
 # Global buffers
 # ------------------------------------------------------
-_hdf5_position: torch.Tensor | None = None   # (T, 6) = [x y z wx wy wz]
-_hdf5_force: torch.Tensor | None = None      # (T, 3) = [fx fy fz]
+_hdf5_position: torch.Tensor | None = None
+_hdf5_force: torch.Tensor | None = None
 _hdf5_traj_len: int = 0
 
 # ------------------------------------------------------
@@ -48,7 +53,6 @@ _y2_kin_solver = None
 
 # ------------------------------------------------------
 # Orientation convention calibration
-# Home pose should be shown as [0, 0, 1.5708]
 # ------------------------------------------------------
 _HOME_Q = [0.5585, -2.0949, -1.5711, -1.0472, 1.5708, 0.5585]
 _orientation_offset_rotm: torch.Tensor | None = None
@@ -68,11 +72,61 @@ def get_hdf5_trajectory_length() -> int:
     return int(_hdf5_traj_len)
 
 
-def _get_traj_indices(env: "ManagerBasedRLEnv", horizon: int = 1) -> torch.Tensor:
-    """
-    Use episode_length_buf directly as trajectory row index.
-    idx[k] = current_step + k, clamped to the last row.
-    """
+def _get_action_term(env: "ManagerBasedRLEnv", action_term_name: str = "arm_action"):
+    am = getattr(env, "action_manager", None)
+    if am is None:
+        return None
+
+    if hasattr(am, "get_term"):
+        try:
+            return am.get_term(action_term_name)
+        except Exception:
+            pass
+
+    if hasattr(am, "_terms"):
+        terms = am._terms
+        if isinstance(terms, dict) and action_term_name in terms:
+            return terms[action_term_name]
+
+    if hasattr(am, action_term_name):
+        return getattr(am, action_term_name)
+
+    return None
+
+
+def _get_traj_indices_from_action(
+    env: "ManagerBasedRLEnv",
+    horizon: int = 1,
+    action_term_name: str = "arm_action",
+) -> torch.Tensor:
+    global _hdf5_traj_len
+
+    num_envs = env.num_envs
+    device = env.device
+
+    if _hdf5_traj_len <= 0:
+        return torch.zeros((num_envs, horizon), device=device, dtype=torch.long)
+
+    term = _get_action_term(env, action_term_name=action_term_name)
+
+    if term is not None:
+        if hasattr(term, "current_target_index"):
+            base_idx = term.current_target_index.to(device=device, dtype=torch.long)
+        elif hasattr(term, "path_index"):
+            base_idx = term.path_index.to(device=device, dtype=torch.long)
+        else:
+            base_idx = None
+
+        if base_idx is not None:
+            offsets = torch.arange(horizon, device=device, dtype=torch.long).unsqueeze(0)
+            idx = base_idx.unsqueeze(1) + offsets
+            idx = torch.clamp(idx, 0, _hdf5_traj_len - 1)
+            return idx
+
+    return _get_traj_indices_from_episode(env, horizon=horizon)
+
+
+def _get_traj_indices_from_episode(env: "ManagerBasedRLEnv", horizon: int = 1) -> torch.Tensor:
     global _hdf5_traj_len
 
     num_envs = env.num_envs
@@ -93,11 +147,6 @@ def _get_traj_indices(env: "ManagerBasedRLEnv", horizon: int = 1) -> torch.Tenso
 
 
 def _spatial_angle_to_quat_torch(spatial: torch.Tensor) -> torch.Tensor:
-    """
-    Convert spatial angle [wx, wy, wz] to quaternion [w, x, y, z].
-    Input:  (N, 3)
-    Output: (N, 4)
-    """
     angle = torch.norm(spatial, dim=-1, keepdim=True)
     eps = 1e-10
 
@@ -120,10 +169,6 @@ def _spatial_angle_to_quat_torch(spatial: torch.Tensor) -> torch.Tensor:
 
 
 def _spatial_angle_to_rotmat_torch(spatial: torch.Tensor) -> torch.Tensor:
-    """
-    spatial: (N, 3) = [wx wy wz]
-    return : (N, 3, 3)
-    """
     device = spatial.device
     dtype = spatial.dtype
     n = spatial.shape[0]
@@ -163,14 +208,6 @@ def _spatial_angle_to_rotmat_torch(spatial: torch.Tensor) -> torch.Tensor:
 
 
 def _rotmat_to_spatial_angle_torch(R: torch.Tensor) -> torch.Tensor:
-    """
-    Convert rotation matrix to SpatialAngle [wx, wy, wz].
-
-    Input:
-        R: (..., 3, 3)
-    Output:
-        (..., 3)
-    """
     assert R.shape[-2:] == (3, 3), f"Expected (...,3,3), got {R.shape}"
 
     trace = R[..., 0, 0] + R[..., 1, 1] + R[..., 2, 2]
@@ -183,12 +220,10 @@ def _rotmat_to_spatial_angle_torch(R: torch.Tensor) -> torch.Tensor:
 
     out = torch.zeros((*R.shape[:-2], 3), dtype=R.dtype, device=R.device)
 
-    # 1) near zero rotation
     small_mask = torch.abs(angle) < eps
     if torch.any(small_mask):
         out[small_mask] = 0.0
 
-    # 2) near pi rotation
     pi_mask = torch.abs(angle - pi) < eps
     if torch.any(pi_mask):
         R_pi = R[pi_mask]
@@ -219,7 +254,6 @@ def _rotmat_to_spatial_angle_torch(R: torch.Tensor) -> torch.Tensor:
 
         out[pi_mask] = torch.stack(spatial_list, dim=0)
 
-    # 3) normal case
     normal_mask = ~(small_mask | pi_mask)
     if torch.any(normal_mask):
         Rn = R[normal_mask]
@@ -238,10 +272,6 @@ def _rotmat_to_spatial_angle_torch(R: torch.Tensor) -> torch.Tensor:
 
 
 def _get_orientation_offset_rotm(device: torch.device) -> torch.Tensor:
-    """
-    Build fixed orientation offset so that the home pose becomes
-    [wx wy wz] = [0, 0, 1.5708]
-    """
     global _orientation_offset_rotm
 
     if _orientation_offset_rotm is not None:
@@ -256,26 +286,18 @@ def _get_orientation_offset_rotm(device: torch.device) -> torch.Tensor:
     desired_home_spatial = torch.tensor([[0.0, 0.0, 1.5708]], dtype=torch.float32, device=device)
     R_home_desired = _spatial_angle_to_rotmat_torch(desired_home_spatial).squeeze(0)
 
-    # R_offset * R_home_fk = R_home_desired
     _orientation_offset_rotm = R_home_desired @ R_home_fk.T
     return _orientation_offset_rotm
 
 
 def _get_target_pose_for_polishing(env: "ManagerBasedRLEnv") -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Returns:
-      target_xyz  : (N, 3)
-      target_quat : (N, 4)
-
-    Uses HDF5 [x y z wx wy wz] directly.
-    """
     global _hdf5_position
 
     device = env.device
     num_envs = env.num_envs
 
     if _hdf5_position is not None and _hdf5_position.ndim == 2 and _hdf5_position.shape[0] > 0:
-        idx = _get_traj_indices(env, horizon=1).squeeze(1)
+        idx = _get_traj_indices_from_action(env, horizon=1).squeeze(1)
         row = _hdf5_position[idx].to(device=device, dtype=torch.float32)
 
         target_xyz = row[:, :3]
@@ -289,17 +311,11 @@ def _get_target_pose_for_polishing(env: "ManagerBasedRLEnv") -> tuple[torch.Tens
     return target_xyz, target_quat
 
 
-# ------------------------------------------------------
-# Polishing process buffers
-# ------------------------------------------------------
 _prev_xyz_for_polishing: torch.Tensor | None = None
 _cumulative_removal: torch.Tensor | None = None
 _cumulative_contact_distance: torch.Tensor | None = None
 
 
-# ------------------------------------------------------
-# Internal helpers
-# ------------------------------------------------------
 def _update_debug_cache(step: int, wrench_env0: torch.Tensor | None = None, metrics_env0: torch.Tensor | None = None):
     try:
         if wrench_env0 is not None and hasattr(local_debug, "_last_ft_debug"):
@@ -329,18 +345,7 @@ def _call_debug_printers(step: int, wrench_env0: torch.Tensor | None = None, met
             print(f"[POLISHING DEBUG PRINT ERROR] step={step} | {repr(e)}")
 
 
-# ------------------------------------------------------
-# EE pose observation (x, y, z, wx, wy, wz)
-# ------------------------------------------------------
 def get_ee_pose(env: "ManagerBasedRLEnv", asset_name: str = "robot") -> torch.Tensor:
-    """
-    Returns end-effector pose (x, y, z, wx, wy, wz)
-
-    - Reads q1~q6 and runs FK via y2_control_pybind.UR10eKinematics
-    - Applies a fixed rotation offset so that the home pose becomes:
-        [wx wy wz] = [0, 0, 1.5708]
-    - Output: (num_envs, 6) torch tensor on env device
-    """
     robot = env.scene[asset_name]
     q = robot.data.joint_pos[:, :6]
 
@@ -386,10 +391,6 @@ def get_current_pose_and_force(
     fixed_joint_name: str = "tool0_to_spindle",
     joint_prim_relpath: str = "joints",
 ) -> torch.Tensor:
-    """
-    Returns:
-        (N, 12) = [x y z wx wy wz fx fy fz tx ty tz]
-    """
     pose = get_ee_pose(env, asset_name=asset_name)
     wrench = local_ft_sensor.get_6axis_ft_fixed_joint(
         env=env,
@@ -401,9 +402,6 @@ def get_current_pose_and_force(
     return torch.cat([pose, wrench], dim=-1)
 
 
-# ------------------------------------------------------
-# HDF5 loader
-# ------------------------------------------------------
 def load_hdf5_trajectory(
     env: "ManagerBasedRLEnv",
     env_ids,
@@ -411,11 +409,6 @@ def load_hdf5_trajectory(
     position_dataset_key: str = "position",
     force_dataset_key: str = "force",
 ):
-    """
-    Load HDF5 trajectory:
-      - position: (T, 6) = [x y z wx wy wz]
-      - force   : (T, 3) = [fx fy fz]
-    """
     global _hdf5_position, _hdf5_force, _hdf5_traj_len
     import h5py
 
@@ -446,7 +439,6 @@ def load_hdf5_trajectory(
     local_debug.print_hdf5_positions_loaded(_hdf5_position.shape, file_path)
 
 
-# backward-compatible alias
 def load_hdf5_positions(
     env: "ManagerBasedRLEnv",
     env_ids,
@@ -463,50 +455,35 @@ def load_hdf5_positions(
     )
 
 
-# ------------------------------------------------------
-# Observation: target positions / forces (horizon-based)
-# ------------------------------------------------------
 def get_hdf5_target_positions(env: "ManagerBasedRLEnv", horizon: int = 5) -> torch.Tensor:
-    """
-    Return future target positions flattened: (N, horizon*6)
-    Each row: [x y z wx wy wz]
-    """
     global _hdf5_position
 
     if _hdf5_position is None:
         return torch.zeros((env.num_envs, horizon * 6), device=env.device, dtype=torch.float32)
 
-    idx = _get_traj_indices(env, horizon=horizon)
+    idx = _get_traj_indices_from_action(env, horizon=horizon)
     rows = _hdf5_position[idx]
     return rows.reshape(env.num_envs, horizon * 6)
 
 
 def get_hdf5_target_forces(env: "ManagerBasedRLEnv", horizon: int = 5) -> torch.Tensor:
-    """
-    Return future target forces flattened: (N, horizon*3)
-    Each row: [fx fy fz]
-    """
     global _hdf5_force
 
     if _hdf5_force is None:
         return torch.zeros((env.num_envs, horizon * 3), device=env.device, dtype=torch.float32)
 
-    idx = _get_traj_indices(env, horizon=horizon)
+    idx = _get_traj_indices_from_action(env, horizon=horizon)
     rows = _hdf5_force[idx]
     return rows.reshape(env.num_envs, horizon * 3)
 
 
 def get_hdf5_target_pose_force(env: "ManagerBasedRLEnv") -> torch.Tensor:
-    """
-    Returns current target row:
-      (N, 9) = [x y z wx wy wz fx fy fz]
-    """
     global _hdf5_position, _hdf5_force
 
     if _hdf5_position is None or _hdf5_force is None:
         return torch.zeros((env.num_envs, 9), device=env.device, dtype=torch.float32)
 
-    idx = _get_traj_indices(env, horizon=1).squeeze(1)
+    idx = _get_traj_indices_from_action(env, horizon=1).squeeze(1)
     pos = _hdf5_position[idx]
     frc = _hdf5_force[idx]
     return torch.cat([pos, frc], dim=-1)
@@ -536,13 +513,9 @@ def get_velocity_adjusted_target_positions(
     if _hdf5_traj_len <= 0:
         return torch.zeros((env.num_envs, horizon * 6), device=env.device, dtype=torch.float32)
 
-    if hasattr(env, "episode_length_buf"):
-        base_idx = env.episode_length_buf.to(device=env.device, dtype=torch.long)
-    else:
-        base_idx = torch.zeros((env.num_envs,), device=env.device, dtype=torch.long)
-
+    idx0 = _get_traj_indices_from_action(env, horizon=1).squeeze(1)
     step_offset = (vel_magnitude * lookahead_gain).to(torch.long)
-    dynamic_idx = torch.clamp(base_idx + step_offset, 0, _hdf5_traj_len - 1)
+    dynamic_idx = torch.clamp(idx0 + step_offset, 0, _hdf5_traj_len - 1)
 
     future_targets = torch.zeros((env.num_envs, horizon * 6), device=env.device, dtype=torch.float32)
 
@@ -605,25 +578,6 @@ def get_processed_polishing_target(
     removal_gain: float = 0.001,
     offset_axis: int = 2,
 ) -> torch.Tensor:
-    """
-    Returns:
-        (num_envs, 14)
-
-        [0]  processed_target_x
-        [1]  processed_target_y
-        [2]  processed_target_z
-        [3]  target_quat_0
-        [4]  target_quat_1
-        [5]  target_quat_2
-        [6]  target_quat_3
-        [7]  cartesian_velocity
-        [8]  Fz
-        [9]  abs_fz
-        [10] contact_flag
-        [11] effective_normal_force
-        [12] cumulative_removal
-        [13] cumulative_contact_distance
-    """
     global _prev_xyz_for_polishing
     global _cumulative_removal
     global _cumulative_contact_distance

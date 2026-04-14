@@ -93,7 +93,7 @@ class ActionsCfg:
         max_pos_err=0.05,
         max_rot_err=0.30,
 
-        waypoint_stride=100,
+        waypoint_stride=1,
         waypoint_pos_tol=0.02,
         waypoint_rot_tol=0.20,
         max_steps_per_waypoint=120,
