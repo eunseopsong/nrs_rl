@@ -1,6 +1,130 @@
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers
 # SPDX-License-Identifier: BSD-3-Clause
 
+"""
+================================================================================
+Force-aware Variable Path-Speed Action
+================================================================================
+
+[Current design goal]
+- Do NOT implement reward here yet.
+- Keep force-control logic as close as possible to the original pybind controller.
+- Only make path visiting speed variable according to current contact force.
+
+[Core idea]
+We use a continuous path cursor s_k instead of integer-only index stepping.
+
+    s_{k+1} = s_k + alpha_k
+    index_k = floor(s_k)
+
+where alpha_k is the path progress speed.
+
+This allows:
+- slower progress when force is too high
+- faster progress when force is too low
+- smoother path timing than fixed integer jump
+
+-------------------------------------------------------------------------------
+[How to design reward later]
+-------------------------------------------------------------------------------
+
+Suppose polishing/removal is approximately related to:
+    removal_rate_k ~ F_k * v_k
+or more conservatively:
+    removal_rate_k ~ max(F_k - F_dead, 0) * v_k
+
+where:
+- F_k : normal contact force magnitude at step k
+- v_k : actual path traversal speed or Cartesian speed
+
+If the final goal is "uniform removal over all path regions", then reward should
+NOT only punish force error. It should also consider local accumulated removal.
+
+Recommended reward directions:
+
+1) Force tracking term
+   r_force = - |F_k - F_target|
+
+   This keeps contact force near the desired target.
+
+2) Removal-rate tracking term
+   Let:
+       r_removal_k = estimated_removal_rate_k
+   and target:
+       r_removal*
+   Then:
+       r_rate = - |r_removal_k - r_removal*|
+
+   This directly encourages uniform instantaneous polishing intensity.
+
+3) Spatial uniformity term
+   Divide the path or surface into bins/segments j = 1...M.
+   Let R_j be cumulative removal in each segment.
+   Then use for example:
+       r_uniform = - Var(R_1, ..., R_M)
+   or
+       r_uniform = - sum_j (R_j - R_mean)^2
+
+   This is the most aligned with “uniform machining everywhere”.
+
+4) Progress efficiency term
+   r_progress = + c * delta_s
+   so the policy does not simply stop moving to keep removal low.
+
+5) Safety / over-force penalty
+   r_safe = - max(F_k - F_safe, 0)^2
+
+   Important because strong contact can damage the surface/tool.
+
+-------------------------------------------------------------------------------
+[Recommended future combined reward]
+-------------------------------------------------------------------------------
+
+Example:
+    r_total
+      = w1 * r_force
+      + w2 * r_rate
+      + w3 * r_uniform
+      + w4 * r_progress
+      + w5 * r_safe
+
+Good practical order:
+- first stabilize force
+- then add removal-rate tracking
+- finally add spatial uniformity over bins
+
+-------------------------------------------------------------------------------
+[Current action behavior]
+-------------------------------------------------------------------------------
+
+This file does NOT compute reward.
+This file only changes:
+    alpha_k = variable path progress speed
+
+Simple force-aware speed law:
+    alpha_raw = base_rate * (F_target / max(|Fz|, eps))
+
+Then clipped:
+    alpha = clip(alpha_raw, min_rate, max_rate)
+
+Optional smoothing:
+    alpha_filt = beta * alpha_raw + (1-beta) * alpha_prev
+
+Interpretation:
+- if current force is larger than target -> slow down
+- if current force is smaller than target -> speed up
+- if force is close to target -> stay near base_rate
+
+This is only a scheduler for path visitation speed.
+Force control itself is still handled by pybind ForceCon1DMode5.
+
+Units convention expected by user:
+- position: mm
+- orientation: rad
+- force: N
+================================================================================
+"""
+
 from __future__ import annotations
 
 import math
@@ -8,7 +132,6 @@ import os
 import h5py
 import torch
 import importlib
-
 
 from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.envs import ManagerBasedRLEnv
@@ -29,27 +152,6 @@ local_ft_sensor = importlib.import_module(
 
 def normalize_quat(q: torch.Tensor) -> torch.Tensor:
     return q / torch.clamp(torch.linalg.norm(q, dim=-1, keepdim=True), min=1e-8)
-
-
-def quat_to_rotmat(q: torch.Tensor) -> torch.Tensor:
-    q = normalize_quat(q)
-    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
-
-    r = torch.zeros((q.shape[0], 3, 3), device=q.device, dtype=q.dtype)
-
-    r[:, 0, 0] = 1.0 - 2.0 * (y * y + z * z)
-    r[:, 0, 1] = 2.0 * (x * y - z * w)
-    r[:, 0, 2] = 2.0 * (x * z + y * w)
-
-    r[:, 1, 0] = 2.0 * (x * y + z * w)
-    r[:, 1, 1] = 1.0 - 2.0 * (x * x + z * z)
-    r[:, 1, 2] = 2.0 * (y * z - x * w)
-
-    r[:, 2, 0] = 2.0 * (x * z - y * w)
-    r[:, 2, 1] = 2.0 * (y * z + x * w)
-    r[:, 2, 2] = 1.0 - 2.0 * (x * x + y * y)
-
-    return r
 
 
 def rotmat_to_quat(R: torch.Tensor) -> torch.Tensor:
@@ -201,13 +303,6 @@ _HOME_Q = torch.tensor(
 
 
 class AdmittanceControlAction(ActionTerm):
-    """
-    XY + orientation : always path tracking
-    Z:
-      - phase 0 : explicit incremental contact search
-      - phase 1 : pybind z-force control
-    """
-
     cfg: "AdmittanceControlActionCfg"
 
     def __init__(self, cfg, env: ManagerBasedRLEnv):
@@ -233,19 +328,17 @@ class AdmittanceControlAction(ActionTerm):
         self.traj_forces = force_full.contiguous()
         self.traj_length = self.traj_positions.shape[0]
 
-        self.path_index = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
-        self.current_target_index = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
-        self.path_done = torch.zeros(self._num_envs_local, dtype=torch.bool, device=self.device)
+        self.path_cursor = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
+        self.path_index = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
+        self.current_target_index = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
+        self.path_done = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
 
-        self.z_control_phase = torch.zeros(self._num_envs_local, dtype=torch.long, device=self.device)
-        self.search_direction = torch.full(
+        self.progress_rate_filtered = torch.full(
             (self._num_envs_local,),
-            float(self.cfg.contact_search_direction),
+            float(self.cfg.base_index_rate),
             dtype=torch.float32,
             device=self.device,
         )
-        self.search_flip_used = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
-        self.search_total_offset_mm = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
 
         self.des_pos_mm_raw = torch.zeros((self._num_envs_local, 3), device=self.device)
         self.des_wxyz_raw = torch.zeros((self._num_envs_local, 3), device=self.device)
@@ -257,9 +350,6 @@ class AdmittanceControlAction(ActionTerm):
         self.prev_q_cmd_6 = torch.zeros((self._num_envs_local, 6), device=self.device)
         self.prev_valid = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
 
-        self.contact_on_count = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
-        self.contact_off_count = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
-
         self.kin = y2_pb.UR10eKinematics(
             dt=float(getattr(y2_cfg, "CONTROL_PERIOD", self._step_dt_local)),
             ee2tcp=getattr(y2_cfg, "EE2TCP", [
@@ -269,6 +359,7 @@ class AdmittanceControlAction(ActionTerm):
                 [0.0, 0.0, 0.0, 1.0],
             ]),
         )
+
         self.R_offset = self._get_orientation_offset_rotm(self.device)
 
         model_path = getattr(y2_cfg, "CONTEXT_NAF_MDGRADI_CKPT", None) or getattr(y2_cfg, "FORCECON_MODEL_PATH", None)
@@ -412,6 +503,23 @@ class AdmittanceControlAction(ActionTerm):
         out[2] = prev_z + dz
         return out
 
+    def _compute_progress_rate(self, env_id: int, abs_fz: float, target_fz: float) -> float:
+        denom = max(abs_fz, self.cfg.force_eps_n)
+
+        # slower reduction than linear law
+        ratio = math.sqrt(target_fz / denom)
+        raw_rate = self.cfg.base_index_rate * ratio
+
+        raw_rate = max(self.cfg.min_index_rate, min(self.cfg.max_index_rate, raw_rate))
+
+        beta = self.cfg.progress_rate_ema_beta
+        prev = float(self.progress_rate_filtered[env_id].item())
+        filt = beta * raw_rate + (1.0 - beta) * prev
+        filt = max(self.cfg.min_index_rate, min(self.cfg.max_index_rate, filt))
+
+        self.progress_rate_filtered[env_id] = filt
+        return filt
+
     def reset(self, env_ids=None):
         super().reset(env_ids)
         if env_ids is None:
@@ -420,14 +528,11 @@ class AdmittanceControlAction(ActionTerm):
         self._raw_actions[env_ids] = 0.0
         self._processed_actions[env_ids] = 0.0
 
+        self.path_cursor[env_ids] = 0.0
         self.path_index[env_ids] = 0
         self.current_target_index[env_ids] = 0
         self.path_done[env_ids] = False
-
-        self.z_control_phase[env_ids] = 0
-        self.search_direction[env_ids] = float(self.cfg.contact_search_direction)
-        self.search_flip_used[env_ids] = False
-        self.search_total_offset_mm[env_ids] = 0.0
+        self.progress_rate_filtered[env_ids] = float(self.cfg.base_index_rate)
 
         des = self.traj_positions[0].unsqueeze(0).repeat(len(env_ids), 1)
         frc = self.traj_forces[0].unsqueeze(0).repeat(len(env_ids), 1)
@@ -440,9 +545,6 @@ class AdmittanceControlAction(ActionTerm):
 
         self.prev_q_cmd_6[env_ids] = 0.0
         self.prev_valid[env_ids] = False
-
-        self.contact_on_count[env_ids] = 0
-        self.contact_off_count[env_ids] = 0
 
         for env_id in env_ids.tolist():
             xd0 = float(self.traj_positions[0, 2].item() + self.cfg.z_target_offset_m * 1000.0)
@@ -473,15 +575,20 @@ class AdmittanceControlAction(ActionTerm):
         pybind_dq_norm = 0.0
 
         for env_id in range(self._num_envs_local):
-            idx = int(self.path_index[env_id].item())
+            idx = int(self.path_cursor[env_id].item())
+            if idx >= self.traj_length:
+                idx = self.traj_length - 1
+                self.path_done[env_id] = True
+
+            self.path_index[env_id] = idx
             self.current_target_index[env_id] = idx
 
             q_seed = self.prev_q_cmd_6[env_id] if self.prev_valid[env_id] else q[env_id]
             cur_pos_mm, _, _, _ = self._fk_pose_pybind_corrected(q_seed)
 
-            # sensor output is already preprocessed in six_axis_ft_sensor.py
             measured_fz = float(wrench6[env_id, 2].item())
             abs_fz = abs(measured_fz)
+            target_fz = float(self.traj_forces[idx, 2].item())
 
             self.des_pos_mm_raw[env_id] = self.traj_positions[idx, 0:3]
             self.des_wxyz_raw[env_id] = self.traj_positions[idx, 3:6]
@@ -491,74 +598,24 @@ class AdmittanceControlAction(ActionTerm):
             nominal_pos_mm[2] += self.cfg.z_target_offset_m * 1000.0
             target_rotm = spatial_to_rotmat(self.traj_positions[idx, 3:6].view(1, 3)).squeeze(0)
 
-            z_phase = int(self.z_control_phase[env_id].item())
             target_pos_mm = nominal_pos_mm.clone()
 
-            if z_phase == 0:
-                # explicit incremental search: always move current z by one step
-                delta = float(self.search_direction[env_id].item()) * self.cfg.contact_search_step_mm
-                new_total = float(self.search_total_offset_mm[env_id].item()) + delta
+            fc_out = self.force_controllers[env_id].step(
+                float(nominal_pos_mm[2].item()),
+                float(cur_pos_mm[2].item()),
+                float(target_fz),
+                float(abs_fz),
+            )
+            z_cmd = float(fc_out[0])
 
-                if abs(new_total) > self.cfg.contact_search_max_offset_mm:
-                    if not bool(self.search_flip_used[env_id].item()):
-                        self.search_direction[env_id] = -self.search_direction[env_id]
-                        self.search_flip_used[env_id] = True
-                        delta = float(self.search_direction[env_id].item()) * self.cfg.contact_search_step_mm
-                        new_total = 0.0
-                    else:
-                        delta = 0.0
+            z_cmd = max(
+                nominal_pos_mm[2].item() - self.cfg.max_force_z_deviation_mm,
+                min(nominal_pos_mm[2].item() + self.cfg.max_force_z_deviation_mm, z_cmd),
+            )
 
-                target_pos_mm[2] = float(cur_pos_mm[2].item()) + delta
-                target_pos_mm = self._limit_z_slew(env_id, target_pos_mm)
-                self.cmd_target_xyz_mm[env_id] = target_pos_mm
-                self.search_total_offset_mm[env_id] = new_total
-
-                if abs_fz >= self.cfg.contact_on_threshold_n:
-                    self.contact_on_count[env_id] += 1
-                else:
-                    self.contact_on_count[env_id] = 0
-
-                if int(self.contact_on_count[env_id].item()) >= int(self.cfg.contact_on_dwell_steps):
-                    self.z_control_phase[env_id] = 1
-                    self.contact_off_count[env_id] = 0
-                    self._reset_force_controller_for_env(env_id, float(cur_pos_mm[2].item()))
-
-            else:
-                fd = float(self.traj_forces[idx, 2].item())
-                fext = float(abs_fz)
-
-                fc_out = self.force_controllers[env_id].step(
-                    float(nominal_pos_mm[2].item()),
-                    float(cur_pos_mm[2].item()),
-                    float(fd),
-                    float(fext),
-                )
-
-                z_cmd = float(fc_out[0])
-                z_cmd = max(
-                    nominal_pos_mm[2].item() - self.cfg.max_force_z_deviation_mm,
-                    min(nominal_pos_mm[2].item() + self.cfg.max_force_z_deviation_mm, z_cmd),
-                )
-                target_pos_mm[2] = z_cmd
-                target_pos_mm = self._limit_z_slew(env_id, target_pos_mm)
-                self.cmd_target_xyz_mm[env_id] = target_pos_mm
-
-                if abs_fz <= self.cfg.contact_off_threshold_n:
-                    self.contact_off_count[env_id] += 1
-                else:
-                    self.contact_off_count[env_id] = 0
-
-                if int(self.contact_off_count[env_id].item()) >= int(self.cfg.contact_off_dwell_steps):
-                    self.z_control_phase[env_id] = 0
-                    self.contact_on_count[env_id] = 0
-                    self.search_direction[env_id] = float(self.cfg.contact_search_direction)
-                    self.search_flip_used[env_id] = False
-                    self.search_total_offset_mm[env_id] = 0.0
-                else:
-                    if idx >= (self.traj_length - 1):
-                        self.path_done[env_id] = True
-                    else:
-                        self.path_index[env_id] += 1
+            target_pos_mm[2] = z_cmd
+            target_pos_mm = self._limit_z_slew(env_id, target_pos_mm)
+            self.cmd_target_xyz_mm[env_id] = target_pos_mm
 
             pybind_called = True
             q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_iterative_ik(
@@ -575,6 +632,15 @@ class AdmittanceControlAction(ActionTerm):
             q_cmd_all[env_id, :6] = q_cmd6
             self.prev_cmd_target_xyz_mm[env_id] = self.cmd_target_xyz_mm[env_id]
 
+            # variable path progress speed
+            if not bool(self.path_done[env_id].item()):
+                rate = self._compute_progress_rate(env_id, abs_fz, target_fz)
+                self.path_cursor[env_id] += rate
+
+                if self.path_cursor[env_id] >= float(self.traj_length - 1):
+                    self.path_cursor[env_id] = float(self.traj_length - 1)
+                    self.path_done[env_id] = True
+
         self.robot.set_joint_position_target(q_cmd_all)
 
         if self.cfg.enable_debug_print:
@@ -582,9 +648,6 @@ class AdmittanceControlAction(ActionTerm):
             if self.cfg.debug_print_interval <= 0 or global_step % self.cfg.debug_print_interval == 0:
                 env_id = min(self.cfg.debug_env_id, self._num_envs_local - 1)
                 cur_pos_mm, _, cur_wxyz, _ = self._fk_pose_pybind_corrected(q[env_id])
-
-                z_phase = int(self.z_control_phase[env_id].item())
-                mode_name = "contact_search" if z_phase == 0 else "z_force_track"
 
                 local_debug.print_action_runtime(
                     env_id=env_id,
@@ -608,9 +671,11 @@ class AdmittanceControlAction(ActionTerm):
                     q_cmd=q_cmd_all[env_id, :6].detach().cpu(),
                 )
                 local_debug.print_info(
-                    f"[Action Mode ] env={env_id} mode={mode_name} "
-                    f"| z_phase={z_phase} | measured_fz={float(wrench6[env_id,2].item()):.6f} "
-                    f"| abs_fz={abs(float(wrench6[env_id,2].item())):.6f}"
+                    f"[Action Mode ] env={env_id} mode=variable_speed_path_follow "
+                    f"| measured_fz={float(wrench6[env_id, 2].item()):.6f} "
+                    f"| abs_fz={abs(float(wrench6[env_id, 2].item())):.6f} "
+                    f"| rate={float(self.progress_rate_filtered[env_id].item()):.4f} "
+                    f"| cursor={float(self.path_cursor[env_id].item()):.3f}"
                 )
 
 
@@ -642,17 +707,15 @@ class AdmittanceControlActionCfg(ActionTermCfg):
     tcp_offset_axis: str = "local_z_neg"
     z_target_offset_m: float = 0.0
 
-    contact_on_threshold_n: float = 1.0
-    contact_off_threshold_n: float = 0.5
-    contact_on_dwell_steps: int = 3
-    contact_off_dwell_steps: int = 5
-
-    contact_search_step_mm: float = 0.20
-    contact_search_max_offset_mm: float = 10.0
-    contact_search_direction: float = 1.0
-
     max_z_cmd_step_mm: float = 0.30
-    max_force_z_deviation_mm: float = 3.0
+    max_force_z_deviation_mm: float = 5.0
+
+    # variable progress scheduler
+    base_index_rate: float = 4.0
+    min_index_rate: float = 0.5
+    max_index_rate: float = 8.0
+    progress_rate_ema_beta: float = 0.2
+    force_eps_n: float = 1.0
 
     force_md_ratio: float = 1000.0
     force_fc_fext: float = 50.0
