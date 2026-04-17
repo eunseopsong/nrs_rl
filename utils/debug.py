@@ -75,16 +75,12 @@ def print_action_init(
     body_name: str,
     ee_idx: int,
     num_envs: int,
-    tcp_length_offset_m: float,
-    tcp_offset_axis: str,
 ):
     print(f"[Action] HDF5 file: {hdf5_file_path}")
     print(f"[Action] dataset key: {position_dataset_key}")
     print(f"[Action] traj shape: {traj_shape}")
     print(f"[Action] EE body_name: {body_name}, ee_idx: {ee_idx}")
     print(f"[Action] num_envs: {num_envs}")
-    print(f"[Action] TCP length offset: {tcp_length_offset_m} m")
-    print(f"[Action] TCP offset axis: {tcp_offset_axis}")
 
 
 def print_camera_distance(step: int, mean_distance_env0):
@@ -143,16 +139,12 @@ def print_action_runtime(
     target_xyz,
     target_wxyz,
     target_force,
-    q_now,
-    q_cmd,
 ):
     current_xyz = _as_float_list(current_xyz)
     current_wxyz = _as_float_list(current_wxyz)
     target_xyz = _as_float_list(target_xyz)
     target_wxyz = _as_float_list(target_wxyz)
     target_force = _as_float_list(target_force)
-    q_now = _as_float_list(q_now)
-    q_cmd = _as_float_list(q_cmd)
 
     print("\n" + "=" * 100)
     print(
@@ -218,5 +210,4 @@ def print_action_runtime(
     else:
         print("[Polishing    ] No cached polishing metrics")
 
-    print(f"[Joint Cmd    ] q_now={np.array(q_now)} | q_cmd={np.array(q_cmd)}")
     print("=" * 100)

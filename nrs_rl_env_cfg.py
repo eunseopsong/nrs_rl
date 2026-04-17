@@ -300,7 +300,7 @@ class VisualizationCfg:
 
 @configclass
 class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
-    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=128, env_spacing=2.5)
+    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=64, env_spacing=2.5)
     observations: ObservationCfg = ObservationCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()

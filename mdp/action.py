@@ -8,39 +8,20 @@ from __future__ import annotations
 Force-aware Variable Path-Speed Action
 ================================================================================
 
-[Refactoring goal]
-This version keeps the SAME runtime behavior as the previous version, while
-leaving only:
+[Goal]
+- Keep behavior identical to the current baseline.
+- Reduce runtime overhead / memory pressure where possible.
+- Keep:
+    * original ForceCon parameters
+    * variable index-speed scheduler
+    * debug capability
 
-1) Original-controller parameters
-   - Parameters directly corresponding to ForceCon1DMode5.
-
-2) Variable path-speed scheduler parameters
-   - Parameters required to keep index-speed control for future polishing/reward
-     optimization.
-
-3) Debug parameters
-   - Kept intentionally for comparison and validation.
-
-[This step]
-Removed:
-- integration.asset_name (duplicate)
-- tcp_length_offset_m
-- tcp_offset_axis
-- z_target_offset_m
-- ik_step_size
-
-Already removed previously:
-- max_pos_err
-- max_rot_err
-- max_dq
-- ik_inner_iters
-- dls_lambda
-
-IK:
-- least-squares / pseudo-inverse style using torch.linalg.lstsq()
-- update gain fixed to 1.0:
-    q_next = q_seed + dq
+[Optimizations in this version]
+- Pre-create joint limit tensors once in __init__
+- Avoid repeated tensor allocations where possible
+- Wrap reset/process/apply with torch.no_grad()
+- Do not build expensive debug payloads unless debug print is actually needed
+- Remove q_now/q_cmd debug payload generation path
 
 Units:
 - position: mm
@@ -304,7 +285,8 @@ class AdmittanceControlAction(ActionTerm):
 
         self.robot = self._env.scene[cfg.asset_name]
         self._num_envs_local = self._env.num_envs
-        self._step_dt_local = self._env.step_dt
+        self._step_dt_local = float(self._env.step_dt)
+        self._control_period = float(getattr(y2_cfg, "CONTROL_PERIOD", self._step_dt_local))
 
         body_ids = self.robot.find_bodies(self.int_cfg.body_name)[0]
         if len(body_ids) == 0:
@@ -336,14 +318,22 @@ class AdmittanceControlAction(ActionTerm):
         self.des_pos_mm_raw = torch.zeros((self._num_envs_local, 3), device=self.device)
         self.des_wxyz_raw = torch.zeros((self._num_envs_local, 3), device=self.device)
         self.des_force = torch.zeros((self._num_envs_local, 3), device=self.device)
-
         self.cmd_target_xyz_mm = torch.zeros((self._num_envs_local, 3), dtype=torch.float32, device=self.device)
 
         self.prev_q_cmd_6 = torch.zeros((self._num_envs_local, 6), device=self.device)
         self.prev_valid = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
 
+        if self.int_cfg.joint_lower_limits is not None:
+            self._q_min = torch.tensor(self.int_cfg.joint_lower_limits, device=self.device, dtype=torch.float32)
+        else:
+            self._q_min = None
+        if self.int_cfg.joint_upper_limits is not None:
+            self._q_max = torch.tensor(self.int_cfg.joint_upper_limits, device=self.device, dtype=torch.float32)
+        else:
+            self._q_max = None
+
         self.kin = y2_pb.UR10eKinematics(
-            dt=float(getattr(y2_cfg, "CONTROL_PERIOD", self._step_dt_local)),
+            dt=self._control_period,
             ee2tcp=getattr(y2_cfg, "EE2TCP", [
                 [1.0, 0.0, 0.0, 0.0],
                 [0.0, 1.0, 0.0, 0.0],
@@ -363,7 +353,7 @@ class AdmittanceControlAction(ActionTerm):
             self.force_controllers.append(
                 y2_pb.ForceCon1DMode5(
                     model_path,
-                    float(self._step_dt_local),
+                    self._step_dt_local,
                     1,
                     "cpu",
                     float(self.fc_cfg.force_md_ratio),
@@ -391,8 +381,6 @@ class AdmittanceControlAction(ActionTerm):
             body_name=self.int_cfg.body_name,
             ee_idx=self.ee_idx,
             num_envs=self._num_envs_local,
-            tcp_length_offset_m=0.0,
-            tcp_offset_axis="removed",
         )
 
     @property
@@ -463,10 +451,8 @@ class AdmittanceControlAction(ActionTerm):
 
         q_next = q_seed + dq
 
-        q_min = torch.tensor(self.int_cfg.joint_lower_limits, device=self.device, dtype=torch.float32) if self.int_cfg.joint_lower_limits is not None else None
-        q_max = torch.tensor(self.int_cfg.joint_upper_limits, device=self.device, dtype=torch.float32) if self.int_cfg.joint_upper_limits is not None else None
-        if q_min is not None and q_max is not None:
-            q_next = torch.clamp(q_next, q_min, q_max)
+        if self._q_min is not None and self._q_max is not None:
+            q_next = torch.clamp(q_next, self._q_min, self._q_max)
 
         return q_next, pos_err_norm_mm, rot_err_norm_rad, dq_norm
 
@@ -488,6 +474,7 @@ class AdmittanceControlAction(ActionTerm):
         self.progress_rate_filtered[env_id] = filt
         return filt
 
+    @torch.no_grad()
     def reset(self, env_ids=None):
         super().reset(env_ids)
         if env_ids is None:
@@ -513,14 +500,16 @@ class AdmittanceControlAction(ActionTerm):
         self.prev_q_cmd_6[env_ids] = 0.0
         self.prev_valid[env_ids] = False
 
+        xd0 = float(self.traj_positions[0, 2].item())
         for env_id in env_ids.tolist():
-            xd0 = float(self.traj_positions[0, 2].item())
             self._reset_force_controller_for_env(env_id, xd0)
 
+    @torch.no_grad()
     def process_actions(self, actions: torch.Tensor):
         self._raw_actions = torch.nan_to_num(actions.clone(), nan=0.0)
         self._processed_actions.zero_()
 
+    @torch.no_grad()
     def apply_actions(self):
         q_all = self.robot.data.joint_pos
         q = q_all[:, :6]
@@ -536,6 +525,15 @@ class AdmittanceControlAction(ActionTerm):
         q_cmd_all = q_all.clone()
         pos_err_norm_mm = torch.zeros((self._num_envs_local,), device=self.device)
         rot_err_norm_rad = torch.zeros((self._num_envs_local,), device=self.device)
+
+        debug_needed = False
+        debug_env_id = 0
+        global_step = 0
+        if self.int_cfg.enable_debug_print:
+            global_step = int(self._env.episode_length_buf[0].item())
+            if self.int_cfg.debug_print_interval <= 0 or global_step % self.int_cfg.debug_print_interval == 0:
+                debug_needed = True
+                debug_env_id = min(self.int_cfg.debug_env_id, self._num_envs_local - 1)
 
         pybind_called = False
         pybind_success = False
@@ -601,40 +599,35 @@ class AdmittanceControlAction(ActionTerm):
 
         self.robot.set_joint_position_target(q_cmd_all)
 
-        if self.int_cfg.enable_debug_print:
-            global_step = int(self._env.episode_length_buf[0].item())
-            if self.int_cfg.debug_print_interval <= 0 or global_step % self.int_cfg.debug_print_interval == 0:
-                env_id = min(self.int_cfg.debug_env_id, self._num_envs_local - 1)
-                cur_pos_mm, _, cur_wxyz, _ = self._fk_pose_pybind_corrected(q[env_id])
+        if debug_needed:
+            cur_pos_mm, _, cur_wxyz, _ = self._fk_pose_pybind_corrected(q[debug_env_id])
 
-                local_debug.print_action_runtime(
-                    env_id=env_id,
-                    global_step=global_step,
-                    current_index=int(self.current_target_index[env_id].item()),
-                    next_index=int(self.path_index[env_id].item()),
-                    traj_length=self.traj_length,
-                    path_done=bool(self.path_done[env_id].item()),
-                    pos_err_norm=float(pos_err_norm_mm[env_id].item()),
-                    rot_err_norm=float(rot_err_norm_rad[env_id].item()),
-                    pybind_called=pybind_called,
-                    pybind_success=pybind_success,
-                    inner_iters=1,
-                    dq_norm=pybind_dq_norm,
-                    current_xyz=cur_pos_mm.detach().cpu(),
-                    current_wxyz=cur_wxyz.detach().cpu(),
-                    target_xyz=self.cmd_target_xyz_mm[env_id].detach().cpu(),
-                    target_wxyz=self.des_wxyz_raw[env_id].detach().cpu(),
-                    target_force=self.des_force[env_id].detach().cpu(),
-                    q_now=q[env_id].detach().cpu(),
-                    q_cmd=q_cmd_all[env_id, :6].detach().cpu(),
-                )
-                local_debug.print_info(
-                    f"[Action Mode ] env={env_id} mode=variable_speed_path_follow "
-                    f"| measured_fz={float(wrench6[env_id, 2].item()):.6f} "
-                    f"| abs_fz={abs(float(wrench6[env_id, 2].item())):.6f} "
-                    f"| rate={float(self.progress_rate_filtered[env_id].item()):.4f} "
-                    f"| cursor={float(self.path_cursor[env_id].item()):.3f}"
-                )
+            local_debug.print_action_runtime(
+                env_id=debug_env_id,
+                global_step=global_step,
+                current_index=int(self.current_target_index[debug_env_id].item()),
+                next_index=int(self.path_index[debug_env_id].item()),
+                traj_length=self.traj_length,
+                path_done=bool(self.path_done[debug_env_id].item()),
+                pos_err_norm=float(pos_err_norm_mm[debug_env_id].item()),
+                rot_err_norm=float(rot_err_norm_rad[debug_env_id].item()),
+                pybind_called=pybind_called,
+                pybind_success=pybind_success,
+                inner_iters=1,
+                dq_norm=pybind_dq_norm,
+                current_xyz=cur_pos_mm.detach().cpu(),
+                current_wxyz=cur_wxyz.detach().cpu(),
+                target_xyz=self.cmd_target_xyz_mm[debug_env_id].detach().cpu(),
+                target_wxyz=self.des_wxyz_raw[debug_env_id].detach().cpu(),
+                target_force=self.des_force[debug_env_id].detach().cpu(),
+            )
+            local_debug.print_info(
+                f"[Action Mode ] env={debug_env_id} mode=variable_speed_path_follow "
+                f"| measured_fz={float(wrench6[debug_env_id, 2].item()):.6f} "
+                f"| abs_fz={abs(float(wrench6[debug_env_id, 2].item())):.6f} "
+                f"| rate={float(self.progress_rate_filtered[debug_env_id].item()):.4f} "
+                f"| cursor={float(self.path_cursor[debug_env_id].item()):.3f}"
+            )
 
 
 AdmittanceControlActionCfg.class_type = AdmittanceControlAction
