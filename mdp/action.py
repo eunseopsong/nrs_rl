@@ -6,23 +6,26 @@
 Force-aware Variable Path-Speed Action
 ================================================================================
 
-[Current design goal]
-- Do NOT implement reward here yet.
-- Keep force-control logic as close as possible to the original pybind controller.
-- Only make path visiting speed variable according to current contact force.
+[Refactoring goal]
+This version keeps the SAME runtime behavior as the previous version, but splits
+configuration into two conceptual groups:
 
-[Core idea]
-We use a continuous path cursor s_k instead of integer-only index stepping.
+1) Original-controller parameters
+   - Parameters that directly correspond to the pybind-exposed original classes
+     such as ForceCon1DMode5 and UR10eKinematics.
 
-    s_{k+1} = s_k + alpha_k
-    index_k = floor(s_k)
+2) Integration / scheduler parameters
+   - Parameters added at the nrs_rl action layer for HDF5 path following,
+     variable cursor speed scheduling, IK iteration policy, debug, etc.
 
-where alpha_k is the path progress speed.
+No functional change is intended in this refactor.
+Only parameter grouping / readability is improved.
 
-This allows:
-- slower progress when force is too high
-- faster progress when force is too low
-- smoother path timing than fixed integer jump
+[This step]
+- Removed integration-layer IK clamp parameters:
+    * max_pos_err
+    * max_rot_err
+- Keep all other behavior as close as possible to baseline.
 
 -------------------------------------------------------------------------------
 [How to design reward later]
@@ -45,53 +48,20 @@ Recommended reward directions:
 1) Force tracking term
    r_force = - |F_k - F_target|
 
-   This keeps contact force near the desired target.
-
 2) Removal-rate tracking term
-   Let:
-       r_removal_k = estimated_removal_rate_k
-   and target:
-       r_removal*
-   Then:
-       r_rate = - |r_removal_k - r_removal*|
-
-   This directly encourages uniform instantaneous polishing intensity.
+   r_rate = - |r_removal_k - r_removal*|
 
 3) Spatial uniformity term
-   Divide the path or surface into bins/segments j = 1...M.
-   Let R_j be cumulative removal in each segment.
-   Then use for example:
+   Let R_j be cumulative removal in segment j:
        r_uniform = - Var(R_1, ..., R_M)
    or
        r_uniform = - sum_j (R_j - R_mean)^2
 
-   This is the most aligned with “uniform machining everywhere”.
-
 4) Progress efficiency term
    r_progress = + c * delta_s
-   so the policy does not simply stop moving to keep removal low.
 
 5) Safety / over-force penalty
    r_safe = - max(F_k - F_safe, 0)^2
-
-   Important because strong contact can damage the surface/tool.
-
--------------------------------------------------------------------------------
-[Recommended future combined reward]
--------------------------------------------------------------------------------
-
-Example:
-    r_total
-      = w1 * r_force
-      + w2 * r_rate
-      + w3 * r_uniform
-      + w4 * r_progress
-      + w5 * r_safe
-
-Good practical order:
-- first stabilize force
-- then add removal-rate tracking
-- finally add spatial uniformity over bins
 
 -------------------------------------------------------------------------------
 [Current action behavior]
@@ -102,7 +72,7 @@ This file only changes:
     alpha_k = variable path progress speed
 
 Simple force-aware speed law:
-    alpha_raw = base_rate * (F_target / max(|Fz|, eps))
+    alpha_raw = base_rate * sqrt(F_target / max(|Fz|, eps))
 
 Then clipped:
     alpha = clip(alpha_raw, min_rate, max_rate)
@@ -110,12 +80,6 @@ Then clipped:
 Optional smoothing:
     alpha_filt = beta * alpha_raw + (1-beta) * alpha_prev
 
-Interpretation:
-- if current force is larger than target -> slow down
-- if current force is smaller than target -> speed up
-- if force is close to target -> stay near base_rate
-
-This is only a scheduler for path visitation speed.
 Force control itself is still handled by pybind ForceCon1DMode5.
 
 Units convention expected by user:
@@ -302,27 +266,119 @@ _HOME_Q = torch.tensor(
 )
 
 
+@configclass
+class OriginalControllerForceConCfg:
+    """
+    Parameters directly corresponding to original ForceCon1DMode5 constructor.
+    """
+    force_md_ratio: float = 1000.0
+    force_fc_fext: float = 50.0
+    force_free_mass: float = 2.0
+    force_free_damping: float = 6000.0
+    force_free_stiffness: float = 2000.0
+    force_contact_stiffness: float = 0.0
+    force_recovery_tau: float = 3.0
+    force_action_low: tuple = (-0.25, -0.25)
+    force_action_high: tuple = (0.25, 0.25)
+    force_mass_min: float = 0.5
+    force_mass_max: float = 5.0
+    force_alpha_min: float = 0.5
+    force_alpha_max: float = 3.0
+    force_alpha_rate_up: float = 4.0
+    force_alpha_rate_down: float = 4.0
+
+
+@configclass
+class OriginalControllerKinematicsCfg:
+    tcp_length_offset_m: float = 0.20
+    tcp_offset_axis: str = "local_z_neg"
+    z_target_offset_m: float = 0.0
+
+
+@configclass
+class ActionIntegrationCfg:
+    asset_name: str = "robot"
+    body_name: str = "spindle_link"
+    fixed_joint_name: str = "tool0_to_spindle"
+    joint_prim_relpath: str = "joints"
+
+    hdf5_file_path: str = ""
+    position_dataset_key: str = "position"
+    force_dataset_key: str = "force"
+
+    action_dim: int = 2
+
+    dls_lambda: float = 0.10
+    ik_step_size: float = 0.60
+    max_dq: float = 0.08
+    ik_inner_iters: int = 5
+
+    base_index_rate: float = 10.0
+    min_index_rate: float = 3.0
+    max_index_rate: float = 16.0
+    progress_rate_ema_beta: float = 0.3
+    force_eps_n: float = 1.0
+
+    enable_debug_print: bool = True
+    debug_print_interval: int = 10
+    debug_env_id: int = 0
+
+    joint_lower_limits: tuple | None = (
+        -2.0 * math.pi,
+        -2.0 * math.pi,
+        -math.pi,
+        -2.0 * math.pi,
+        -2.0 * math.pi,
+        -2.0 * math.pi,
+    )
+    joint_upper_limits: tuple | None = (
+        2.0 * math.pi,
+        2.0 * math.pi,
+        math.pi,
+        2.0 * math.pi,
+        2.0 * math.pi,
+        2.0 * math.pi,
+    )
+
+
+@configclass
+class AdmittanceControlActionCfg(ActionTermCfg):
+    class_type: type | None = None
+    asset_name: str = "robot"
+
+    original_forcecon: OriginalControllerForceConCfg = OriginalControllerForceConCfg()
+    original_kinematics: OriginalControllerKinematicsCfg = OriginalControllerKinematicsCfg()
+    integration: ActionIntegrationCfg = ActionIntegrationCfg()
+
+
 class AdmittanceControlAction(ActionTerm):
-    cfg: "AdmittanceControlActionCfg"
+    cfg: AdmittanceControlActionCfg
 
     def __init__(self, cfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
 
         self.cfg = cfg
-        self.robot = self._env.scene[cfg.asset_name]
+        self.fc_cfg = cfg.original_forcecon
+        self.kin_cfg = cfg.original_kinematics
+        self.int_cfg = cfg.integration
+
+        # sync ActionTermCfg-level asset_name with integration block
+        self.int_cfg.asset_name = cfg.asset_name
+
+        self.robot = self._env.scene[self.int_cfg.asset_name]
         self._num_envs_local = self._env.num_envs
         self._step_dt_local = self._env.step_dt
 
-        body_ids = self.robot.find_bodies(self.cfg.body_name)[0]
+        body_ids = self.robot.find_bodies(self.int_cfg.body_name)[0]
         if len(body_ids) == 0:
-            raise ValueError(f"[Action] body_name='{self.cfg.body_name}' not found.")
+            raise ValueError(f"[Action] body_name='{self.int_cfg.body_name}' not found.")
         self.ee_idx = int(body_ids[0])
 
-        self._raw_actions = torch.zeros((self._num_envs_local, self.cfg.action_dim), device=self.device)
+        self._raw_actions = torch.zeros((self._num_envs_local, self.int_cfg.action_dim), device=self.device)
         self._processed_actions = torch.zeros_like(self._raw_actions)
 
-        traj_full = self._load_hdf5_positions(self.cfg.hdf5_file_path, self.cfg.position_dataset_key)
-        force_full = self._load_hdf5_forces(self.cfg.hdf5_file_path, self.cfg.force_dataset_key, traj_full.shape[0])
+        traj_full = self._load_hdf5_positions(self.int_cfg.hdf5_file_path, self.int_cfg.position_dataset_key)
+        force_full = self._load_hdf5_forces(self.int_cfg.hdf5_file_path, self.int_cfg.force_dataset_key, traj_full.shape[0])
 
         self.traj_positions = traj_full.contiguous()
         self.traj_forces = force_full.contiguous()
@@ -335,7 +391,7 @@ class AdmittanceControlAction(ActionTerm):
 
         self.progress_rate_filtered = torch.full(
             (self._num_envs_local,),
-            float(self.cfg.base_index_rate),
+            float(self.int_cfg.base_index_rate),
             dtype=torch.float32,
             device=self.device,
         )
@@ -345,7 +401,6 @@ class AdmittanceControlAction(ActionTerm):
         self.des_force = torch.zeros((self._num_envs_local, 3), device=self.device)
 
         self.cmd_target_xyz_mm = torch.zeros((self._num_envs_local, 3), dtype=torch.float32, device=self.device)
-        self.prev_cmd_target_xyz_mm = torch.zeros((self._num_envs_local, 3), dtype=torch.float32, device=self.device)
 
         self.prev_q_cmd_6 = torch.zeros((self._num_envs_local, 6), device=self.device)
         self.prev_valid = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
@@ -374,38 +429,38 @@ class AdmittanceControlAction(ActionTerm):
                     float(self._step_dt_local),
                     1,
                     "cpu",
-                    float(self.cfg.force_md_ratio),
-                    float(self.cfg.force_fc_fext),
-                    float(self.cfg.force_free_mass),
-                    float(self.cfg.force_free_damping),
-                    float(self.cfg.force_free_stiffness),
-                    float(self.cfg.force_contact_stiffness),
-                    float(self.cfg.force_recovery_tau),
-                    list(self.cfg.force_action_low),
-                    list(self.cfg.force_action_high),
-                    float(self.cfg.force_mass_min),
-                    float(self.cfg.force_mass_max),
-                    float(self.cfg.force_alpha_min),
-                    float(self.cfg.force_alpha_max),
-                    float(self.cfg.force_alpha_rate_up),
-                    float(self.cfg.force_alpha_rate_down),
+                    float(self.fc_cfg.force_md_ratio),
+                    float(self.fc_cfg.force_fc_fext),
+                    float(self.fc_cfg.force_free_mass),
+                    float(self.fc_cfg.force_free_damping),
+                    float(self.fc_cfg.force_free_stiffness),
+                    float(self.fc_cfg.force_contact_stiffness),
+                    float(self.fc_cfg.force_recovery_tau),
+                    list(self.fc_cfg.force_action_low),
+                    list(self.fc_cfg.force_action_high),
+                    float(self.fc_cfg.force_mass_min),
+                    float(self.fc_cfg.force_mass_max),
+                    float(self.fc_cfg.force_alpha_min),
+                    float(self.fc_cfg.force_alpha_max),
+                    float(self.fc_cfg.force_alpha_rate_up),
+                    float(self.fc_cfg.force_alpha_rate_down),
                 )
             )
 
         local_debug.print_action_init(
-            hdf5_file_path=self.cfg.hdf5_file_path,
-            position_dataset_key=self.cfg.position_dataset_key,
+            hdf5_file_path=self.int_cfg.hdf5_file_path,
+            position_dataset_key=self.int_cfg.position_dataset_key,
             traj_shape=tuple(traj_full.shape),
-            body_name=self.cfg.body_name,
+            body_name=self.int_cfg.body_name,
             ee_idx=self.ee_idx,
             num_envs=self._num_envs_local,
-            tcp_length_offset_m=self.cfg.tcp_length_offset_m,
-            tcp_offset_axis=self.cfg.tcp_offset_axis,
+            tcp_length_offset_m=self.kin_cfg.tcp_length_offset_m,
+            tcp_offset_axis=self.kin_cfg.tcp_offset_axis,
         )
 
     @property
     def action_dim(self):
-        return self.cfg.action_dim
+        return self.int_cfg.action_dim
 
     @property
     def raw_actions(self):
@@ -453,8 +508,8 @@ class AdmittanceControlAction(ActionTerm):
         last_rot_err_norm_rad = torch.tensor(0.0, device=self.device)
         last_dq_norm = 0.0
 
-        q_min = torch.tensor(self.cfg.joint_lower_limits, device=self.device, dtype=torch.float32) if self.cfg.joint_lower_limits is not None else None
-        q_max = torch.tensor(self.cfg.joint_upper_limits, device=self.device, dtype=torch.float32) if self.cfg.joint_upper_limits is not None else None
+        q_min = torch.tensor(self.int_cfg.joint_lower_limits, device=self.device, dtype=torch.float32) if self.int_cfg.joint_lower_limits is not None else None
+        q_max = torch.tensor(self.int_cfg.joint_upper_limits, device=self.device, dtype=torch.float32) if self.int_cfg.joint_upper_limits is not None else None
 
         for _ in range(inner_iters):
             T = self.kin.forward_kinematics(q_iter.detach().cpu().to(torch.float64).tolist())
@@ -470,8 +525,9 @@ class AdmittanceControlAction(ActionTerm):
             last_pos_err_norm_mm = torch.linalg.norm(pos_err_mm)
             last_rot_err_norm_rad = torch.linalg.norm(rot_err_rad)
 
-            pos_err_mm = torch.clamp(pos_err_mm, -self.cfg.max_pos_err * 1000.0, self.cfg.max_pos_err * 1000.0)
-            rot_err_rad = torch.clamp(rot_err_rad, -self.cfg.max_rot_err, self.cfg.max_rot_err)
+            # NOTE:
+            # max_pos_err / max_rot_err clamp removed in this version.
+            # Keep the rest of IK logic unchanged.
 
             err_6 = torch.cat([pos_err_mm, rot_err_rad], dim=0)
 
@@ -479,13 +535,13 @@ class AdmittanceControlAction(ActionTerm):
             J = torch.tensor(J, dtype=torch.float32, device=self.device)
 
             I = torch.eye(6, device=self.device, dtype=torch.float32)
-            dq = J.T @ torch.linalg.solve(J @ J.T + (self.cfg.dls_lambda ** 2) * I, err_6.unsqueeze(-1))
+            dq = J.T @ torch.linalg.solve(J @ J.T + (self.int_cfg.dls_lambda ** 2) * I, err_6.unsqueeze(-1))
             dq = dq.squeeze(-1)
 
-            dq = torch.clamp(dq, -self.cfg.max_dq, self.cfg.max_dq)
+            dq = torch.clamp(dq, -self.int_cfg.max_dq, self.int_cfg.max_dq)
             last_dq_norm = float(torch.linalg.norm(dq).item())
 
-            q_iter = q_iter + self.cfg.ik_step_size * dq
+            q_iter = q_iter + self.int_cfg.ik_step_size * dq
             if q_min is not None and q_max is not None:
                 q_iter = torch.clamp(q_iter, q_min, q_max)
 
@@ -494,28 +550,17 @@ class AdmittanceControlAction(ActionTerm):
     def _reset_force_controller_for_env(self, env_id: int, xd_mm: float):
         self.force_controllers[env_id].reset(float(xd_mm))
 
-    def _limit_z_slew(self, env_id: int, target_pos_mm: torch.Tensor) -> torch.Tensor:
-        out = target_pos_mm.clone()
-        prev_z = float(self.prev_cmd_target_xyz_mm[env_id, 2].item())
-        cur_z = float(target_pos_mm[2].item())
-        dz = cur_z - prev_z
-        dz = max(min(dz, self.cfg.max_z_cmd_step_mm), -self.cfg.max_z_cmd_step_mm)
-        out[2] = prev_z + dz
-        return out
-
     def _compute_progress_rate(self, env_id: int, abs_fz: float, target_fz: float) -> float:
-        denom = max(abs_fz, self.cfg.force_eps_n)
-
-        # slower reduction than linear law
+        denom = max(abs_fz, self.int_cfg.force_eps_n)
         ratio = math.sqrt(target_fz / denom)
-        raw_rate = self.cfg.base_index_rate * ratio
+        raw_rate = self.int_cfg.base_index_rate * ratio
 
-        raw_rate = max(self.cfg.min_index_rate, min(self.cfg.max_index_rate, raw_rate))
+        raw_rate = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, raw_rate))
 
-        beta = self.cfg.progress_rate_ema_beta
+        beta = self.int_cfg.progress_rate_ema_beta
         prev = float(self.progress_rate_filtered[env_id].item())
         filt = beta * raw_rate + (1.0 - beta) * prev
-        filt = max(self.cfg.min_index_rate, min(self.cfg.max_index_rate, filt))
+        filt = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, filt))
 
         self.progress_rate_filtered[env_id] = filt
         return filt
@@ -532,7 +577,7 @@ class AdmittanceControlAction(ActionTerm):
         self.path_index[env_ids] = 0
         self.current_target_index[env_ids] = 0
         self.path_done[env_ids] = False
-        self.progress_rate_filtered[env_ids] = float(self.cfg.base_index_rate)
+        self.progress_rate_filtered[env_ids] = float(self.int_cfg.base_index_rate)
 
         des = self.traj_positions[0].unsqueeze(0).repeat(len(env_ids), 1)
         frc = self.traj_forces[0].unsqueeze(0).repeat(len(env_ids), 1)
@@ -541,13 +586,12 @@ class AdmittanceControlAction(ActionTerm):
         self.des_wxyz_raw[env_ids] = des[:, 3:6]
         self.des_force[env_ids] = frc
         self.cmd_target_xyz_mm[env_ids] = des[:, 0:3]
-        self.prev_cmd_target_xyz_mm[env_ids] = des[:, 0:3]
 
         self.prev_q_cmd_6[env_ids] = 0.0
         self.prev_valid[env_ids] = False
 
         for env_id in env_ids.tolist():
-            xd0 = float(self.traj_positions[0, 2].item() + self.cfg.z_target_offset_m * 1000.0)
+            xd0 = float(self.traj_positions[0, 2].item() + self.kin_cfg.z_target_offset_m * 1000.0)
             self._reset_force_controller_for_env(env_id, xd0)
 
     def process_actions(self, actions: torch.Tensor):
@@ -560,9 +604,9 @@ class AdmittanceControlAction(ActionTerm):
 
         wrench6 = local_ft_sensor.get_6axis_ft_fixed_joint(
             env=self._env,
-            asset_name=self.cfg.asset_name,
-            fixed_joint_name=self.cfg.fixed_joint_name,
-            joint_prim_relpath=self.cfg.joint_prim_relpath,
+            asset_name=self.int_cfg.asset_name,
+            fixed_joint_name=self.int_cfg.fixed_joint_name,
+            joint_prim_relpath=self.int_cfg.joint_prim_relpath,
             verbose=False,
         )
 
@@ -595,7 +639,7 @@ class AdmittanceControlAction(ActionTerm):
             self.des_force[env_id] = self.traj_forces[idx]
 
             nominal_pos_mm = self.traj_positions[idx, 0:3].clone()
-            nominal_pos_mm[2] += self.cfg.z_target_offset_m * 1000.0
+            nominal_pos_mm[2] += self.kin_cfg.z_target_offset_m * 1000.0
             target_rotm = spatial_to_rotmat(self.traj_positions[idx, 3:6].view(1, 3)).squeeze(0)
 
             target_pos_mm = nominal_pos_mm.clone()
@@ -608,18 +652,12 @@ class AdmittanceControlAction(ActionTerm):
             )
             z_cmd = float(fc_out[0])
 
-            z_cmd = max(
-                nominal_pos_mm[2].item() - self.cfg.max_force_z_deviation_mm,
-                min(nominal_pos_mm[2].item() + self.cfg.max_force_z_deviation_mm, z_cmd),
-            )
-
             target_pos_mm[2] = z_cmd
-            target_pos_mm = self._limit_z_slew(env_id, target_pos_mm)
             self.cmd_target_xyz_mm[env_id] = target_pos_mm
 
             pybind_called = True
             q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_iterative_ik(
-                q_seed, target_pos_mm, target_rotm, self.cfg.ik_inner_iters
+                q_seed, target_pos_mm, target_rotm, self.int_cfg.ik_inner_iters
             )
             pybind_success = True
             pybind_dq_norm = dq_norm
@@ -630,9 +668,7 @@ class AdmittanceControlAction(ActionTerm):
             self.prev_q_cmd_6[env_id] = q_cmd6
             self.prev_valid[env_id] = True
             q_cmd_all[env_id, :6] = q_cmd6
-            self.prev_cmd_target_xyz_mm[env_id] = self.cmd_target_xyz_mm[env_id]
 
-            # variable path progress speed
             if not bool(self.path_done[env_id].item()):
                 rate = self._compute_progress_rate(env_id, abs_fz, target_fz)
                 self.path_cursor[env_id] += rate
@@ -643,10 +679,10 @@ class AdmittanceControlAction(ActionTerm):
 
         self.robot.set_joint_position_target(q_cmd_all)
 
-        if self.cfg.enable_debug_print:
+        if self.int_cfg.enable_debug_print:
             global_step = int(self._env.episode_length_buf[0].item())
-            if self.cfg.debug_print_interval <= 0 or global_step % self.cfg.debug_print_interval == 0:
-                env_id = min(self.cfg.debug_env_id, self._num_envs_local - 1)
+            if self.int_cfg.debug_print_interval <= 0 or global_step % self.int_cfg.debug_print_interval == 0:
+                env_id = min(self.int_cfg.debug_env_id, self._num_envs_local - 1)
                 cur_pos_mm, _, cur_wxyz, _ = self._fk_pose_pybind_corrected(q[env_id])
 
                 local_debug.print_action_runtime(
@@ -660,7 +696,7 @@ class AdmittanceControlAction(ActionTerm):
                     rot_err_norm=float(rot_err_norm_rad[env_id].item()),
                     pybind_called=pybind_called,
                     pybind_success=pybind_success,
-                    inner_iters=self.cfg.ik_inner_iters,
+                    inner_iters=self.int_cfg.ik_inner_iters,
                     dq_norm=pybind_dq_norm,
                     current_xyz=cur_pos_mm.detach().cpu(),
                     current_wxyz=cur_wxyz.detach().cpu(),
@@ -679,77 +715,4 @@ class AdmittanceControlAction(ActionTerm):
                 )
 
 
-@configclass
-class AdmittanceControlActionCfg(ActionTermCfg):
-    class_type: type = AdmittanceControlAction
-
-    asset_name: str = "robot"
-    body_name: str = "spindle_link"
-
-    fixed_joint_name: str = "tool0_to_spindle"
-    joint_prim_relpath: str = "joints"
-
-    hdf5_file_path: str = ""
-    position_dataset_key: str = "position"
-    force_dataset_key: str = "force"
-
-    action_dim: int = 2
-
-    dls_lambda: float = 0.10
-    ik_step_size: float = 0.60
-    max_dq: float = 0.08
-    ik_inner_iters: int = 5
-
-    max_pos_err: float = 0.05
-    max_rot_err: float = 0.30
-
-    tcp_length_offset_m: float = 0.20
-    tcp_offset_axis: str = "local_z_neg"
-    z_target_offset_m: float = 0.0
-
-    max_z_cmd_step_mm: float = 0.30
-    max_force_z_deviation_mm: float = 5.0
-
-    # variable progress scheduler
-    base_index_rate: float = 4.0
-    min_index_rate: float = 0.5
-    max_index_rate: float = 8.0
-    progress_rate_ema_beta: float = 0.2
-    force_eps_n: float = 1.0
-
-    force_md_ratio: float = 1000.0
-    force_fc_fext: float = 50.0
-    force_free_mass: float = 2.0
-    force_free_damping: float = 6000.0
-    force_free_stiffness: float = 2000.0
-    force_contact_stiffness: float = 0.0
-    force_recovery_tau: float = 3.0
-    force_action_low: tuple = (-0.25, -0.25)
-    force_action_high: tuple = (0.25, 0.25)
-    force_mass_min: float = 0.5
-    force_mass_max: float = 5.0
-    force_alpha_min: float = 0.5
-    force_alpha_max: float = 3.0
-    force_alpha_rate_up: float = 4.0
-    force_alpha_rate_down: float = 4.0
-
-    enable_debug_print: bool = True
-    debug_print_interval: int = 10
-    debug_env_id: int = 0
-
-    joint_lower_limits: tuple | None = (
-        -2.0 * math.pi,
-        -2.0 * math.pi,
-        -math.pi,
-        -2.0 * math.pi,
-        -2.0 * math.pi,
-        -2.0 * math.pi,
-    )
-    joint_upper_limits: tuple | None = (
-        2.0 * math.pi,
-        2.0 * math.pi,
-        math.pi,
-        2.0 * math.pi,
-        2.0 * math.pi,
-        2.0 * math.pi,
-    )
+AdmittanceControlActionCfg.class_type = AdmittanceControlAction

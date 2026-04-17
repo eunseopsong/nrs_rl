@@ -78,59 +78,58 @@ class SpindleSceneCfg(InteractiveSceneCfg):
 @configclass
 class ActionsCfg:
     arm_action = local_action.AdmittanceControlActionCfg(
+        class_type=local_action.AdmittanceControlAction,
         asset_name="robot",
-        body_name="spindle_link",
-        fixed_joint_name="tool0_to_spindle",
-        joint_prim_relpath="joints",
+        original_forcecon=local_action.OriginalControllerForceConCfg(
+            force_md_ratio=1000.0,
+            force_fc_fext=50.0,
+            force_free_mass=2.0,
+            force_free_damping=6000.0,
+            force_free_stiffness=2000.0,
+            force_contact_stiffness=0.0,
+            force_recovery_tau=3.0,
+            force_action_low=(-0.25, -0.25),
+            force_action_high=(0.25, 0.25),
+            force_mass_min=0.5,
+            force_mass_max=5.0,
+            force_alpha_min=0.5,
+            force_alpha_max=3.0,
+            force_alpha_rate_up=4.0,
+            force_alpha_rate_down=4.0,
+        ),
+        original_kinematics=local_action.OriginalControllerKinematicsCfg(
+            tcp_length_offset_m=0.20,
+            tcp_offset_axis="local_z_neg",
+            z_target_offset_m=0.0,
+        ),
+        integration=local_action.ActionIntegrationCfg(
+            asset_name="robot",
+            body_name="spindle_link",
+            fixed_joint_name="tool0_to_spindle",
+            joint_prim_relpath="joints",
 
-        hdf5_file_path=HDF5_TRAJ_PATH,
-        position_dataset_key="position",
-        force_dataset_key="force",
+            hdf5_file_path=HDF5_TRAJ_PATH,
+            position_dataset_key="position",
+            force_dataset_key="force",
 
-        action_dim=2,
+            action_dim=2,
 
-        dls_lambda=0.10,
-        ik_step_size=0.60,
-        max_dq=0.08,
-        ik_inner_iters=5,
+            dls_lambda=0.10,
+            ik_step_size=0.60,
+            max_dq=0.08,
+            ik_inner_iters=5,
 
-        max_pos_err=0.05,
-        max_rot_err=0.30,
+            base_index_rate=10.0,
+            min_index_rate=3.0,
+            max_index_rate=16.0,
+            progress_rate_ema_beta=0.3,
+            force_eps_n=1.0,
 
-        tcp_length_offset_m=0.20,
-        tcp_offset_axis="local_z_neg",
-        z_target_offset_m=0.0,
-
-        max_z_cmd_step_mm=0.30,
-        max_force_z_deviation_mm=5.0,
-
-        base_index_rate=10.0,
-        min_index_rate=3.0,
-        max_index_rate=16.0,
-        progress_rate_ema_beta=0.3,
-        force_eps_n=1.0,
-
-        force_md_ratio=1000.0,
-        force_fc_fext=50.0,
-        force_free_mass=2.0,
-        force_free_damping=6000.0,
-        force_free_stiffness=2000.0,
-        force_contact_stiffness=0.0,
-        force_recovery_tau=3.0,
-        force_action_low=(-0.25, -0.25),
-        force_action_high=(0.25, 0.25),
-        force_mass_min=0.5,
-        force_mass_max=5.0,
-        force_alpha_min=0.5,
-        force_alpha_max=3.0,
-        force_alpha_rate_up=4.0,
-        force_alpha_rate_down=4.0,
-
-        enable_debug_print=True,
-        debug_print_interval=10,
-        debug_env_id=0,
+            enable_debug_print=True,
+            debug_print_interval=10,
+            debug_env_id=0,
+        ),
     )
-
 
 @configclass
 class ObservationCfg:
