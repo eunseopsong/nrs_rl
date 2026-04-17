@@ -107,7 +107,6 @@ class ActionsCfg:
             force_dataset_key="force",
 
             action_dim=2,
-            ik_step_size=0.60,
 
             base_index_rate=10.0,
             min_index_rate=3.0,
@@ -116,7 +115,7 @@ class ActionsCfg:
             force_eps_n=1.0,
 
             enable_debug_print=True,
-            debug_print_interval=10,
+            debug_print_interval=50,
             debug_env_id=0,
         ),
     )
@@ -301,7 +300,7 @@ class VisualizationCfg:
 
 @configclass
 class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
-    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=1, env_spacing=2.5)
+    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=128, env_spacing=2.5)
     observations: ObservationCfg = ObservationCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()

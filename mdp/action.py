@@ -28,6 +28,7 @@ Removed:
 - tcp_length_offset_m
 - tcp_offset_axis
 - z_target_offset_m
+- ik_step_size
 
 Already removed previously:
 - max_pos_err
@@ -38,6 +39,8 @@ Already removed previously:
 
 IK:
 - least-squares / pseudo-inverse style using torch.linalg.lstsq()
+- update gain fixed to 1.0:
+    q_next = q_seed + dq
 
 Units:
 - position: mm
@@ -251,16 +254,13 @@ class ActionIntegrationCfg:
     force_dataset_key: str = "force"
 
     action_dim: int = 2
-    ik_step_size: float = 0.60
 
-    # variable index-speed scheduler (kept intentionally)
     base_index_rate: float = 10.0
     min_index_rate: float = 3.0
     max_index_rate: float = 16.0
     progress_rate_ema_beta: float = 0.3
     force_eps_n: float = 1.0
 
-    # debug (kept intentionally)
     enable_debug_print: bool = True
     debug_print_interval: int = 10
     debug_env_id: int = 0
@@ -461,7 +461,7 @@ class AdmittanceControlAction(ActionTerm):
         dq = torch.linalg.lstsq(J, err_6.unsqueeze(-1)).solution.squeeze(-1)
         dq_norm = float(torch.linalg.norm(dq).item())
 
-        q_next = q_seed + self.int_cfg.ik_step_size * dq
+        q_next = q_seed + dq
 
         q_min = torch.tensor(self.int_cfg.joint_lower_limits, device=self.device, dtype=torch.float32) if self.int_cfg.joint_lower_limits is not None else None
         q_max = torch.tensor(self.int_cfg.joint_upper_limits, device=self.device, dtype=torch.float32) if self.int_cfg.joint_upper_limits is not None else None
