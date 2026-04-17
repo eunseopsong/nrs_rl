@@ -97,13 +97,7 @@ class ActionsCfg:
             force_alpha_rate_up=4.0,
             force_alpha_rate_down=4.0,
         ),
-        original_kinematics=local_action.OriginalControllerKinematicsCfg(
-            tcp_length_offset_m=0.20,
-            tcp_offset_axis="local_z_neg",
-            z_target_offset_m=0.0,
-        ),
         integration=local_action.ActionIntegrationCfg(
-            asset_name="robot",
             body_name="spindle_link",
             fixed_joint_name="tool0_to_spindle",
             joint_prim_relpath="joints",
@@ -113,8 +107,6 @@ class ActionsCfg:
             force_dataset_key="force",
 
             action_dim=2,
-
-            dls_lambda=0.10,
             ik_step_size=0.60,
 
             base_index_rate=10.0,

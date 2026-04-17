@@ -1,93 +1,50 @@
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 """
 ================================================================================
 Force-aware Variable Path-Speed Action
 ================================================================================
 
 [Refactoring goal]
-This version keeps the SAME runtime behavior as the previous version, but splits
-configuration into two conceptual groups:
+This version keeps the SAME runtime behavior as the previous version, while
+leaving only:
 
 1) Original-controller parameters
-   - Parameters that directly correspond to the pybind-exposed original classes
-     such as ForceCon1DMode5 and UR10eKinematics.
+   - Parameters directly corresponding to ForceCon1DMode5.
 
-2) Integration / scheduler parameters
-   - Parameters added at the nrs_rl action layer for HDF5 path following,
-     variable cursor speed scheduling, IK iteration policy, debug, etc.
+2) Variable path-speed scheduler parameters
+   - Parameters required to keep index-speed control for future polishing/reward
+     optimization.
+
+3) Debug parameters
+   - Kept intentionally for comparison and validation.
 
 [This step]
-- Removed integration-layer IK parameters:
-    * max_dq
-    * ik_inner_iters
-    * (already removed previously: max_pos_err, max_rot_err)
-- Keep the rest of the action logic as close as possible to baseline.
+Removed:
+- integration.asset_name (duplicate)
+- tcp_length_offset_m
+- tcp_offset_axis
+- z_target_offset_m
 
--------------------------------------------------------------------------------
-[How to design reward later]
--------------------------------------------------------------------------------
+Already removed previously:
+- max_pos_err
+- max_rot_err
+- max_dq
+- ik_inner_iters
+- dls_lambda
 
-Suppose polishing/removal is approximately related to:
-    removal_rate_k ~ F_k * v_k
-or more conservatively:
-    removal_rate_k ~ max(F_k - F_dead, 0) * v_k
+IK:
+- least-squares / pseudo-inverse style using torch.linalg.lstsq()
 
-where:
-- F_k : normal contact force magnitude at step k
-- v_k : actual path traversal speed or Cartesian speed
-
-If the final goal is "uniform removal over all path regions", then reward should
-NOT only punish force error. It should also consider local accumulated removal.
-
-Recommended reward directions:
-
-1) Force tracking term
-   r_force = - |F_k - F_target|
-
-2) Removal-rate tracking term
-   r_rate = - |r_removal_k - r_removal*|
-
-3) Spatial uniformity term
-   Let R_j be cumulative removal in segment j:
-       r_uniform = - Var(R_1, ..., R_M)
-   or
-       r_uniform = - sum_j (R_j - R_mean)^2
-
-4) Progress efficiency term
-   r_progress = + c * delta_s
-
-5) Safety / over-force penalty
-   r_safe = - max(F_k - F_safe, 0)^2
-
--------------------------------------------------------------------------------
-[Current action behavior]
--------------------------------------------------------------------------------
-
-This file does NOT compute reward.
-This file only changes:
-    alpha_k = variable path progress speed
-
-Simple force-aware speed law:
-    alpha_raw = base_rate * sqrt(F_target / max(|Fz|, eps))
-
-Then clipped:
-    alpha = clip(alpha_raw, min_rate, max_rate)
-
-Optional smoothing:
-    alpha_filt = beta * alpha_raw + (1-beta) * alpha_prev
-
-Force control itself is still handled by pybind ForceCon1DMode5.
-
-Units convention expected by user:
+Units:
 - position: mm
 - orientation: rad
 - force: N
 ================================================================================
 """
-
-from __future__ import annotations
 
 import math
 import os
@@ -284,15 +241,7 @@ class OriginalControllerForceConCfg:
 
 
 @configclass
-class OriginalControllerKinematicsCfg:
-    tcp_length_offset_m: float = 0.20
-    tcp_offset_axis: str = "local_z_neg"
-    z_target_offset_m: float = 0.0
-
-
-@configclass
 class ActionIntegrationCfg:
-    asset_name: str = "robot"
     body_name: str = "spindle_link"
     fixed_joint_name: str = "tool0_to_spindle"
     joint_prim_relpath: str = "joints"
@@ -302,16 +251,16 @@ class ActionIntegrationCfg:
     force_dataset_key: str = "force"
 
     action_dim: int = 2
-
-    dls_lambda: float = 0.10
     ik_step_size: float = 0.60
 
+    # variable index-speed scheduler (kept intentionally)
     base_index_rate: float = 10.0
     min_index_rate: float = 3.0
     max_index_rate: float = 16.0
     progress_rate_ema_beta: float = 0.3
     force_eps_n: float = 1.0
 
+    # debug (kept intentionally)
     enable_debug_print: bool = True
     debug_print_interval: int = 10
     debug_env_id: int = 0
@@ -340,7 +289,6 @@ class AdmittanceControlActionCfg(ActionTermCfg):
     asset_name: str = "robot"
 
     original_forcecon: OriginalControllerForceConCfg = OriginalControllerForceConCfg()
-    original_kinematics: OriginalControllerKinematicsCfg = OriginalControllerKinematicsCfg()
     integration: ActionIntegrationCfg = ActionIntegrationCfg()
 
 
@@ -352,12 +300,9 @@ class AdmittanceControlAction(ActionTerm):
 
         self.cfg = cfg
         self.fc_cfg = cfg.original_forcecon
-        self.kin_cfg = cfg.original_kinematics
         self.int_cfg = cfg.integration
 
-        self.int_cfg.asset_name = cfg.asset_name
-
-        self.robot = self._env.scene[self.int_cfg.asset_name]
+        self.robot = self._env.scene[cfg.asset_name]
         self._num_envs_local = self._env.num_envs
         self._step_dt_local = self._env.step_dt
 
@@ -446,8 +391,8 @@ class AdmittanceControlAction(ActionTerm):
             body_name=self.int_cfg.body_name,
             ee_idx=self.ee_idx,
             num_envs=self._num_envs_local,
-            tcp_length_offset_m=self.kin_cfg.tcp_length_offset_m,
-            tcp_offset_axis=self.kin_cfg.tcp_offset_axis,
+            tcp_length_offset_m=0.0,
+            tcp_offset_axis="removed",
         )
 
     @property
@@ -495,12 +440,6 @@ class AdmittanceControlAction(ActionTerm):
         return pos_mm, quat_corr, wxyz_corr, R_corr
 
     def _solve_pybind_single_step_ik(self, q_seed: torch.Tensor, target_pos_mm: torch.Tensor, target_rotm: torch.Tensor):
-        """
-        Single IK update step version.
-        - max_dq removed
-        - ik_inner_iters removed
-        - max_pos_err / max_rot_err already removed
-        """
         T = self.kin.forward_kinematics(q_seed.detach().cpu().to(torch.float64).tolist())
         T = torch.tensor(T, dtype=torch.float32, device=self.device)
 
@@ -519,10 +458,7 @@ class AdmittanceControlAction(ActionTerm):
         J = self.kin.calculate_jacobian(q_seed.detach().cpu().to(torch.float64).tolist())
         J = torch.tensor(J, dtype=torch.float32, device=self.device)
 
-        I = torch.eye(6, device=self.device, dtype=torch.float32)
-        dq = J.T @ torch.linalg.solve(J @ J.T + (self.int_cfg.dls_lambda ** 2) * I, err_6.unsqueeze(-1))
-        dq = dq.squeeze(-1)
-
+        dq = torch.linalg.lstsq(J, err_6.unsqueeze(-1)).solution.squeeze(-1)
         dq_norm = float(torch.linalg.norm(dq).item())
 
         q_next = q_seed + self.int_cfg.ik_step_size * dq
@@ -578,7 +514,7 @@ class AdmittanceControlAction(ActionTerm):
         self.prev_valid[env_ids] = False
 
         for env_id in env_ids.tolist():
-            xd0 = float(self.traj_positions[0, 2].item() + self.kin_cfg.z_target_offset_m * 1000.0)
+            xd0 = float(self.traj_positions[0, 2].item())
             self._reset_force_controller_for_env(env_id, xd0)
 
     def process_actions(self, actions: torch.Tensor):
@@ -591,7 +527,7 @@ class AdmittanceControlAction(ActionTerm):
 
         wrench6 = local_ft_sensor.get_6axis_ft_fixed_joint(
             env=self._env,
-            asset_name=self.int_cfg.asset_name,
+            asset_name=self.cfg.asset_name,
             fixed_joint_name=self.int_cfg.fixed_joint_name,
             joint_prim_relpath=self.int_cfg.joint_prim_relpath,
             verbose=False,
@@ -626,7 +562,6 @@ class AdmittanceControlAction(ActionTerm):
             self.des_force[env_id] = self.traj_forces[idx]
 
             nominal_pos_mm = self.traj_positions[idx, 0:3].clone()
-            nominal_pos_mm[2] += self.kin_cfg.z_target_offset_m * 1000.0
             target_rotm = spatial_to_rotmat(self.traj_positions[idx, 3:6].view(1, 3)).squeeze(0)
 
             target_pos_mm = nominal_pos_mm.clone()
