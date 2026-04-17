@@ -18,14 +18,12 @@ configuration into two conceptual groups:
    - Parameters added at the nrs_rl action layer for HDF5 path following,
      variable cursor speed scheduling, IK iteration policy, debug, etc.
 
-No functional change is intended in this refactor.
-Only parameter grouping / readability is improved.
-
 [This step]
-- Removed integration-layer IK clamp parameters:
-    * max_pos_err
-    * max_rot_err
-- Keep all other behavior as close as possible to baseline.
+- Removed integration-layer IK parameters:
+    * max_dq
+    * ik_inner_iters
+    * (already removed previously: max_pos_err, max_rot_err)
+- Keep the rest of the action logic as close as possible to baseline.
 
 -------------------------------------------------------------------------------
 [How to design reward later]
@@ -268,9 +266,6 @@ _HOME_Q = torch.tensor(
 
 @configclass
 class OriginalControllerForceConCfg:
-    """
-    Parameters directly corresponding to original ForceCon1DMode5 constructor.
-    """
     force_md_ratio: float = 1000.0
     force_fc_fext: float = 50.0
     force_free_mass: float = 2.0
@@ -310,8 +305,6 @@ class ActionIntegrationCfg:
 
     dls_lambda: float = 0.10
     ik_step_size: float = 0.60
-    max_dq: float = 0.08
-    ik_inner_iters: int = 5
 
     base_index_rate: float = 10.0
     min_index_rate: float = 3.0
@@ -362,7 +355,6 @@ class AdmittanceControlAction(ActionTerm):
         self.kin_cfg = cfg.original_kinematics
         self.int_cfg = cfg.integration
 
-        # sync ActionTermCfg-level asset_name with integration block
         self.int_cfg.asset_name = cfg.asset_name
 
         self.robot = self._env.scene[self.int_cfg.asset_name]
@@ -502,50 +494,45 @@ class AdmittanceControlAction(ActionTerm):
         wxyz_corr = rotmat_to_spatial(R_corr.unsqueeze(0)).squeeze(0)
         return pos_mm, quat_corr, wxyz_corr, R_corr
 
-    def _solve_pybind_iterative_ik(self, q_seed: torch.Tensor, target_pos_mm: torch.Tensor, target_rotm: torch.Tensor, inner_iters: int):
-        q_iter = q_seed.clone()
-        last_pos_err_norm_mm = torch.tensor(0.0, device=self.device)
-        last_rot_err_norm_rad = torch.tensor(0.0, device=self.device)
-        last_dq_norm = 0.0
+    def _solve_pybind_single_step_ik(self, q_seed: torch.Tensor, target_pos_mm: torch.Tensor, target_rotm: torch.Tensor):
+        """
+        Single IK update step version.
+        - max_dq removed
+        - ik_inner_iters removed
+        - max_pos_err / max_rot_err already removed
+        """
+        T = self.kin.forward_kinematics(q_seed.detach().cpu().to(torch.float64).tolist())
+        T = torch.tensor(T, dtype=torch.float32, device=self.device)
+
+        pos_cur_mm = T[:3, 3]
+        R_fk = T[:3, :3]
+        R_cur = self.R_offset @ R_fk
+
+        pos_err_mm = target_pos_mm - pos_cur_mm
+        rot_err_rad = rotmat_to_spatial((target_rotm @ R_cur.T).unsqueeze(0)).squeeze(0)
+
+        pos_err_norm_mm = torch.linalg.norm(pos_err_mm)
+        rot_err_norm_rad = torch.linalg.norm(rot_err_rad)
+
+        err_6 = torch.cat([pos_err_mm, rot_err_rad], dim=0)
+
+        J = self.kin.calculate_jacobian(q_seed.detach().cpu().to(torch.float64).tolist())
+        J = torch.tensor(J, dtype=torch.float32, device=self.device)
+
+        I = torch.eye(6, device=self.device, dtype=torch.float32)
+        dq = J.T @ torch.linalg.solve(J @ J.T + (self.int_cfg.dls_lambda ** 2) * I, err_6.unsqueeze(-1))
+        dq = dq.squeeze(-1)
+
+        dq_norm = float(torch.linalg.norm(dq).item())
+
+        q_next = q_seed + self.int_cfg.ik_step_size * dq
 
         q_min = torch.tensor(self.int_cfg.joint_lower_limits, device=self.device, dtype=torch.float32) if self.int_cfg.joint_lower_limits is not None else None
         q_max = torch.tensor(self.int_cfg.joint_upper_limits, device=self.device, dtype=torch.float32) if self.int_cfg.joint_upper_limits is not None else None
+        if q_min is not None and q_max is not None:
+            q_next = torch.clamp(q_next, q_min, q_max)
 
-        for _ in range(inner_iters):
-            T = self.kin.forward_kinematics(q_iter.detach().cpu().to(torch.float64).tolist())
-            T = torch.tensor(T, dtype=torch.float32, device=self.device)
-
-            pos_cur_mm = T[:3, 3]
-            R_fk = T[:3, :3]
-            R_cur = self.R_offset @ R_fk
-
-            pos_err_mm = target_pos_mm - pos_cur_mm
-            rot_err_rad = rotmat_to_spatial((target_rotm @ R_cur.T).unsqueeze(0)).squeeze(0)
-
-            last_pos_err_norm_mm = torch.linalg.norm(pos_err_mm)
-            last_rot_err_norm_rad = torch.linalg.norm(rot_err_rad)
-
-            # NOTE:
-            # max_pos_err / max_rot_err clamp removed in this version.
-            # Keep the rest of IK logic unchanged.
-
-            err_6 = torch.cat([pos_err_mm, rot_err_rad], dim=0)
-
-            J = self.kin.calculate_jacobian(q_iter.detach().cpu().to(torch.float64).tolist())
-            J = torch.tensor(J, dtype=torch.float32, device=self.device)
-
-            I = torch.eye(6, device=self.device, dtype=torch.float32)
-            dq = J.T @ torch.linalg.solve(J @ J.T + (self.int_cfg.dls_lambda ** 2) * I, err_6.unsqueeze(-1))
-            dq = dq.squeeze(-1)
-
-            dq = torch.clamp(dq, -self.int_cfg.max_dq, self.int_cfg.max_dq)
-            last_dq_norm = float(torch.linalg.norm(dq).item())
-
-            q_iter = q_iter + self.int_cfg.ik_step_size * dq
-            if q_min is not None and q_max is not None:
-                q_iter = torch.clamp(q_iter, q_min, q_max)
-
-        return q_iter, last_pos_err_norm_mm, last_rot_err_norm_rad, last_dq_norm
+        return q_next, pos_err_norm_mm, rot_err_norm_rad, dq_norm
 
     def _reset_force_controller_for_env(self, env_id: int, xd_mm: float):
         self.force_controllers[env_id].reset(float(xd_mm))
@@ -656,8 +643,8 @@ class AdmittanceControlAction(ActionTerm):
             self.cmd_target_xyz_mm[env_id] = target_pos_mm
 
             pybind_called = True
-            q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_iterative_ik(
-                q_seed, target_pos_mm, target_rotm, self.int_cfg.ik_inner_iters
+            q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_single_step_ik(
+                q_seed, target_pos_mm, target_rotm
             )
             pybind_success = True
             pybind_dq_norm = dq_norm
@@ -696,7 +683,7 @@ class AdmittanceControlAction(ActionTerm):
                     rot_err_norm=float(rot_err_norm_rad[env_id].item()),
                     pybind_called=pybind_called,
                     pybind_success=pybind_success,
-                    inner_iters=self.int_cfg.ik_inner_iters,
+                    inner_iters=1,
                     dq_norm=pybind_dq_norm,
                     current_xyz=cur_pos_mm.detach().cpu(),
                     current_wxyz=cur_wxyz.detach().cpu(),

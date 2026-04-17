@@ -116,8 +116,6 @@ class ActionsCfg:
 
             dls_lambda=0.10,
             ik_step_size=0.60,
-            max_dq=0.08,
-            ik_inner_iters=5,
 
             base_index_rate=10.0,
             min_index_rate=3.0,
