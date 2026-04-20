@@ -298,6 +298,8 @@ class VisualizationCfg:
     speed_threshold: float = 0.1
 
 
+
+
 @configclass
 class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
     scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=64, env_spacing=2.5)
