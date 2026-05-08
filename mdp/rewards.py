@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
-Reward functions module for Uniform Polishing.
+Reward functions module for Adaptive Uniform Polishing.
 """
 
 from __future__ import annotations
@@ -22,6 +22,9 @@ local_ft_sensor = importlib.import_module(
 )
 
 
+# ==========================================
+# Helper Functions
+# ==========================================
 def _get_ee_idx(
     env: "ManagerBasedRLEnv",
     asset_name: str = "robot",
@@ -124,37 +127,119 @@ def _quat_angle_error(current_quat: torch.Tensor, target_quat: torch.Tensor) -> 
     return 2.0 * torch.acos(quat_inner)
 
 
-def uniform_mrr_reward(
+# ==========================================
+# 🚀 1. Adaptive MRR Reward (어댑티브 가공량 유지)
+# ==========================================
+def adaptive_mrr_reward(
     env: "ManagerBasedRLEnv",
-    target_force: float = 20.0,
-    target_velocity: float = 0.0002,
-    mrr_sigma: float = 0.002,
+    target_mrr: float = 0.1,  # Target MRR (목표 가공량 = 목표 힘 * 목표 속도)
+    mrr_sigma: float = 0.05,
     asset_name: str = "robot",
     body_name: str = "spindle_link",
     fixed_joint_name: str = "tool0_to_spindle",
     joint_prim_relpath: str = "joints",
 ) -> torch.Tensor:
-    current_fz = _get_current_fz(
-        env,
-        asset_name=asset_name,
-        fixed_joint_name=fixed_joint_name,
-        joint_prim_relpath=joint_prim_relpath,
-    )
+    """
+    [핵심 보상] 
+    실제 가공량(Force * Velocity)이 Target MRR과 일치하도록 유도합니다.
+    힘과 속도의 완벽한 반비례 관계를 스스로 학습하게 만드는 지표입니다.
+    """
+    current_fz = torch.abs(_get_current_fz(
+        env, asset_name=asset_name, fixed_joint_name=fixed_joint_name, joint_prim_relpath=joint_prim_relpath
+    ))
 
     _, _, current_vel_norm = _get_current_pose_and_velocity(
-        env,
-        asset_name=asset_name,
-        body_name=body_name,
+        env, asset_name=asset_name, body_name=body_name
     )
 
-    current_mrr_proxy = torch.abs(current_fz) * current_vel_norm
-    target_mrr_proxy = target_force * target_velocity
-
-    mrr_error = current_mrr_proxy - target_mrr_proxy
-    reward = torch.exp(-torch.square(mrr_error / max(mrr_sigma, 1e-6)))
+    # 1. 현재 가공량 산출 (힘 x 속도)
+    current_mrr = current_fz * current_vel_norm
+    
+    # 2. 비율 오차(Ratio Error) 계산
+    # 단순 뺄셈보다 비율로 계산하면 극단적으로 속도가 빠르거나 힘이 셀 때 더 강한 페널티를 받음
+    # 이상적일 경우 current_mrr / target_mrr = 1.0 이 됨
+    ratio = current_mrr / max(target_mrr, 1e-6)
+    ratio_error = torch.abs(ratio - 1.0)
+    
+    # 3. 지수 함수를 통한 부드럽지만 강력한 보상
+    reward = torch.exp(-torch.square(ratio_error / max(mrr_sigma, 1e-6)))
+    
     return reward
 
 
+# ==========================================
+# 🚀 2. State Smoothness Penalty (안정성 확보)
+# ==========================================
+def machining_state_smoothness_penalty(
+    env: "ManagerBasedRLEnv",
+    k_force_diff: float = 0.01,
+    k_vel_diff: float = 5.0,
+    asset_name: str = "robot",
+    body_name: str = "spindle_link",
+    fixed_joint_name: str = "tool0_to_spindle",
+    joint_prim_relpath: str = "joints",
+) -> torch.Tensor:
+    """
+    이전 스텝 대비 힘과 속도의 급격한 변화를 감점하여 스크래치를 방지하고 궤적을 부드럽게 만듭니다.
+    """
+    current_fz = torch.abs(_get_current_fz(
+        env, asset_name=asset_name, fixed_joint_name=fixed_joint_name, joint_prim_relpath=joint_prim_relpath
+    ))
+    _, _, current_vel_norm = _get_current_pose_and_velocity(
+        env, asset_name=asset_name, body_name=body_name
+    )
+
+    # env 객체에 버퍼를 동적으로 생성하여 이전 상태 저장 (IsaacLab 팁)
+    if not hasattr(env, "_prev_machining_fz"):
+        env._prev_machining_fz = current_fz.clone()
+        env._prev_machining_vel = current_vel_norm.clone()
+
+    # 에피소드가 리셋된 환경은 버퍼 초기화
+    reset_envs = env.episode_length_buf == 0
+    env._prev_machining_fz[reset_envs] = current_fz[reset_envs]
+    env._prev_machining_vel[reset_envs] = current_vel_norm[reset_envs]
+
+    # 변화량 계산
+    delta_f = torch.abs(current_fz - env._prev_machining_fz)
+    delta_v = torch.abs(current_vel_norm - env._prev_machining_vel)
+
+    # 다음 스텝을 위해 업데이트
+    env._prev_machining_fz = current_fz.clone()
+    env._prev_machining_vel = current_vel_norm.clone()
+
+    return -(k_force_diff * delta_f + k_vel_diff * delta_v)
+
+
+# ==========================================
+# 🚀 3. Safety Limit Penalty (하드 리밋)
+# ==========================================
+def machining_safety_penalty(
+    env: "ManagerBasedRLEnv",
+    max_force: float = 40.0,
+    max_velocity: float = 0.02,
+    penalty_value: float = -5.0,
+    asset_name: str = "robot",
+    body_name: str = "spindle_link",
+    fixed_joint_name: str = "tool0_to_spindle",
+    joint_prim_relpath: str = "joints",
+) -> torch.Tensor:
+    """
+    로봇이 허용된 최대 힘이나 속도를 초과하면 강한 페널티를 부여합니다.
+    """
+    current_fz = torch.abs(_get_current_fz(
+        env, asset_name=asset_name, fixed_joint_name=fixed_joint_name, joint_prim_relpath=joint_prim_relpath
+    ))
+    _, _, current_vel_norm = _get_current_pose_and_velocity(
+        env, asset_name=asset_name, body_name=body_name
+    )
+
+    violation = (current_fz > max_force) | (current_vel_norm > max_velocity)
+    return torch.where(violation, torch.tensor(penalty_value, device=env.device), torch.tensor(0.0, device=env.device))
+
+
+# ==========================================
+# Default Tracking & Cornering Penalities
+# ==========================================
 def force_tracking_reward(
     env: "ManagerBasedRLEnv",
     target_force: float = 20.0,
