@@ -9,6 +9,7 @@ import importlib
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import RewardTermCfg
 from isaaclab.managers import (
     ObservationGroupCfg as ObsGroup,
     ObservationTermCfg as ObsTerm,
@@ -19,7 +20,7 @@ from isaaclab.managers import (
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
-
+import nrs_rl.tasks.manager_based.nrs_rl.mdp.rewards as custom_rewards
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
 
 local_obs = importlib.import_module(
@@ -222,66 +223,56 @@ class EventCfg:
         params={},
     )
 
-
 @configclass
 class RewardsCfg:
-    # uniform_mrr = RewTerm(
-    #     func=local_rewards.uniform_mrr_reward,
-    #     weight=2.0,
-    #     params={
-    #         "target_force": 20.0,
-    #         "target_velocity": 0.0002,
-    #         "mrr_sigma": 0.002,
-    #         "asset_name": "robot",
-    #         "body_name": "spindle_link",
-    #         "fixed_joint_name": "tool0_to_spindle",
-    #         "joint_prim_relpath": "joints",
-    #     },
-    # )
+    """Reward terms for the RL environment."""
 
-    # force_track = RewTerm(
-    #     func=local_rewards.force_tracking_reward,
-    #     weight=1.0,
-    #     params={
-    #         "target_force": 20.0,
-    #         "force_sigma": 5.0,
-    #         "asset_name": "robot",
-    #         "fixed_joint_name": "tool0_to_spindle",
-    #         "joint_prim_relpath": "joints",
-    #     },
-    # )
+    # 1. 가공량(MRR) 맞추기 - 가장 중요 (압도적 가중치)
+    adaptive_mrr_reward = RewardTermCfg(
+        func=custom_rewards.adaptive_mrr_reward,
+        weight=5.0,
+        params={
+            "target_mrr": 0.1,
+            "mrr_sigma": 0.8,  # 넓게 유지!
+        },
+    )
+    
+    # 2. 반비례 관계 학습 보너스
+    inverse_fv_bonus = RewardTermCfg(
+        func=custom_rewards.inverse_fv_bonus,
+        weight=2.0,
+        params={
+            # rewards.py의 기본값을 사용하려면 비워두셔도 되지만, 
+            # MRR과 일관성을 맞추기 위해 명시적으로 적어주는 것이 좋습니다.
+            "target_mrr": 0.1, 
+            "bonus_sigma": 0.5,
+        },
+    )
+    
+    # 3. 경로 이탈 안 하고 잘 따라가기
+    trajectory_tracking_reward = RewardTermCfg(
+        func=custom_rewards.trajectory_tracking_reward,
+        weight=3.0,
+        params={
+            "pos_sigma": 0.05,
+        },
+    )
+    
+    # 4. 행동 너무 튀지 않기 (아주 가벼운 페널티)
+    # 참고: rewards.py 내부에서 이미 음수(-)를 반환하고 있으므로 가중치는 양수(0.2)로 둡니다.
+    action_smoothness_penalty = RewardTermCfg(
+        func=custom_rewards.action_smoothness_penalty,
+        weight=0.2,
+    )
 
-    # cornering = RewTerm(
-    #     func=local_rewards.lookahead_cornering_penalty,
-    #     weight=0.3,
-    #     params={
-    #         "cornering_threshold_angle": 0.5,
-    #         "penalty_scale": 0.5,
-    #         "lookahead_steps": 5,
-    #         "speed_ref": 0.002,
-    #         "action_rate_scale": 0.1,
-    #         "asset_name": "robot",
-    #         "body_name": "spindle_link",
-    #     },
-    # )
-
-    # traj_track = RewTerm(
-    #     func=local_rewards.trajectory_tracking_penalty,
-    #     weight=1.0,
-    #     params={
-    #         "pos_sigma": 0.03,
-    #         "rot_sigma": 0.20,
-    #         "asset_name": "robot",
-    #         "body_name": "spindle_link",
-    #     },
-    # )
-
-    # action_smooth = RewTerm(
-    #     func=local_rewards.action_smoothness_penalty,
-    #     weight=0.05,
-    # )
-    pass
-
+    # 5. 물리 엔진 보호용 하드 리밋 (추가)
+    machining_safety_penalty = RewardTermCfg(
+        func=custom_rewards.machining_safety_penalty,
+        weight=1.0,
+        params={
+            "max_force": 50.0, # 50N을 넘어가면 페널티
+        },
+    )
 
 @configclass
 class TerminationsCfg:
@@ -289,16 +280,12 @@ class TerminationsCfg:
         func=local_terms.trajectory_finished,
     )
 
-
 @configclass
 class VisualizationCfg:
     enable_visualizer: bool = True
     save_interval_episodes: int = 1
     force_threshold: float = 0.5
     speed_threshold: float = 0.1
-
-
-
 
 @configclass
 class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
