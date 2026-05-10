@@ -51,6 +51,12 @@ _rl_start_time = None
 
 _episode_counter = 1
 _has_seen_any_step = False
+# ==========================================
+# [추가] 학습 진화(Evolution) 증명용 누적 데이터 버퍼
+# ==========================================
+_history_episodes = []
+_history_heatmap_std = []  # 가공 균일도 (낮을수록 고르게 가공됨)
+_history_mrr_error = []    # F x V 어댑티브 제어 오차 (낮을수록 속도 조절을 잘함)
 
 
 def record_step(env_ids, state6, force3, sim_time):
@@ -87,6 +93,7 @@ def record_step(env_ids, state6, force3, sim_time):
 def process_episode():
     global _rl_time_buffer, _rl_state_buffer, _rl_force_buffer
     global _rl_start_time, _episode_counter
+    global _history_episodes, _history_heatmap_std, _history_mrr_error # 글로벌 추가
 
     if len(_rl_time_buffer) < 10:
         _rl_time_buffer.clear()
@@ -112,10 +119,26 @@ def process_episode():
     dremoval = removal_rate * dt
 
     ep_dir = RUN_LOG_DIR / f"ep{_episode_counter}"
-    save_plots(ep_dir, t, s_arr, f_arr, dremoval, removal_rate, vxyz)
+    
+    # [수정] Plot 중 에러가 발생해도 카운터가 무조건 올라가도록 안전망(try-except) 추가
+    try:
+        std_rem, mean_mrr_error = save_plots(ep_dir, t, s_arr, f_arr, dremoval, removal_rate, vxyz)
+        
+        # 에피소드 누적 데이터 기록 및 진화 그래프 업데이트
+        _history_episodes.append(_episode_counter)
+        _history_heatmap_std.append(std_rem)
+        _history_mrr_error.append(mean_mrr_error)
+        
+        # [핵심 수정] 언더바(_)를 추가하여 함수 이름 불일치 문제 해결
+        _plot_learning_evolution() 
 
-    local_debug.print_info(f"\n[STAMP] Episode {_episode_counter} results saved to: {ep_dir}\n")
+        # 로그 출력 (정상적으로 폴더에 저장되었음을 알림)
+        local_debug.print_info(f"\n[STAMP] Episode {_episode_counter} results saved to: {ep_dir}\n")
 
+    except Exception as e:
+        local_debug.print_exception(f"[Error] Failed to save plots for Episode {_episode_counter}", e)
+
+    # [수정] 에러 여부와 상관없이 무조건 카운터 증가 및 버퍼 초기화
     _episode_counter += 1
 
     _rl_time_buffer.clear()
@@ -124,7 +147,6 @@ def process_episode():
     _rl_start_time = None
 
     return float(np.sum(dremoval))
-
 
 def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz):
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -310,20 +332,17 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz):
     fig.savefig(out_dir / "05_force_vel_correlation.png", dpi=220)
     plt.close(fig)
 
-    # ==========================================
+# ==========================================
     # 06. MRR Error Convergence (가공량 오차 수렴도)
     # ==========================================
     fig = plt.figure(figsize=(9, 4))
     ax = fig.add_subplot(111)
     
     current_mrr_array = fz_abs * v_norm_raw
-    # 목표 MRR 선 (평균으로 가정하거나, 설정한 Target MRR 값을 넣어도 됨)
     target_mrr_line = np.full_like(t, rate_mean) 
     
     ax.plot(t, current_mrr_array, linewidth=1.5, label="Current MRR (F x V)")
     ax.plot(t, target_mrr_line, 'r--', linewidth=1.5, label="Target MRR")
-    
-    # 두 선 사이의 면적을 칠해서 '오차(Error)'를 시각적으로 강조
     ax.fill_between(t, current_mrr_array, target_mrr_line, color='red', alpha=0.2, label="MRR Error")
     
     ax.set_title("MRR Tracking Performance Over Time")
@@ -334,6 +353,14 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz):
     fig.tight_layout()
     fig.savefig(out_dir / "06_mrr_tracking_error.png", dpi=220)
     plt.close(fig)
+    
+    # ==========================================
+    # [수정] 평가지표 반환 (process_episode로 넘겨줌)
+    # ==========================================
+    mrr_error_array = np.abs(current_mrr_array - target_mrr_line)
+    mean_mrr_error = float(np.mean(mrr_error_array))
+    
+    return std_rem, mean_mrr_error  # std_rem은 01번 Heatmap 그릴 때 계산된 변수
 
 def rl_step(env_ids, state6, force3, sim_time):
     record_step(env_ids, state6, force3, sim_time)
@@ -414,3 +441,30 @@ def on_episode_reset(env, env_ids=None):
 
     except Exception as e:
         local_debug.print_exception("Visualization on_episode_reset failed", e)
+
+def _plot_learning_evolution():
+    """
+    강화학습 에피소드가 거듭됨에 따라, 폴리싱 품질이 '어댑티브'하게 진화했음을 증명하는 그래프
+    RUN_LOG_DIR 최상단에 00_learning_evolution.png 로 저장됩니다.
+    """
+    if len(_history_episodes) < 2:
+        return # 에피소드가 2개 이상일 때부터 그림
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    
+    # 1. MRR 제어 오차 (Adaptive Control 능력 향상 증명)
+    ax1.plot(_history_episodes, _history_mrr_error, 'b-o', linewidth=2)
+    ax1.set_title("Evolution of Adaptive Control (MRR Tracking Error)")
+    ax1.set_ylabel("Mean MRR Error\n(Lower is better)")
+    ax1.grid(True, alpha=0.4)
+    
+    # 2. 가공면 균일도 (Polishing Quality 향상 증명)
+    ax2.plot(_history_episodes, _history_heatmap_std, 'g-s', linewidth=2)
+    ax2.set_title("Evolution of Polishing Quality (Surface Uniformity)")
+    ax2.set_xlabel("Training Episode")
+    ax2.set_ylabel("Heatmap Std. Dev.\n(Lower is smoother)")
+    ax2.grid(True, alpha=0.4)
+    
+    fig.tight_layout()
+    fig.savefig(RUN_LOG_DIR / "00_learning_evolution.png", dpi=250)
+    plt.close(fig)
