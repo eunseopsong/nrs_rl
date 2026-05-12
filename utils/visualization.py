@@ -1,12 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """
 Unified RL + Polishing Removal + Visualization Module
-
-역할:
-1. 저장 경로:
-   nrs_rl/logs/polishing_results/<timestamp>/epN/
-2. visualization 기록 및 episode 종료 시 plot 저장
-3. debug 출력은 담당하지 않음
 """
 
 from __future__ import annotations
@@ -18,50 +12,130 @@ import importlib
 
 import matplotlib
 matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-from scipy.signal import savgol_filter
 from scipy.ndimage import gaussian_filter
 import torch
+
+
+# ============================================================
+# Local Imports
+# ============================================================
 
 local_obs = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.mdp.observation"
 )
+
 local_ft_sensor = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.assets.assets.sensors.six_axis_ft_sensor"
 )
+
 local_debug = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.utils.debug"
 )
 
+
+# ============================================================
+# Path Setup
+# ============================================================
+
 _run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
 CURRENT_FILE_PATH = Path(__file__).resolve()
 PROJECT_ROOT_DIR = CURRENT_FILE_PATH.parent.parent
-
 BASE_LOG_DIR = PROJECT_ROOT_DIR / "logs" / "polishing_results"
 RUN_LOG_DIR = BASE_LOG_DIR / _run_timestamp
+
 RUN_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 local_debug.print_info(f"[Init] Polishing log directory created: {RUN_LOG_DIR}")
 
+
+# ============================================================
+# Global Buffers
+# ============================================================
+
 _rl_time_buffer = []
 _rl_state_buffer = []
 _rl_force_buffer = []
-_rl_start_time = None
 
+_rl_start_time = None
 _episode_counter = 1
 _has_seen_any_step = False
-# ==========================================
-# [추가] 학습 진화(Evolution) 증명용 누적 데이터 버퍼
-# ==========================================
-_history_episodes = []
-_history_heatmap_std = []  # 가공 균일도 (낮을수록 고르게 가공됨)
-_history_mrr_error = []    # F x V 어댑티브 제어 오차 (낮을수록 속도 조절을 잘함)
 
+
+# ============================================================
+# Surface Memory Map
+# ============================================================
+
+GRID_SIZE = 128
+
+_surface_grid = np.zeros(
+    (GRID_SIZE, GRID_SIZE),
+    dtype=np.float32,
+)
+
+_surface_extent = {
+    "xmin": -120.0,
+    "xmax": 120.0,
+    "ymin": -120.0,
+    "ymax": 120.0,
+}
+
+
+# ============================================================
+# Summary Metrics
+# ============================================================
+
+_summary_metrics = {
+    "episode": [],
+    "total_removal": [],
+    "mean_mrr_error": [],
+    "std_removal": [],
+    "contact_ratio": [],
+    "surface_uniformity": [],
+    "uniformity_improvement": [],
+}
+
+
+# ============================================================
+# Utils
+# ============================================================
+
+def moving_average(x, w=5):
+    x = np.asarray(x)
+    if len(x) < w:
+        return x
+    return np.convolve(x, np.ones(w) / w, mode="same")
+
+
+def update_surface_grid(x, y, removal):
+    global _surface_grid
+
+    xmin = _surface_extent["xmin"]
+    xmax = _surface_extent["xmax"]
+    ymin = _surface_extent["ymin"]
+    ymax = _surface_extent["ymax"]
+
+    ix = int((x - xmin) / (xmax - xmin) * (GRID_SIZE - 1))
+    iy = int((y - ymin) / (ymax - ymin) * (GRID_SIZE - 1))
+
+    ix = np.clip(ix, 0, GRID_SIZE - 1)
+    iy = np.clip(iy, 0, GRID_SIZE - 1)
+
+    _surface_grid[iy, ix] += float(removal)
+
+
+# ============================================================
+# Step Recording
+# ============================================================
 
 def record_step(env_ids, state6, force3, sim_time):
-    global _rl_time_buffer, _rl_state_buffer, _rl_force_buffer
-    global _rl_start_time, _has_seen_any_step
+    global _rl_time_buffer
+    global _rl_state_buffer
+    global _rl_force_buffer
+    global _rl_start_time
+    global _has_seen_any_step
 
     _has_seen_any_step = True
 
@@ -71,17 +145,27 @@ def record_step(env_ids, state6, force3, sim_time):
     try:
         if isinstance(env_ids, torch.Tensor):
             target_mask = (env_ids == 0)
-            if bool(target_mask.any()):
-                idx = target_mask.nonzero(as_tuple=True)[0][0].item()
-            else:
-                idx = 0
+            idx = (
+                target_mask.nonzero(as_tuple=True)[0][0].item()
+                if bool(target_mask.any())
+                else 0
+            )
         else:
             idx = 0
 
         _rl_time_buffer.append(float(sim_time) - float(_rl_start_time))
 
-        s_val = state6[idx].detach().cpu().numpy() if hasattr(state6, "detach") else np.asarray(state6[idx])
-        f_val = force3[idx].detach().cpu().numpy() if hasattr(force3, "detach") else np.asarray(force3[idx])
+        s_val = (
+            state6[idx].detach().cpu().numpy()
+            if hasattr(state6, "detach")
+            else np.asarray(state6[idx])
+        )
+
+        f_val = (
+            force3[idx].detach().cpu().numpy()
+            if hasattr(force3, "detach")
+            else np.asarray(force3[idx])
+        )
 
         _rl_state_buffer.append(s_val.copy())
         _rl_force_buffer.append(f_val.copy())
@@ -90,10 +174,64 @@ def record_step(env_ids, state6, force3, sim_time):
         local_debug.print_exception("Visualization record_step failed", e)
 
 
+# ============================================================
+# Global Summary Plot
+# ============================================================
+
+def save_global_summary():
+    if not _summary_metrics["episode"]:
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    eps = _summary_metrics["episode"]
+
+    # --- Total Removal ---
+    axes[0, 0].plot(eps, _summary_metrics["total_removal"], "b-o", markersize=4, alpha=0.7)
+    axes[0, 0].set_title("Total Removal per Episode")
+    axes[0, 0].set_ylabel("Total Removal [a.u.]")
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # --- MRR Error ---
+    axes[0, 1].plot(eps, _summary_metrics["mean_mrr_error"], "r-x", markersize=4, alpha=0.7)
+    axes[0, 1].set_title("MRR Tracking Error")
+    axes[0, 1].set_ylabel("Mean Abs Error")
+    axes[0, 1].grid(True, alpha=0.3)
+
+    # --- Uniformity Improvement ---
+    improvement = np.array(_summary_metrics["uniformity_improvement"])
+    axes[1, 0].plot(eps, improvement, color="green", alpha=0.25, linewidth=1.5)
+    axes[1, 0].plot(eps, moving_average(improvement), color="green", linewidth=3)
+    axes[1, 0].set_title("Surface Uniformity Improvement (%)")
+    axes[1, 0].set_ylabel("Improvement [%]")
+    axes[1, 0].grid(True, alpha=0.3)
+
+    # --- Contact Ratio ---
+    axes[1, 1].plot(eps, _summary_metrics["contact_ratio"], "m-d", markersize=4, alpha=0.7)
+    axes[1, 1].set_title("Contact Ratio")
+    axes[1, 1].set_ylabel("Ratio")
+    axes[1, 1].grid(True, alpha=0.3)
+
+    for ax in axes.flat:
+        ax.set_xlabel("Episode")
+
+    fig.suptitle(
+        f"Overall Polishing Performance Trend (Up to Ep {_episode_counter - 1})",
+        fontsize=16,
+    )
+    fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+    summary_path = RUN_LOG_DIR / "overall_learning_trend.png"
+    fig.savefig(summary_path, dpi=200)
+    plt.close(fig)
+
+
+# ============================================================
+# Episode Processing
+# ============================================================
+
 def process_episode():
     global _rl_time_buffer, _rl_state_buffer, _rl_force_buffer
-    global _rl_start_time, _episode_counter
-    global _history_episodes, _history_heatmap_std, _history_mrr_error # 글로벌 추가
+    global _rl_start_time, _episode_counter, _summary_metrics
 
     if len(_rl_time_buffer) < 10:
         _rl_time_buffer.clear()
@@ -105,42 +243,59 @@ def process_episode():
     t = np.array(_rl_time_buffer, dtype=float)
     s_arr = np.array(_rl_state_buffer, dtype=float)
     f_arr = np.array(_rl_force_buffer, dtype=float)
-
     xyz = s_arr[:, :3]
-    dt = np.diff(t, prepend=t[0] - 1e-3)
 
+    # --- Velocity calculation ---
     vxyz = np.zeros_like(xyz)
     for i in range(3):
         vxyz[:, i] = np.gradient(xyz[:, i], t)
 
     speed = np.linalg.norm(vxyz[:, :2], axis=1)
     fn = np.maximum(f_arr[:, 2], 0.0)
+    dt = np.diff(t, prepend=t[0] - 1e-3)
+
+    # --- Removal logic ---
     removal_rate = np.where((fn > 0.5) & (speed > 0.1), fn * speed, 0.0)
     dremoval = removal_rate * dt
 
+    # --- Surface Memory Update ---
+    for i in range(len(dremoval)):
+        update_surface_grid(xyz[i, 0], xyz[i, 1], dremoval[i])
+
     ep_dir = RUN_LOG_DIR / f"ep{_episode_counter}"
-    
-    # [수정] Plot 중 에러가 발생해도 카운터가 무조건 올라가도록 안전망(try-except) 추가
-    try:
-        std_rem, mean_mrr_error = save_plots(ep_dir, t, s_arr, f_arr, dremoval, removal_rate, vxyz)
-        
-        # 에피소드 누적 데이터 기록 및 진화 그래프 업데이트
-        _history_episodes.append(_episode_counter)
-        _history_heatmap_std.append(std_rem)
-        _history_mrr_error.append(mean_mrr_error)
-        
-        # [핵심 수정] 언더바(_)를 추가하여 함수 이름 불일치 문제 해결
-        _plot_learning_evolution() 
+    save_plots(ep_dir, t, s_arr, f_arr, dremoval, removal_rate, vxyz)
 
-        # 로그 출력 (정상적으로 폴더에 저장되었음을 알림)
-        local_debug.print_info(f"\n[STAMP] Episode {_episode_counter} results saved to: {ep_dir}\n")
+    # --- Metrics calculation ---
+    samples = len(t)
+    contact_samples = int(np.sum(fn > 0.5))
+    rate_mean = float(np.mean(removal_rate))
+    mrr_error = np.mean(np.abs(removal_rate - rate_mean))
 
-    except Exception as e:
-        local_debug.print_exception(f"[Error] Failed to save plots for Episode {_episode_counter}", e)
+    valid_surface = _surface_grid[_surface_grid > 0]
+    surface_uniformity = float(np.std(valid_surface)) if len(valid_surface) > 10 else 0.0
 
-    # [수정] 에러 여부와 상관없이 무조건 카운터 증가 및 버퍼 초기화
+    # --- Improvement calculation ---
+    if len(_summary_metrics["surface_uniformity"]) == 0:
+        improvement = 0.0
+    else:
+        initial_uniformity = _summary_metrics["surface_uniformity"][0]
+        improvement = ((initial_uniformity - surface_uniformity) / max(initial_uniformity, 1e-6)) * 100.0
+
+    # --- Store Metrics ---
+    _summary_metrics["episode"].append(_episode_counter)
+    _summary_metrics["total_removal"].append(float(np.sum(dremoval)))
+    _summary_metrics["mean_mrr_error"].append(float(mrr_error))
+    _summary_metrics["std_removal"].append(float(np.std(dremoval)))
+    _summary_metrics["contact_ratio"].append(contact_samples / samples if samples > 0 else 0)
+    _summary_metrics["surface_uniformity"].append(surface_uniformity)
+    _summary_metrics["uniformity_improvement"].append(improvement)
+
+    if _episode_counter % 5 == 0:
+        save_global_summary()
+
+    local_debug.print_info(f"\n[STAMP] Episode {_episode_counter} saved. Results at: {ep_dir}\n")
+
     _episode_counter += 1
-
     _rl_time_buffer.clear()
     _rl_state_buffer.clear()
     _rl_force_buffer.clear()
@@ -148,219 +303,45 @@ def process_episode():
 
     return float(np.sum(dremoval))
 
+
+# ============================================================
+# Plot Saving
+# ============================================================
+
 def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz):
     out_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 데이터 파싱
     xyz = state6[:, 0:3]
-    # state6의 3~5번 인덱스를 각속도 혹은 방향 벡터(wx, wy, wz)로 간주
-    wxyz = state6[:, 3:6] if state6.shape[1] >= 6 else np.zeros_like(xyz)
 
-    # ==========================================
-    # 01. Removal Heatmap (레퍼런스 코드와 동일한 디자인)
-    # ==========================================
-    x = xyz[:, 0]
-    y = xyz[:, 1]
-
+    # --- Local Removal Heatmap ---
+    x, y = xyz[:, 0], xyz[:, 1]
     margin = 10.0
-    x_min, x_max = np.min(x) - margin, np.max(x) + margin
-    y_min, y_max = np.min(y) - margin, np.max(y) + margin
-    extent = [x_min, x_max, y_min, y_max]
+    extent = [np.min(x) - margin, np.max(x) + margin, np.min(y) - margin, np.max(y) + margin]
 
-    grid_bins = 150
     grid_removal, _, _ = np.histogram2d(
-        x, y, bins=grid_bins, range=[[x_min, x_max], [y_min, y_max]], weights=dremoval
+        x, y, bins=150, range=[extent[:2], extent[2:]], weights=dremoval
     )
-    grid_removal = grid_removal.T 
-    grid_removal = gaussian_filter(grid_removal, sigma=2.5)
+    grid_removal = gaussian_filter(grid_removal.T, sigma=2.5)
 
-    mean_rem = float(np.mean(grid_removal))
-    std_rem = float(np.std(grid_removal))
-    samples = len(x)
-    contact_samples = int(np.sum(force3[:, 2] > 0.5))
-
-    fig = plt.figure(figsize=(9, 7))
-    ax = fig.add_subplot(111)
-    
-    im = ax.imshow(grid_removal, origin="lower", extent=extent, aspect="auto", cmap="viridis")
-    ax.set_title("Removal Heatmap")
-    ax.set_xlabel("x [mm]")
-    ax.set_ylabel("y [mm]")
-    
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("Cell removal [a.u.]")
-
-    text_str = (
-        f"mean = {mean_rem:.6f} [a.u.]\n"
-        f"std  = {std_rem:.6f} [a.u.]\n"
-        f"samples = {samples}\n"
-        f"contact = {contact_samples}"
-    )
-    ax.text(
-        0.02, 0.98, text_str,
-        transform=ax.transAxes,
-        va="top", ha="left", fontsize=10,
-        bbox=dict(boxstyle="round", facecolor="white", alpha=0.85)
-    )
-    fig.tight_layout()
-    fig.savefig(out_dir / "01_removal_heatmap.png", dpi=220)
+    fig, ax = plt.subplots(figsize=(9, 7))
+    im = ax.imshow(grid_removal, origin="lower", extent=extent, cmap="viridis")
+    fig.colorbar(im, label="Removal [a.u.]")
+    ax.set_title(f"Episode {_episode_counter} Removal Heatmap")
+    fig.savefig(out_dir / "01_removal_heatmap.png", dpi=200)
     plt.close(fig)
 
-    # ==========================================
-    # 02. Heatmap Value vs Time (평균선 포함)
-    # ==========================================
-    rate_mean = float(np.mean(removal_rate))
-    
-    fig = plt.figure(figsize=(9, 5))
-    ax = fig.add_subplot(111)
-    ax.plot(t, removal_rate, linewidth=1.5)
-    ax.axhline(rate_mean, linestyle="--", linewidth=1.2, label="mean rate", color="orange")
-    ax.set_title("Removal Rate at Current Position vs Time")
-    ax.set_xlabel("time [s]")
-    ax.set_ylabel("Removal Rate [a.u.]")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out_dir / "02_heatmap_value_vs_time.png", dpi=220)
-    plt.close(fig)
+    # --- Global Surface Map ---
+    fig2, ax2 = plt.subplots(figsize=(8, 7))
+    global_map = gaussian_filter(_surface_grid, sigma=2.0)
+    im2 = ax2.imshow(global_map, origin="lower", cmap="viridis")
+    fig2.colorbar(im2)
+    ax2.set_title(f"Cumulative Surface Removal (Ep {_episode_counter})")
+    fig2.savefig(out_dir / "02_global_surface_map.png", dpi=200)
+    plt.close(fig2)
 
-    # ==========================================
-    # 03. Signals Subplot (3x3 Grid)
-    # ==========================================
-    labels = [
-        (xyz[:, 0], "x [mm]"),
-        (xyz[:, 1], "y [mm]"),
-        (xyz[:, 2], "z [mm]"),
-        (wxyz[:, 0], "wx"),
-        (wxyz[:, 1], "wy"),
-        (wxyz[:, 2], "wz"),
-        (force3[:, 0], "fx [N]"),
-        (force3[:, 1], "fy [N]"),
-        (force3[:, 2], "fz [N]"),
-    ]
-    fig, axes = plt.subplots(3, 3, figsize=(14, 9), sharex=True)
-    for ax, (y_data, ylabel) in zip(axes.ravel(), labels):
-        ax.plot(t, y_data, linewidth=1.3)
-        ax.set_ylabel(ylabel)
-        ax.grid(True, alpha=0.3)
-    for ax in axes[-1, :]:
-        ax.set_xlabel("time [s]")
-        
-    fig.suptitle("Recorded Signals: x y z wx wy wz fx fy fz")
-    fig.tight_layout(rect=[0, 0.02, 1, 0.97])
-    fig.savefig(out_dir / "03_signals_subplot.png", dpi=220)
-    plt.close(fig)
 
-    # ==========================================
-    # 04. 3D Path with Direction Arrows
-    # ==========================================
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection="3d")
-    ax.plot(xyz[:, 0], xyz[:, 1], xyz[:, 2], linewidth=1.6, label="xyz path")
-
-    # 데이터 개수에 맞춰 화살표 간격(stride) 자동 조절
-    w_arrow_stride = max(int(len(t) // 60), 1)
-    w_arrow_length_mm = 5.0
-
-    idx = np.arange(0, xyz.shape[0], w_arrow_stride)
-    if idx.size > 0:
-        xyz_s = xyz[idx]
-        w_s = wxyz[idx]
-        w_norm = np.linalg.norm(w_s, axis=1, keepdims=True)
-        valid = w_norm[:, 0] > 1e-12
-        if np.any(valid):
-            dirs = np.zeros_like(w_s)
-            dirs[valid] = w_s[valid] / w_norm[valid]
-            ax.quiver(
-                xyz_s[valid, 0], xyz_s[valid, 1], xyz_s[valid, 2],
-                dirs[valid, 0], dirs[valid, 1], dirs[valid, 2],
-                length=float(w_arrow_length_mm),
-                normalize=False,
-                linewidth=0.8,
-                arrow_length_ratio=0.25,
-            )
-
-    ax.set_title("3D Path with Angular-Velocity Direction (wx, wy, wz)")
-    ax.set_xlabel("x [mm]")
-    ax.set_ylabel("y [mm]")
-    ax.set_zlabel("z [mm]")
-    ax.legend(loc="best")
-
-    # 3축 비율 동일하게 맞추기 (Aspect ratio)
-    x_range = float(np.ptp(xyz[:, 0])) if xyz.shape[0] > 0 else 1.0
-    y_range = float(np.ptp(xyz[:, 1])) if xyz.shape[0] > 0 else 1.0
-    z_range = float(np.ptp(xyz[:, 2])) if xyz.shape[0] > 0 else 1.0
-    max_range = max(x_range, y_range, z_range, 1.0)
-    
-    x_mid = float(np.mean([np.min(xyz[:, 0]), np.max(xyz[:, 0])]))
-    y_mid = float(np.mean([np.min(xyz[:, 1]), np.max(xyz[:, 1])]))
-    z_mid = float(np.mean([np.min(xyz[:, 2]), np.max(xyz[:, 2])]))
-    
-    ax.set_xlim(x_mid - max_range / 2, x_mid + max_range / 2)
-    ax.set_ylim(y_mid - max_range / 2, y_mid + max_range / 2)
-    ax.set_zlim(z_mid - max_range / 2, z_mid + max_range / 2)
-
-    fig.tight_layout()
-    fig.savefig(out_dir / "04_3d_path_w.png", dpi=220)
-    plt.close(fig)
-
-    # ==========================================
-    # 05. Force vs Velocity Correlation (가장 중요한 학습 증명 지표!)
-    # ==========================================
-    fig = plt.figure(figsize=(8, 6))
-    ax = fig.add_subplot(111)
-    
-    fz_abs = np.abs(force3[:, 2])
-    v_norm_raw = np.linalg.norm(vxyz, axis=1)
-    
-    # 실제 에이전트가 찍은 힘-속도 산점도
-    ax.scatter(fz_abs, v_norm_raw, alpha=0.5, c='b', s=10, label="Agent Data (F vs V)")
-    
-    # 이상적인 반비례 곡선 (Target MRR Curve)
-    # 현재 데이터의 평균 MRR을 기준으로 이상적인 y = C/x 곡선을 그립니다.
-    mean_mrr = np.mean(fz_abs * v_norm_raw)
-    f_ideal = np.linspace(max(0.1, np.min(fz_abs)), np.max(fz_abs), 100)
-    v_ideal = mean_mrr / f_ideal
-    ax.plot(f_ideal, v_ideal, 'r--', linewidth=2, label=f"Ideal Inverse Curve\n(V = {mean_mrr:.4f} / F)")
-    
-    ax.set_title("Force vs Velocity: Inverse Correlation Check")
-    ax.set_xlabel("Normal Force |Fz| [N]")
-    ax.set_ylabel("Velocity ||V|| [m/s]")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out_dir / "05_force_vel_correlation.png", dpi=220)
-    plt.close(fig)
-
-# ==========================================
-    # 06. MRR Error Convergence (가공량 오차 수렴도)
-    # ==========================================
-    fig = plt.figure(figsize=(9, 4))
-    ax = fig.add_subplot(111)
-    
-    current_mrr_array = fz_abs * v_norm_raw
-    target_mrr_line = np.full_like(t, rate_mean) 
-    
-    ax.plot(t, current_mrr_array, linewidth=1.5, label="Current MRR (F x V)")
-    ax.plot(t, target_mrr_line, 'r--', linewidth=1.5, label="Target MRR")
-    ax.fill_between(t, current_mrr_array, target_mrr_line, color='red', alpha=0.2, label="MRR Error")
-    
-    ax.set_title("MRR Tracking Performance Over Time")
-    ax.set_xlabel("Time [s]")
-    ax.set_ylabel("MRR")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out_dir / "06_mrr_tracking_error.png", dpi=220)
-    plt.close(fig)
-    
-    # ==========================================
-    # [수정] 평가지표 반환 (process_episode로 넘겨줌)
-    # ==========================================
-    mrr_error_array = np.abs(current_mrr_array - target_mrr_line)
-    mean_mrr_error = float(np.mean(mrr_error_array))
-    
-    return std_rem, mean_mrr_error  # std_rem은 01번 Heatmap 그릴 때 계산된 변수
+# ============================================================
+# RL Hooks
+# ============================================================
 
 def rl_step(env_ids, state6, force3, sim_time):
     record_step(env_ids, state6, force3, sim_time)
@@ -370,24 +351,25 @@ def rl_episode_done():
     return process_episode()
 
 
-def _safe_get_action_term(env, action_term_name: str = "arm_action"):
-    am = env.action_manager
-    if hasattr(am, "get_term"):
-        try:
-            return am.get_term(action_term_name)
-        except Exception:
-            pass
+def on_episode_reset(env, env_ids=None):
+    global _has_seen_any_step
+    try:
+        if not _has_seen_any_step:
+            return
+        if len(_rl_time_buffer) > 0:
+            rl_episode_done()
 
-    if hasattr(am, "_terms"):
-        terms = am._terms
-        if isinstance(terms, dict) and action_term_name in terms:
-            return terms[action_term_name]
+        if env is not None:
+            env._ep_curriculum = getattr(env, "_ep_curriculum", 0) + 1
+            local_debug.print_info(f"[Curriculum] Episode counter: {env._ep_curriculum}")
+            save_global_summary()
+    except Exception as e:
+        local_debug.print_exception("Visualization on_episode_reset failed", e)
 
-    if hasattr(am, action_term_name):
-        return getattr(am, action_term_name)
 
-    raise RuntimeError(f"[Visualization] action term '{action_term_name}' not found.")
-
+# ============================================================
+# Step Hook
+# ============================================================
 
 def rl_step_hook(
     env,
@@ -399,7 +381,6 @@ def rl_step_hook(
     try:
         num_envs = env.num_envs
         device = env.device
-
         env_ids = torch.arange(num_envs, device=device, dtype=torch.long)
 
         state6 = local_obs.get_ee_pose(env, asset_name=asset_name)
@@ -412,9 +393,10 @@ def rl_step_hook(
         )
         force3 = wrench6[:, :3]
 
-        _ = _safe_get_action_term(env, action_term_name=action_term_name)
-
-        sim_time = float(getattr(env, "common_step_counter", 0)) * float(getattr(env, "step_dt", 0.02))
+        sim_time = (
+            float(getattr(env, "common_step_counter", 0)) *
+            float(getattr(env, "step_dt", 0.02))
+        )
 
         rl_step(
             env_ids=env_ids,
@@ -427,44 +409,3 @@ def rl_step_hook(
         local_debug.print_exception("Visualization rl_step_hook failed", e)
 
     return torch.zeros((env.num_envs, 1), device=env.device, dtype=torch.float32)
-
-
-def on_episode_reset(env, env_ids=None):
-    global _has_seen_any_step
-
-    try:
-        if not _has_seen_any_step:
-            return
-
-        if len(_rl_time_buffer) > 0:
-            rl_episode_done()
-
-    except Exception as e:
-        local_debug.print_exception("Visualization on_episode_reset failed", e)
-
-def _plot_learning_evolution():
-    """
-    강화학습 에피소드가 거듭됨에 따라, 폴리싱 품질이 '어댑티브'하게 진화했음을 증명하는 그래프
-    RUN_LOG_DIR 최상단에 00_learning_evolution.png 로 저장됩니다.
-    """
-    if len(_history_episodes) < 2:
-        return # 에피소드가 2개 이상일 때부터 그림
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
-    
-    # 1. MRR 제어 오차 (Adaptive Control 능력 향상 증명)
-    ax1.plot(_history_episodes, _history_mrr_error, 'b-o', linewidth=2)
-    ax1.set_title("Evolution of Adaptive Control (MRR Tracking Error)")
-    ax1.set_ylabel("Mean MRR Error\n(Lower is better)")
-    ax1.grid(True, alpha=0.4)
-    
-    # 2. 가공면 균일도 (Polishing Quality 향상 증명)
-    ax2.plot(_history_episodes, _history_heatmap_std, 'g-s', linewidth=2)
-    ax2.set_title("Evolution of Polishing Quality (Surface Uniformity)")
-    ax2.set_xlabel("Training Episode")
-    ax2.set_ylabel("Heatmap Std. Dev.\n(Lower is smoother)")
-    ax2.grid(True, alpha=0.4)
-    
-    fig.tight_layout()
-    fig.savefig(RUN_LOG_DIR / "00_learning_evolution.png", dpi=250)
-    plt.close(fig)

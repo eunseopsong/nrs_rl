@@ -121,6 +121,7 @@ class ActionsCfg:
         ),
     )
 
+
 @configclass
 class ObservationCfg:
     @configclass
@@ -221,58 +222,90 @@ class EventCfg:
         func=local_vis.on_episode_reset,
         mode="reset",
         params={},
+        # ⚠️ visualization.py의 on_episode_reset(env, env_ids)가
+        # env를 첫 번째 인자로 자동 수신합니다.
+        # params={}로 두면 Isaac Lab이 env를 자동으로 넘겨줍니다.
     )
+
 
 @configclass
 class RewardsCfg:
     """Reward terms for the RL environment."""
 
-    # 1. 가공량(MRR) 맞추기 - 가장 중요 (압도적 가중치)
+    # ── 1. 가공량(MRR) 맞추기 ─────────────────────────────────────────
+    # 가장 중요한 보상. sigma가 에피소드마다 좁아져 후기 ep이 더 정밀해야 보상.
+    # [수정] mrr_sigma → mrr_sigma_start / mrr_sigma_end / curriculum_ramp
     adaptive_mrr_reward = RewardTermCfg(
         func=custom_rewards.adaptive_mrr_reward,
         weight=5.0,
         params={
             "target_mrr": 0.1,
-            "mrr_sigma": 0.8,  # 넓게 유지!
+            "mrr_sigma_start": 1.2,    # 초기: 넓은 허용 → 탐색 장려
+            "mrr_sigma_end": 0.3,      # 후기: 좁은 허용 → 정밀 제어 강제
+            "curriculum_ramp": 200,    # 200 에피소드에 걸쳐 sigma 축소
+            "min_contact_force": 1.0,
+            "min_velocity": 1e-3,
+            "gate_sharpness": 8.0,     # soft gate 선명도
         },
     )
-    
-    # 2. 반비례 관계 학습 보너스
+
+    # ── 2. 반비례 관계 학습 보너스 ────────────────────────────────────
+    # 힘 강하면 속도 낮추는 역비례 패턴을 직접 가르침.
+    # 05_force_vel_correlation.png에서 쌍곡선 정렬로 시각화됨.
+    # [수정] bonus_sigma → bonus_sigma_start / bonus_sigma_end / curriculum_ramp
     inverse_fv_bonus = RewardTermCfg(
         func=custom_rewards.inverse_fv_bonus,
         weight=2.0,
         params={
-            # rewards.py의 기본값을 사용하려면 비워두셔도 되지만, 
-            # MRR과 일관성을 맞추기 위해 명시적으로 적어주는 것이 좋습니다.
-            "target_mrr": 0.1, 
-            "bonus_sigma": 0.5,
+            "target_mrr": 0.1,
+            "bonus_sigma_start": 0.8,  # 초기: 넓게
+            "bonus_sigma_end": 0.25,   # 후기: 좁게
+            "curriculum_ramp": 200,
+            "min_contact_force": 1.0,
+            "gate_sharpness": 8.0,
         },
     )
-    
-    # 3. 경로 이탈 안 하고 잘 따라가기
+
+    # ── 3. 경로 추종 ──────────────────────────────────────────────────
+    # 목표점에 가까우면 보상 + 움직이고 있으면 추가 보너스.
+    # vel_bonus_scale=0.3: 속도 유도는 보조 역할 (멈춤 방지)
     trajectory_tracking_reward = RewardTermCfg(
         func=custom_rewards.trajectory_tracking_reward,
         weight=3.0,
         params={
             "pos_sigma": 0.05,
+            "vel_bonus_scale": 0.3,       # 움직임 유도 가중치
+            "min_tracking_velocity": 5e-4,
+            "gate_sharpness": 6.0,
         },
     )
-    
-    # 4. 행동 너무 튀지 않기 (아주 가벼운 페널티)
-    # 참고: rewards.py 내부에서 이미 음수(-)를 반환하고 있으므로 가중치는 양수(0.2)로 둡니다.
+
+    # ── 4. 액션 스무스니스 페널티 ─────────────────────────────────────
+    # rewards.py 내부에서 이미 음수(-) 반환 → weight는 양수로 유지
     action_smoothness_penalty = RewardTermCfg(
         func=custom_rewards.action_smoothness_penalty,
         weight=0.2,
     )
 
-    # 5. 물리 엔진 보호용 하드 리밋 (추가)
+    # ── 5. 물리 엔진 보호용 하드 리밋 ────────────────────────────────
     machining_safety_penalty = RewardTermCfg(
         func=custom_rewards.machining_safety_penalty,
         weight=1.0,
         params={
-            "max_force": 50.0, # 50N을 넘어가면 페널티
+            "max_force": 50.0,
         },
     )
+
+    surface_uniformity_reward = RewardTermCfg(
+        func=custom_rewards.surface_uniformity_reward,
+        weight=4.0,
+    )
+    
+    force_stability_reward = RewardTermCfg(
+        func=custom_rewards.force_stability_reward,
+        weight=1.5,
+    )
+
 
 @configclass
 class TerminationsCfg:
@@ -280,12 +313,14 @@ class TerminationsCfg:
         func=local_terms.trajectory_finished,
     )
 
+
 @configclass
 class VisualizationCfg:
     enable_visualizer: bool = True
     save_interval_episodes: int = 1
     force_threshold: float = 0.5
     speed_threshold: float = 0.1
+
 
 @configclass
 class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
