@@ -111,7 +111,7 @@ class ActionsCfg:
 
             base_index_rate=10.0,
             min_index_rate=3.0,
-            max_index_rate=16.0,
+            max_index_rate=8.0,
             progress_rate_ema_beta=0.3,
             force_eps_n=1.0,
 
@@ -232,80 +232,57 @@ class EventCfg:
 class RewardsCfg:
     """Reward terms for the RL environment."""
 
-    # ── 1. 가공량(MRR) 맞추기 ─────────────────────────────────────────
-    # 가장 중요한 보상. sigma가 에피소드마다 좁아져 후기 ep이 더 정밀해야 보상.
-    # [수정] mrr_sigma → mrr_sigma_start / mrr_sigma_end / curriculum_ramp
+    # ── 1. 메인 퀘스트 ──
     adaptive_mrr_reward = RewardTermCfg(
         func=custom_rewards.adaptive_mrr_reward,
         weight=5.0,
-        params={
-            "target_mrr": 0.1,
-            "mrr_sigma_start": 1.2,    # 초기: 넓은 허용 → 탐색 장려
-            "mrr_sigma_end": 0.3,      # 후기: 좁은 허용 → 정밀 제어 강제
-            "curriculum_ramp": 200,    # 200 에피소드에 걸쳐 sigma 축소
-            "min_contact_force": 1.0,
-            "min_velocity": 1e-3,
-            "gate_sharpness": 8.0,     # soft gate 선명도
-        },
+        params={"target_mrr": 0.1, "mrr_sigma_start": 1.2, "mrr_sigma_end": 0.3, "curriculum_ramp": 200},
     )
 
-    # ── 2. 반비례 관계 학습 보너스 ────────────────────────────────────
-    # 힘 강하면 속도 낮추는 역비례 패턴을 직접 가르침.
-    # 05_force_vel_correlation.png에서 쌍곡선 정렬로 시각화됨.
-    # [수정] bonus_sigma → bonus_sigma_start / bonus_sigma_end / curriculum_ramp
     inverse_fv_bonus = RewardTermCfg(
         func=custom_rewards.inverse_fv_bonus,
         weight=2.0,
-        params={
-            "target_mrr": 0.1,
-            "bonus_sigma_start": 0.8,  # 초기: 넓게
-            "bonus_sigma_end": 0.25,   # 후기: 좁게
-            "curriculum_ramp": 200,
-            "min_contact_force": 1.0,
-            "gate_sharpness": 8.0,
-        },
+        params={"target_mrr": 0.1, "bonus_sigma_start": 0.8, "bonus_sigma_end": 0.25, "curriculum_ramp": 200},
     )
 
-    # ── 3. 경로 추종 ──────────────────────────────────────────────────
-    # 목표점에 가까우면 보상 + 움직이고 있으면 추가 보너스.
-    # vel_bonus_scale=0.3: 속도 유도는 보조 역할 (멈춤 방지)
+    # ── 2. 강력한 헌법 (완주 & 커버리지 강제) ──
+    physical_completion = RewardTermCfg(
+        func=custom_rewards.physical_completion_reward,
+        weight=1.0,  # 내부에서 스케일이 매우 크므로 1.0 유지
+        params={"distance_threshold": 0.05},
+    )
+    
+    # surface_coverage = RewardTermCfg(
+    #     func=custom_rewards.surface_coverage_reward,
+    #     weight=50.0, # 면적을 넓게 닦을수록 강력한 보상
+    #     params={"target_cells": 1800}, # 필요시 HDF5 궤적 길이에 맞게 조절
+    # )
+
+    # ── 3. 보조 목표 (비중 축소) ──
     trajectory_tracking_reward = RewardTermCfg(
         func=custom_rewards.trajectory_tracking_reward,
-        weight=3.0,
-        params={
-            "pos_sigma": 0.05,
-            "vel_bonus_scale": 0.3,       # 움직임 유도 가중치
-            "min_tracking_velocity": 5e-4,
-            "gate_sharpness": 6.0,
-        },
-    )
-
-    # ── 4. 액션 스무스니스 페널티 ─────────────────────────────────────
-    # rewards.py 내부에서 이미 음수(-) 반환 → weight는 양수로 유지
-    action_smoothness_penalty = RewardTermCfg(
-        func=custom_rewards.action_smoothness_penalty,
-        weight=0.2,
-    )
-
-    # ── 5. 물리 엔진 보호용 하드 리밋 ────────────────────────────────
-    machining_safety_penalty = RewardTermCfg(
-        func=custom_rewards.machining_safety_penalty,
-        weight=1.0,
-        params={
-            "max_force": 50.0,
-        },
+        weight= 3.0, 
+        params={"pos_sigma": 0.05, "vel_bonus_scale": 0.3},
     )
 
     surface_uniformity_reward = RewardTermCfg(
         func=custom_rewards.surface_uniformity_reward,
         weight=4.0,
     )
-    
-    force_stability_reward = RewardTermCfg(
-        func=custom_rewards.force_stability_reward,
-        weight=1.5,
+
+    # ── 4. 제약 사항 (족쇄 해제 및 안전 장치) ──
+    action_smoothness_penalty = RewardTermCfg(
+        func=custom_rewards.action_smoothness_penalty,
+        weight=0.01, # 기존 0.2에서 0.01로 대폭 축소 (자유로운 탐색 장려)
     )
 
+    machining_safety_penalty = RewardTermCfg(
+        func=custom_rewards.machining_safety_penalty,
+        weight=5.0,
+        params={"max_force": 50.0},
+    )
+    
+    # ❌ force_stability_reward는 적응형 폴리싱을 방해하므로 완전히 삭제함
 
 @configclass
 class TerminationsCfg:

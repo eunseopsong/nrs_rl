@@ -564,10 +564,15 @@ class AdmittanceControlAction(ActionTerm):
 
             target_pos_mm = nominal_pos_mm.clone()
 
+            # 💡 RL Action[0]을 이용하여 목표 힘(Target Force) 보정 (예: +-10N 조절)
+            # action 값이 -1.0 ~ 1.0 사이라고 가정하고 스케일을 맞춰줍니다.
+            rl_force_offset = float(self._raw_actions[env_id, 0].item()) * 10.0
+            adjusted_target_fz = float(target_fz) + rl_force_offset
+
             fc_out = self.force_controllers[env_id].step(
                 float(nominal_pos_mm[2].item()),
                 float(cur_pos_mm[2].item()),
-                float(target_fz),
+                adjusted_target_fz,  # <--- 기존 target_fz 대신 보정된 힘(adjusted_target_fz) 입력
                 float(abs_fz),
             )
             z_cmd = float(fc_out[0])
@@ -590,8 +595,45 @@ class AdmittanceControlAction(ActionTerm):
             q_cmd_all[env_id, :6] = q_cmd6
 
             if not bool(self.path_done[env_id].item()):
-                rate = self._compute_progress_rate(env_id, abs_fz, target_fz)
-                self.path_cursor[env_id] += rate
+                # 기본 진행 속도 계산
+                base_rate = self._compute_progress_rate(env_id, abs_fz, target_fz)
+                
+                # RL Action[1]을 이용하여 진행 속도(Rate) 보정 (예: +-5.0 조절)
+                rl_speed_offset = float(self._raw_actions[env_id, 1].item()) * 5.0
+                final_rate = base_rate + rl_speed_offset
+                
+                # -------------------------------------------------------------
+                # 🚀 [수정] 적응형 경로 추종 (고무줄 로직 + 타임아웃 방지)
+                # -------------------------------------------------------------
+                # 1. 로봇(cur_pos_mm)과 타겟(nominal_pos_mm)의 XY 평면 거리 에러 계산
+                xy_error_mm = float(torch.norm(cur_pos_mm[:2] - nominal_pos_mm[:2]).item())
+                
+                # 2. 에러가 커지면 타겟 속도를 감쇠 (10mm부터 감속 시작, 30mm 이상일 때 최대 감속)
+                if xy_error_mm > 10.0:
+                    scale = 1.0 - min((xy_error_mm - 10.0) / 20.0, 1.0)
+                    final_rate = final_rate * scale
+                
+                # 3. 에러가 10mm 이상이면, 타겟 속도를 0.0(완전 정지) 또는 아주 미세한 속도(0.1)로 낮춰서
+                # 로봇이 10mm 이상 뒤쳐지면, 타겟은 전진 속도를 0.0(완전 정지) 또는 아주 미세한 속도(0.1)로 낮춰서
+                # 로봇이 물리적으로 해당 위치까지 도달할 때까지 무한정 기다려줍니다.
+                dynamic_min_rate = 0.0 if xy_error_mm > 10.0 else self.int_cfg.min_index_rate
+                
+                # 최종 속도 제한 (클리핑)
+                final_rate = max(dynamic_min_rate, min(self.int_cfg.max_index_rate, final_rate))
+                # -------------------------------------------------------------
+                
+                self.path_cursor[env_id] += final_rate
+
+                if self.path_cursor[env_id] >= float(self.traj_length - 1):
+                    self.path_cursor[env_id] = float(self.traj_length - 1)
+                    self.path_done[env_id] = True
+                # -------------------------------------------------------------
+
+                # 속도가 최소/최대 속도 제한을 벗어나지 않도록 (단, final_rate가 0일 때는 제외)
+                if final_rate > 0.0:
+                    final_rate = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, final_rate))
+                
+                self.path_cursor[env_id] += final_rate
 
                 if self.path_cursor[env_id] >= float(self.traj_length - 1):
                     self.path_cursor[env_id] = float(self.traj_length - 1)
