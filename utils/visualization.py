@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 import datetime
+import csv
 from pathlib import Path
 import importlib
 from collections import defaultdict
@@ -94,10 +95,28 @@ _surface_extent = {
 
 _summary_metrics = {
     "episode": [],
+    "samples": [],
+    "duration_s": [],
+    "contact_samples": [],
     "total_removal": [],
-    "mean_mrr_error": [],
+    "mean_removal": [],
     "std_removal": [],
+    "rms_removal": [],
+    "contact_mean_removal": [],
+    "contact_std_removal": [],
+    "contact_rms_removal": [],
+    "contact_cv_removal": [],
+    "cell_mean_removal": [],
+    "cell_std_removal": [],
+    "cell_rms_removal": [],
+    "cell_cv_removal": [],
+    "mean_removal_rate": [],
+    "std_removal_rate": [],
+    "rms_removal_rate": [],
+    "mean_mrr_error": [],
     "contact_ratio": [],
+    "mean_normal_force": [],
+    "mean_sliding_velocity": [],
     "episode_reward": [],
 }
 
@@ -225,6 +244,135 @@ def _first_contact_index(normal_force, sliding_velocity):
         return int(np.argmax(contact_mask))
     return None
 
+
+def _rms(values):
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(np.square(values))))
+
+
+def _mean(values):
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return 0.0
+    return float(np.mean(values))
+
+
+def _std(values):
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return 0.0
+    return float(np.std(values))
+
+
+def _cv(std_value, mean_value):
+    if abs(mean_value) <= 1.0e-12:
+        return 0.0
+    return float(std_value / abs(mean_value))
+
+
+def _removal_cell_stats(xyz, dremoval, contact_start_idx):
+    if len(dremoval) == 0 or xyz.shape[0] == 0:
+        return {
+            "cell_mean_removal": 0.0,
+            "cell_std_removal": 0.0,
+            "cell_rms_removal": 0.0,
+            "cell_cv_removal": 0.0,
+        }
+
+    start = int(contact_start_idx) if contact_start_idx is not None else 0
+    start = max(0, min(start, len(dremoval) - 1))
+    xyz_plot = xyz[start:]
+    dremoval_plot = np.asarray(dremoval[start:], dtype=float)
+    positive_sample_mask = dremoval_plot > 0.0
+    if xyz_plot.shape[0] == 0 or not np.any(positive_sample_mask):
+        return {
+            "cell_mean_removal": 0.0,
+            "cell_std_removal": 0.0,
+            "cell_rms_removal": 0.0,
+            "cell_cv_removal": 0.0,
+        }
+
+    x = xyz_plot[:, 0]
+    y = xyz_plot[:, 1]
+    x_ptp, y_ptp = np.ptp(x), np.ptp(y)
+    margin_x = 10.0 if x_ptp < 1.0 else x_ptp * 0.1
+    margin_y = 10.0 if y_ptp < 1.0 else y_ptp * 0.1
+    extent = [
+        np.min(x) - margin_x,
+        np.max(x) + margin_x,
+        np.min(y) - margin_y,
+        np.max(y) + margin_y,
+    ]
+    bins = min(140, max(64, int(np.sqrt(len(x)) * 3)))
+    grid_removal, _, _ = np.histogram2d(x, y, bins=bins, range=[extent[:2], extent[2:]], weights=dremoval_plot)
+    positive_cells = grid_removal[grid_removal > 0.0]
+    cell_mean = _mean(positive_cells)
+    cell_std = _std(positive_cells)
+    return {
+        "cell_mean_removal": cell_mean,
+        "cell_std_removal": cell_std,
+        "cell_rms_removal": _rms(positive_cells),
+        "cell_cv_removal": _cv(cell_std, cell_mean),
+    }
+
+
+def _compute_episode_summary(
+    episode,
+    t,
+    xyz,
+    fn,
+    speed,
+    dremoval,
+    removal_rate,
+    contact_start_idx,
+    episode_reward,
+):
+    samples = int(len(t))
+    duration_s = float(t[-1] - t[0]) if samples > 1 else 0.0
+    contact_mask = np.asarray(dremoval, dtype=float) > 0.0
+    contact_removal = np.asarray(dremoval, dtype=float)[contact_mask]
+    contact_rate = np.asarray(removal_rate, dtype=float)[contact_mask]
+    contact_force = np.asarray(fn, dtype=float)[contact_mask]
+    contact_speed = np.asarray(speed, dtype=float)[contact_mask]
+
+    mean_removal = _mean(dremoval)
+    std_removal = _std(dremoval)
+    contact_mean_removal = _mean(contact_removal)
+    contact_std_removal = _std(contact_removal)
+    rate_mean = _mean(contact_rate)
+    rate_std = _std(contact_rate)
+
+    summary = {
+        "episode": int(episode),
+        "samples": samples,
+        "duration_s": duration_s,
+        "contact_samples": int(np.count_nonzero(contact_mask)),
+        "contact_start_index": -1 if contact_start_idx is None else int(contact_start_idx),
+        "total_removal": float(np.sum(dremoval)),
+        "mean_removal": mean_removal,
+        "std_removal": std_removal,
+        "rms_removal": _rms(dremoval),
+        "contact_mean_removal": contact_mean_removal,
+        "contact_std_removal": contact_std_removal,
+        "contact_rms_removal": _rms(contact_removal),
+        "contact_cv_removal": _cv(contact_std_removal, contact_mean_removal),
+        "mean_removal_rate": rate_mean,
+        "std_removal_rate": rate_std,
+        "rms_removal_rate": _rms(contact_rate),
+        "mean_mrr_error": _mean(np.abs(contact_rate - rate_mean)) if contact_rate.size else 0.0,
+        "contact_ratio": float(np.count_nonzero(contact_mask) / samples) if samples > 0 else 0.0,
+        "mean_normal_force": _mean(contact_force),
+        "mean_sliding_velocity": _mean(contact_speed),
+        "episode_reward": float(episode_reward),
+    }
+    summary.update(_removal_cell_stats(xyz, dremoval, contact_start_idx))
+    return summary
+
 # ============================================================
 # Step Recording
 # ============================================================
@@ -261,7 +409,56 @@ def record_step(env_ids, state6, force3, sim_time):
 # ============================================================
 
 def save_global_summary():
-    return
+    if not _summary_metrics["episode"]:
+        return
+
+    RUN_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    keys = list(_summary_metrics.keys())
+    row_count = len(_summary_metrics["episode"])
+
+    csv_path = RUN_LOG_DIR / "00_episode_summary.csv"
+    with csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+        for i in range(row_count):
+            writer.writerow({key: _summary_metrics[key][i] for key in keys})
+
+    latest = {key: _summary_metrics[key][-1] for key in keys}
+    txt_path = RUN_LOG_DIR / "00_episode_summary.txt"
+    with txt_path.open("w") as f:
+        f.write(f"Run summary: {RUN_LOG_DIR.name}\n")
+        f.write(f"episodes: {row_count}\n\n")
+        f.write("Latest episode\n")
+        for key in keys:
+            value = latest[key]
+            if isinstance(value, float):
+                f.write(f"{key}: {value:.9g}\n")
+            else:
+                f.write(f"{key}: {value}\n")
+        if row_count >= 2:
+            totals = np.asarray(_summary_metrics["total_removal"], dtype=float)
+            cell_cv = np.asarray(_summary_metrics["cell_cv_removal"], dtype=float)
+            contact_cv = np.asarray(_summary_metrics["contact_cv_removal"], dtype=float)
+            f.write("\nAcross saved episodes\n")
+            f.write(f"total_removal_mean: {_mean(totals):.9g}\n")
+            f.write(f"total_removal_std: {_std(totals):.9g}\n")
+            f.write(f"total_removal_rms: {_rms(totals):.9g}\n")
+            f.write(f"cell_cv_removal_latest: {cell_cv[-1]:.9g}\n")
+            f.write(f"cell_cv_removal_delta_from_prev: {(cell_cv[-1] - cell_cv[-2]):.9g}\n")
+            f.write(f"contact_cv_removal_latest: {contact_cv[-1]:.9g}\n")
+            f.write(f"contact_cv_removal_delta_from_prev: {(contact_cv[-1] - contact_cv[-2]):.9g}\n")
+
+
+def _write_episode_summary(out_dir, summary):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    txt_path = out_dir / "00_summary.txt"
+    with txt_path.open("w") as f:
+        f.write(f"Episode {summary['episode']} removal summary\n")
+        for key, value in summary.items():
+            if isinstance(value, float):
+                f.write(f"{key}: {value:.9g}\n")
+            else:
+                f.write(f"{key}: {value}\n")
 
 # ============================================================
 # Episode Processing
@@ -324,17 +521,21 @@ def process_episode():
     ep_dir = RUN_LOG_DIR / f"ep{_episode_counter}"
     save_plots(ep_dir, t, s_arr, f_arr, dremoval, removal_rate, vxyz, speed, idx_arr, contact_start_idx)
 
-    samples = len(t)
-    contact_samples = int(np.sum(fn > 0.5))
-    rate_mean = float(np.mean(removal_rate))
-    mrr_error = np.mean(np.abs(removal_rate - rate_mean))
-
-    _summary_metrics["episode"].append(_episode_counter)
-    _summary_metrics["total_removal"].append(float(np.sum(dremoval)))
-    _summary_metrics["mean_mrr_error"].append(float(mrr_error))
-    _summary_metrics["std_removal"].append(float(np.std(dremoval)))
-    _summary_metrics["contact_ratio"].append(contact_samples / samples if samples > 0 else 0)
-    _summary_metrics["episode_reward"].append(_current_ep_reward)
+    summary = _compute_episode_summary(
+        episode=_episode_counter,
+        t=t,
+        xyz=xyz,
+        fn=fn,
+        speed=speed,
+        dremoval=dremoval,
+        removal_rate=removal_rate,
+        contact_start_idx=contact_start_idx,
+        episode_reward=_current_ep_reward,
+    )
+    _write_episode_summary(ep_dir, summary)
+    for key in _summary_metrics:
+        _summary_metrics[key].append(summary[key])
+    save_global_summary()
 
     local_debug.print_info(f"[STAMP] Ep {_episode_counter} Saved. Reward: {_current_ep_reward:.2f}. Result: {ep_dir}")
 
