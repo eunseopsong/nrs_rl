@@ -20,7 +20,7 @@ conda activate env_isaaclab
 
 ### 2) Training
 ```bash
-~/IsaacLab/isaaclab.sh -p ~/nrs_rl/scripts/skrl/train.py --task Template-Nrs-Rl-v0
+~/IsaacLab/isaaclab.sh -p ~/nrs_rl/scripts/skrl/train.py --task Template-Nrs-Rl-v0 --headless
 ```
 
 ### 3) Play

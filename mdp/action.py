@@ -247,8 +247,12 @@ class ActionIntegrationCfg:
     min_force_rate_scale: float = 0.25
     force_z_integral_gain_mm_per_n_s: float = 0.35
     force_z_release_gain_mm_per_n_s: float = 0.7
+    force_z_deadband_n: float = 1.0
+    force_z_max_delta_mm: float = 0.03
     force_z_offset_min_mm: float = -8.0
     force_z_offset_max_mm: float = 2.0
+    force_error_slowdown_ratio: float = 0.35
+    min_force_error_rate_scale: float = 0.35
     approach_interpolation_enabled: bool = True
     approach_duration_s: float = 2.0
 
@@ -512,6 +516,14 @@ class AdmittanceControlAction(ActionTerm):
             )
             raw_rate = min(raw_rate, force_limited_max_rate)
 
+            error_ratio = abs(abs_fz - target_abs_fz) / max(target_abs_fz, self.int_cfg.force_eps_n)
+            if error_ratio > self.int_cfg.force_error_slowdown_ratio:
+                error_scale = max(
+                    self.int_cfg.min_force_error_rate_scale,
+                    1.0 - (error_ratio - self.int_cfg.force_error_slowdown_ratio),
+                )
+                raw_rate *= error_scale
+
         beta = self.int_cfg.progress_rate_ema_beta
         prev = float(self.progress_rate_filtered[env_id].item())
         filt = beta * raw_rate + (1.0 - beta) * prev
@@ -530,10 +542,17 @@ class AdmittanceControlAction(ActionTerm):
             return 0.0
 
         error_n = target_abs_fz - abs_fz
+        if abs(error_n) <= self.int_cfg.force_z_deadband_n:
+            return float(self.force_z_offset_mm[env_id].item())
+
         if error_n > 0.0:
             delta = -float(self.int_cfg.force_z_integral_gain_mm_per_n_s) * error_n * self._step_dt_local
         else:
             delta = -float(self.int_cfg.force_z_release_gain_mm_per_n_s) * error_n * self._step_dt_local
+        delta = max(
+            -float(self.int_cfg.force_z_max_delta_mm),
+            min(float(self.int_cfg.force_z_max_delta_mm), delta),
+        )
 
         next_offset = float(self.force_z_offset_mm[env_id].item()) + delta
         next_offset = max(
