@@ -252,10 +252,14 @@ class ActionIntegrationCfg:
     force_normal_ki_mm_per_n_s: float = 4.00
     force_normal_release_kp_mm_per_n: float = 0.35
     force_normal_max_step_mm: float = 2.00
+    force_normal_retract_max_step_mm: float = 6.00
     force_normal_offset_limit_mm: float = 28.0
     force_admittance_delta_limit_mm: float = 1.5
     force_total_normal_delta_limit_mm: float = 30.0
     force_normal_deadband_n: float = 0.35
+    force_band_min_n: float = 8.0
+    force_band_max_n: float = 12.0
+    force_band_index_rate_limit: float = 0.05
     force_steady_error_band_n: float = 5.0
     force_overload_ratio: float = 1.5
     force_overload_rate_scale: float = 0.02
@@ -622,6 +626,7 @@ class AdmittanceControlAction(ActionTerm):
         prev_offset = float(self.force_normal_offset_mm[env_id].item())
 
         if error_n > 0.0:
+            self.force_normal_error_i[env_id] = torch.clamp(self.force_normal_error_i[env_id], max=0.0)
             self.force_normal_error_i[env_id] -= float(error_n) * self._step_dt_local
             i_limit = float(self.int_cfg.force_normal_offset_limit_mm) / max(
                 float(self.int_cfg.force_normal_ki_mm_per_n_s),
@@ -655,7 +660,10 @@ class AdmittanceControlAction(ActionTerm):
         limit = float(self.int_cfg.force_normal_offset_limit_mm)
         target_offset = max(-limit, min(limit, target_offset))
 
-        max_step = float(self.int_cfg.force_normal_max_step_mm)
+        if error_n > 0.0:
+            max_step = float(getattr(self.int_cfg, "force_normal_retract_max_step_mm", self.int_cfg.force_normal_max_step_mm))
+        else:
+            max_step = float(self.int_cfg.force_normal_max_step_mm)
         delta = max(-max_step, min(max_step, target_offset - prev_offset))
         next_offset = prev_offset + delta
         self.force_normal_offset_mm[env_id] = next_offset
@@ -868,16 +876,24 @@ class AdmittanceControlAction(ActionTerm):
                 final_rate = base_rate * action_scale
                 final_rate = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, final_rate))
                 target_abs_fz = abs(target_fz)
+                force_rate_limit = None
                 if target_abs_fz > self.int_cfg.force_eps_n:
                     overload_force = float(self.int_cfg.force_overload_ratio) * target_abs_fz
                     if abs_fz > overload_force:
-                        final_rate = min(final_rate, float(self.int_cfg.force_overload_rate_scale))
+                        force_rate_limit = float(self.int_cfg.force_overload_rate_scale)
+                    band_min = float(getattr(self.int_cfg, "force_band_min_n", 0.0))
+                    band_max = float(getattr(self.int_cfg, "force_band_max_n", 0.0))
+                    if band_min > 0.0 and band_max > band_min and (abs_fz < band_min or abs_fz > band_max):
+                        band_limit = float(getattr(self.int_cfg, "force_band_index_rate_limit", 0.05))
+                        force_rate_limit = band_limit if force_rate_limit is None else min(force_rate_limit, band_limit)
                 tracking_scale = self._path_tracking_rate_scale(path_tracking_error_mm)
                 final_rate *= tracking_scale
                 if tracking_scale <= 0.0:
                     final_rate = 0.0
                 else:
                     final_rate = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, final_rate))
+                if force_rate_limit is not None:
+                    final_rate = min(final_rate, max(0.0, force_rate_limit))
 
                 segment_length_mm = float(self.traj_segment_lengths_mm[idx].item())
                 sliding_velocity_mm_s = final_rate * segment_length_mm / max(self._step_dt_local, 1.0e-8)
