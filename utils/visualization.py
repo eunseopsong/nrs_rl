@@ -197,6 +197,32 @@ def _set_axes_equal_3d(ax, xyz):
     ax.set_ylim(centers[1] - radius, centers[1] + radius)
     ax.set_zlim(centers[2] - radius, centers[2] + radius)
 
+
+def _get_hdf5_position_np():
+    hdf5_position = getattr(local_obs, "_hdf5_position", None)
+    if hdf5_position is None:
+        return None
+    try:
+        if hasattr(hdf5_position, "detach"):
+            hdf5_position = hdf5_position.detach().cpu().numpy()
+        else:
+            hdf5_position = np.asarray(hdf5_position)
+        if hdf5_position.ndim == 2 and hdf5_position.shape[1] >= 3 and hdf5_position.shape[0] > 0:
+            return hdf5_position[:, :3].astype(float, copy=False)
+    except Exception:
+        return None
+    return None
+
+
+def _first_contact_index(normal_force, sliding_velocity):
+    if len(normal_force) == 0:
+        return None
+    threshold = _contact_force_threshold(normal_force)
+    contact_mask = np.asarray(normal_force) > threshold
+    if np.any(contact_mask):
+        return int(np.argmax(contact_mask))
+    return None
+
 # ============================================================
 # Step Recording
 # ============================================================
@@ -275,8 +301,16 @@ def process_episode():
     fn = _normal_force_from_force3(f_arr)
     dt = np.diff(t, prepend=t[0] - 1e-3)
 
+    contact_start_idx = _first_contact_index(fn, speed)
     contact_threshold = _contact_force_threshold(fn)
-    removal_rate = np.where((fn > contact_threshold) & (speed > MIN_SLIDING_SPEED_MM_S), fn * speed, 0.0)
+    contact_started = np.zeros_like(fn, dtype=bool)
+    if contact_start_idx is not None:
+        contact_started[contact_start_idx:] = True
+    removal_rate = np.where(
+        contact_started & (fn > contact_threshold) & (speed > MIN_SLIDING_SPEED_MM_S),
+        fn * speed,
+        0.0,
+    )
     dremoval = removal_rate * dt
 
     _global_removal_history["x"].extend(xyz[:, 0].tolist())
@@ -286,7 +320,7 @@ def process_episode():
         update_surface_grid(xyz[i, 0], xyz[i, 1], dremoval[i])
 
     ep_dir = RUN_LOG_DIR / f"ep{_episode_counter}"
-    save_plots(ep_dir, t, s_arr, f_arr, dremoval, removal_rate, vxyz, speed)
+    save_plots(ep_dir, t, s_arr, f_arr, dremoval, removal_rate, vxyz, speed, idx_arr, contact_start_idx)
 
     samples = len(t)
     contact_samples = int(np.sum(fn > 0.5))
@@ -319,14 +353,24 @@ def process_episode():
 # Plot Saving
 # ============================================================
 
-def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding_velocity):
+def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding_velocity, path_index=None, contact_start_idx=None):
     xyz = state6[:, 0:3]
     if len(t) == 0 or xyz.shape[0] == 0:
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    x, y = xyz[:, 0], xyz[:, 1]
+    plot_start = int(contact_start_idx) if contact_start_idx is not None else 0
+    plot_start = max(0, min(plot_start, len(t) - 1))
+
+    t_plot = t[plot_start:] - t[plot_start]
+    xyz_plot = xyz[plot_start:]
+    dremoval_plot = dremoval[plot_start:]
+    removal_rate_plot = removal_rate[plot_start:]
+    sliding_velocity_plot = sliding_velocity[plot_start:]
+    state6_plot = state6[plot_start:]
+
+    x, y = xyz_plot[:, 0], xyz_plot[:, 1]
     
     # 예외처리: 이동이 전혀 없어서 max==min이 되는 경우 방지
     x_ptp, y_ptp = np.ptp(x), np.ptp(y)
@@ -337,7 +381,7 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
 
     # --- 1. Local Removal Heatmap ---
     bins = min(140, max(64, int(np.sqrt(len(x)) * 3)))
-    grid_removal, _, _ = np.histogram2d(x, y, bins=bins, range=[extent[:2], extent[2:]], weights=dremoval)
+    grid_removal, _, _ = np.histogram2d(x, y, bins=bins, range=[extent[:2], extent[2:]], weights=dremoval_plot)
     grid_removal_smoothed = gaussian_filter(grid_removal.T, sigma=2.6)
     max_removal = float(np.nanmax(grid_removal_smoothed)) if grid_removal_smoothed.size else 0.0
     if max_removal > 0.0 and np.isfinite(max_removal):
@@ -359,11 +403,11 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
     display_positive_values = grid_display[grid_display > 0.0]
     stats_mean = float(np.mean(display_positive_values)) if display_positive_values.size else 0.0
     stats_std = float(np.std(display_positive_values)) if display_positive_values.size else 0.0
-    contact_samples = int(np.count_nonzero(dremoval > 0.0))
+    contact_samples = int(np.count_nonzero(dremoval_plot > 0.0))
     stats_text = (
         f"mean = {stats_mean:.6f} [a.u.]\n"
         f"std  = {stats_std:.6f} [a.u.]\n"
-        f"samples = {len(t)}\n"
+        f"samples = {len(t_plot)}\n"
         f"contact = {contact_samples}"
     )
     ax.text(
@@ -381,8 +425,8 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
     plt.close(fig)
 
     fig2, ax2 = plt.subplots(figsize=(9, 5))
-    ax2.plot(t, removal_rate, color="tab:blue", linewidth=1.8)
-    ax2.axhline(np.mean(removal_rate), color="tab:orange", linestyle="--", linewidth=1.2, label="episode mean")
+    ax2.plot(t_plot, removal_rate_plot, color="tab:blue", linewidth=1.8)
+    ax2.axhline(np.mean(removal_rate_plot), color="tab:orange", linestyle="--", linewidth=1.2, label="contact-window mean")
     ax2.set_title(f"Episode {_episode_counter} Removal Rate")
     ax2.set_xlabel("Time [s]")
     ax2.set_ylabel("Normal Force x Sliding Velocity")
@@ -395,10 +439,15 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
     normal_force = _normal_force_from_force3(force3)
     fig3, axes3 = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
     axes3[0].plot(t, normal_force, color="tab:red", linewidth=1.5)
+    if contact_start_idx is not None:
+        axes3[0].axvline(t[plot_start], color="0.25", linestyle="--", linewidth=1.0, label="contact start")
+        axes3[0].legend()
     axes3[0].set_title("Normal Force")
     axes3[0].set_ylabel("Force [N]")
     axes3[0].grid(True, alpha=0.3)
     axes3[1].plot(t, sliding_velocity, color="tab:green", linewidth=1.5)
+    if contact_start_idx is not None:
+        axes3[1].axvline(t[plot_start], color="0.25", linestyle="--", linewidth=1.0)
     axes3[1].set_title("Sliding Velocity")
     axes3[1].set_xlabel("Time [s]")
     axes3[1].set_ylabel("Velocity [mm/s]")
@@ -410,10 +459,10 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
     fig4 = plt.figure(figsize=(9.5, 8))
     ax4 = fig4.add_subplot(111, projection="3d")
 
-    path_values = removal_rate if len(removal_rate) == len(xyz) else sliding_velocity
+    path_values = removal_rate_plot if len(removal_rate_plot) == len(xyz_plot) else sliding_velocity_plot
     path_values = np.asarray(path_values, dtype=float)
-    if len(path_values) == len(xyz) and np.nanmax(path_values) > np.nanmin(path_values):
-        segments = np.stack([xyz[:-1], xyz[1:]], axis=1)
+    if len(path_values) == len(xyz_plot) and np.nanmax(path_values) > np.nanmin(path_values):
+        segments = np.stack([xyz_plot[:-1], xyz_plot[1:]], axis=1)
         segment_values = 0.5 * (path_values[:-1] + path_values[1:])
         line_collection = Line3DCollection(segments, cmap="viridis", linewidth=2.2, alpha=0.95)
         line_collection.set_array(segment_values)
@@ -421,13 +470,26 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         cbar4 = fig4.colorbar(line_collection, ax=ax4, pad=0.08, shrink=0.72)
         cbar4.set_label("Removal rate [a.u.]")
     else:
-        ax4.plot(xyz[:, 0], xyz[:, 1], xyz[:, 2], color="#1f77b4", linewidth=2.0, label="EE path")
+        ax4.plot(xyz_plot[:, 0], xyz_plot[:, 1], xyz_plot[:, 2], color="#1f77b4", linewidth=2.0, label="EE path")
 
-    z_floor = float(np.nanmin(xyz[:, 2]))
+    hdf5_xyz = _get_hdf5_position_np()
+    if hdf5_xyz is not None:
+        ax4.plot(
+            hdf5_xyz[:, 0],
+            hdf5_xyz[:, 1],
+            hdf5_xyz[:, 2],
+            color="black",
+            linestyle="-",
+            linewidth=1.2,
+            alpha=0.45,
+            label="HDF5 target",
+        )
+
+    z_floor = float(np.nanmin(xyz_plot[:, 2]))
     ax4.plot(
-        xyz[:, 0],
-        xyz[:, 1],
-        np.full_like(xyz[:, 2], z_floor),
+        xyz_plot[:, 0],
+        xyz_plot[:, 1],
+        np.full_like(xyz_plot[:, 2], z_floor),
         color="0.35",
         linestyle="--",
         linewidth=1.0,
@@ -435,11 +497,11 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         label="XY projection",
     )
 
-    normals = _normal_vectors_from_state6(state6)
-    if normals is not None and len(normals) == len(xyz):
-        stride = max(1, len(xyz) // 28)
-        normal_scale = max(float(np.ptp(xyz[:, 0])), float(np.ptp(xyz[:, 1])), float(np.ptp(xyz[:, 2])), 1.0) * 0.08
-        q_xyz = xyz[::stride]
+    normals = _normal_vectors_from_state6(state6_plot)
+    if normals is not None and len(normals) == len(xyz_plot):
+        stride = max(1, len(xyz_plot) // 28)
+        normal_scale = max(float(np.ptp(xyz_plot[:, 0])), float(np.ptp(xyz_plot[:, 1])), float(np.ptp(xyz_plot[:, 2])), 1.0) * 0.08
+        q_xyz = xyz_plot[::stride]
         q_normals = normals[::stride] * normal_scale
         ax4.quiver(
             q_xyz[:, 0],
@@ -456,13 +518,14 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         )
         ax4.plot([], [], [], color="#d62728", linewidth=1.6, label="TCP normal")
 
-    ax4.scatter(xyz[0, 0], xyz[0, 1], xyz[0, 2], color="#2ca02c", s=55, depthshade=True, label="start")
-    ax4.scatter(xyz[-1, 0], xyz[-1, 1], xyz[-1, 2], color="#d62728", s=55, depthshade=True, label="end")
-    ax4.set_title(f"Episode {_episode_counter} EE Path and TCP Normals")
+    ax4.scatter(xyz_plot[0, 0], xyz_plot[0, 1], xyz_plot[0, 2], color="#2ca02c", s=55, depthshade=True, label="contact start")
+    ax4.scatter(xyz_plot[-1, 0], xyz_plot[-1, 1], xyz_plot[-1, 2], color="#d62728", s=55, depthshade=True, label="end")
+    ax4.set_title(f"Episode {_episode_counter} Contact-Window EE Path")
     ax4.set_xlabel("X [mm]")
     ax4.set_ylabel("Y [mm]")
     ax4.set_zlabel("Z [mm]")
-    _set_axes_equal_3d(ax4, xyz)
+    axes_xyz = xyz_plot if hdf5_xyz is None else np.vstack([xyz_plot, hdf5_xyz])
+    _set_axes_equal_3d(ax4, axes_xyz)
     ax4.view_init(elev=28, azim=-58)
     ax4.grid(True, alpha=0.25)
     ax4.legend(loc="upper left")

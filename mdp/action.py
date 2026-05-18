@@ -261,12 +261,13 @@ class ActionIntegrationCfg:
     force_overload_rate_scale: float = 0.02
     path_tracking_slowdown_start_mm: float = 3.0
     path_tracking_stop_mm: float = 12.0
-    path_tracking_min_rate_scale: float = 0.0
-    path_projection_window: int = 1200
-    path_lookahead_min_index: float = 20.0
-    path_lookahead_max_index: float = 240.0
-    path_lookahead_time_s: float = 0.18
-    path_command_max_xy_step_mm: float = 3.0
+    path_tracking_min_rate_scale: float = 0.25
+    path_projection_window: int = 160
+    path_projection_max_advance_index: float = 12.0
+    path_lookahead_min_index: float = 2.0
+    path_lookahead_max_index: float = 36.0
+    path_lookahead_time_s: float = 0.04
+    path_command_max_xy_step_mm: float = 0.0
     path_command_max_z_step_mm: float = 4.0
     approach_interpolation_enabled: bool = True
     approach_duration_s: float = 2.0
@@ -559,7 +560,8 @@ class AdmittanceControlAction(ActionTerm):
 
     def _project_cursor_to_path(self, env_id: int, current_pos_mm: torch.Tensor) -> float:
         window = max(8, int(self.int_cfg.path_projection_window))
-        center = int(max(0, min(self.traj_length - 1, round(float(self.path_cursor[env_id].item())))))
+        cursor = float(self.path_cursor[env_id].item())
+        center = int(max(0, min(self.traj_length - 1, round(cursor))))
         start = max(0, center - window // 3)
         end = min(self.traj_length, center + window)
         if end <= start:
@@ -570,7 +572,9 @@ class AdmittanceControlAction(ActionTerm):
         dist2 = torch.sum(delta * delta, dim=1)
         local_idx = int(torch.argmin(dist2).item())
         projected = float(start + local_idx)
-        return max(float(self.path_cursor[env_id].item()) - float(window), projected)
+        max_advance = max(0.0, float(self.int_cfg.path_projection_max_advance_index))
+        projected = min(projected, cursor + max_advance)
+        return max(cursor - float(window), projected)
 
     def _compute_lookahead_indices(self, base_rate: float) -> float:
         lookahead = base_rate * float(self.int_cfg.path_lookahead_time_s) / max(self._step_dt_local, 1.0e-8)
@@ -892,7 +896,8 @@ class AdmittanceControlAction(ActionTerm):
         self.robot.set_joint_position_target(q_cmd_all)
 
         if debug_needed:
-            current_index = int(self.current_target_index[debug_env_id].item())
+            current_index = int(self.path_index[debug_env_id].item())
+            target_index = int(self.current_target_index[debug_env_id].item())
             progress_pct = 100.0 * float(self.path_cursor[debug_env_id].item()) / max(float(self.traj_length - 1), 1.0)
             episode_number = int(getattr(self._env, "_ep_curriculum", 0)) + 1
             cur_dbg_xyz_mm, _, cur_dbg_wxyz, _ = self._fk_pose_pybind_corrected(q[debug_env_id])
@@ -902,6 +907,7 @@ class AdmittanceControlAction(ActionTerm):
             local_debug.print_info(
                 f"\n[Polishing Live] ep{episode_number} step={global_step} env={debug_env_id} "
                 f"| hdf5_index={current_index}/{self.traj_length - 1} ({progress_pct:.1f}%) "
+                f"| target_index={target_index} "
                 f"| cursor={float(self.path_cursor[debug_env_id].item()):.3f}\n"
                 f"  current xyz/wxyz = "
                 f"({float(cur_dbg_xyz_mm[0].item()):.3f}, {float(cur_dbg_xyz_mm[1].item()):.3f}, {float(cur_dbg_xyz_mm[2].item()):.3f}) / "
