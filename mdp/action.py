@@ -919,7 +919,7 @@ class AdmittanceControlAction(ActionTerm):
             current_index = int(self.path_index[debug_env_id].item())
             target_index = int(self.current_target_index[debug_env_id].item())
             progress_pct = 100.0 * float(self.path_cursor[debug_env_id].item()) / max(float(self.traj_length - 1), 1.0)
-            episode_number = int(getattr(self._env, "_ep_curriculum", 0)) + 1
+            episode_number = max(1, int(getattr(self._env, "_ep_curriculum", 1)))
             cur_dbg_xyz_mm, _, cur_dbg_wxyz, _ = self._fk_pose_pybind_corrected(q[debug_env_id])
             tgt_dbg_xyz_mm = self.des_pos_mm_raw[debug_env_id]
             tgt_dbg_wxyz = self.des_wxyz_raw[debug_env_id]

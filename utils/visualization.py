@@ -73,6 +73,8 @@ GRID_SIZE = 128
 CONTACT_FORCE_THRESHOLD_N = 0.5
 MIN_CONTACT_FORCE_FRACTION = 0.05
 MIN_SLIDING_SPEED_MM_S = 0.1
+HEATMAP_SMOOTHING_SIGMA_MM = 8.0
+HEATMAP_MIN_SMOOTHING_SIGMA_CELLS = 2.6
 
 _surface_grid = np.zeros(
     (GRID_SIZE, GRID_SIZE),
@@ -382,7 +384,14 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
     # --- 1. Local Removal Heatmap ---
     bins = min(140, max(64, int(np.sqrt(len(x)) * 3)))
     grid_removal, _, _ = np.histogram2d(x, y, bins=bins, range=[extent[:2], extent[2:]], weights=dremoval_plot)
-    grid_removal_smoothed = gaussian_filter(grid_removal.T, sigma=2.6)
+    cell_size_x = (extent[1] - extent[0]) / max(bins, 1)
+    cell_size_y = (extent[3] - extent[2]) / max(bins, 1)
+    mean_cell_size = max(0.5 * (cell_size_x + cell_size_y), 1.0e-6)
+    smoothing_sigma_cells = max(
+        HEATMAP_MIN_SMOOTHING_SIGMA_CELLS,
+        HEATMAP_SMOOTHING_SIGMA_MM / mean_cell_size,
+    )
+    grid_removal_smoothed = gaussian_filter(grid_removal.T, sigma=smoothing_sigma_cells)
     max_removal = float(np.nanmax(grid_removal_smoothed)) if grid_removal_smoothed.size else 0.0
     if max_removal > 0.0 and np.isfinite(max_removal):
         positive_values = grid_removal_smoothed[grid_removal_smoothed > 0.0]
