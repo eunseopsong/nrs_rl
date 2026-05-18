@@ -194,7 +194,7 @@ def process_episode():
         vxyz[:, i] = np.gradient(xyz[:, i], t)
 
     speed = np.linalg.norm(vxyz[:, :2], axis=1)
-    if len(sliding_velocity_arr) == len(t):
+    if len(sliding_velocity_arr) == len(t) and np.all(np.isfinite(sliding_velocity_arr)):
         speed = sliding_velocity_arr
     fn = np.maximum(f_arr[:, 2], 0.0)
     dt = np.diff(t, prepend=t[0] - 1e-3)
@@ -269,12 +269,13 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
     fig.savefig(out_dir / "01_removal_heatmap.png", dpi=200)
     plt.close(fig)
 
-    cumulative_removal = np.cumsum(dremoval)
     fig2, ax2 = plt.subplots(figsize=(9, 5))
-    ax2.plot(t, cumulative_removal, color="tab:blue", linewidth=1.8)
-    ax2.set_title(f"Episode {_episode_counter} Cumulative Removal")
+    ax2.plot(t, removal_rate, color="tab:blue", linewidth=1.8)
+    ax2.axhline(np.mean(removal_rate), color="tab:orange", linestyle="--", linewidth=1.2, label="episode mean")
+    ax2.set_title(f"Episode {_episode_counter} Removal Rate")
     ax2.set_xlabel("Time [s]")
-    ax2.set_ylabel("Removal [a.u.]")
+    ax2.set_ylabel("Normal Force x Sliding Velocity")
+    ax2.legend()
     ax2.grid(True, alpha=0.3)
     fig2.tight_layout()
     fig2.savefig(out_dir / "02_heatmap_value_vs_time.png", dpi=200)

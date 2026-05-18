@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
 import torch
 import importlib
+import numpy as np
 
 from ..utils import debug as local_debug
 
@@ -67,6 +68,85 @@ def _get_action_term(env: "ManagerBasedRLEnv", action_term_name: str = "arm_acti
         return getattr(am, action_term_name)
 
     return None
+
+
+def get_action_term(env: "ManagerBasedRLEnv", action_term_name: str = "arm_action"):
+    return _get_action_term(env, action_term_name=action_term_name)
+
+
+def get_ee_idx(
+    env: "ManagerBasedRLEnv",
+    asset_name: str = "robot",
+    body_name: str = "spindle_link",
+) -> int:
+    robot = env.scene[asset_name]
+    return int(robot.find_bodies(body_name)[0][0])
+
+
+def get_current_pose_and_velocity(
+    env: "ManagerBasedRLEnv",
+    asset_name: str = "robot",
+    body_name: str = "spindle_link",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    robot = env.scene[asset_name]
+    ee_idx = get_ee_idx(env, asset_name=asset_name, body_name=body_name)
+    ee_pos_w = robot.data.body_pos_w[:, ee_idx, :]
+    ee_lin_vel_w = robot.data.body_lin_vel_w[:, ee_idx, :]
+    current_xyz = ee_pos_w - env.scene.env_origins
+    vel_norm = torch.norm(ee_lin_vel_w, dim=-1)
+    return current_xyz, robot.data.body_quat_w[:, ee_idx, :], vel_norm
+
+
+def get_current_fz(
+    env: "ManagerBasedRLEnv",
+    asset_name: str = "robot",
+    fixed_joint_name: str = "tool0_to_spindle",
+    joint_prim_relpath: str = "joints",
+) -> torch.Tensor:
+    wrench = local_ft_sensor.get_6axis_ft_fixed_joint(
+        env=env,
+        asset_name=asset_name,
+        fixed_joint_name=fixed_joint_name,
+        joint_prim_relpath=joint_prim_relpath,
+        verbose=False,
+    )
+    return wrench[:, 2]
+
+
+def get_path_sliding_metrics(
+    env: "ManagerBasedRLEnv",
+    action_term_name: str = "arm_action",
+    asset_name: str = "robot",
+    body_name: str = "spindle_link",
+    fixed_joint_name: str = "tool0_to_spindle",
+    joint_prim_relpath: str = "joints",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    term = _get_action_term(env, action_term_name)
+    if term is not None and hasattr(term, "current_sliding_velocity_mm_s"):
+        sliding_velocity = term.current_sliding_velocity_mm_s.to(device=env.device, dtype=torch.float32)
+        abs_fz = term.current_abs_fz.to(device=env.device, dtype=torch.float32)
+        current_mrr = term.current_mrr_n_mm_s.to(device=env.device, dtype=torch.float32)
+        return abs_fz, sliding_velocity, current_mrr
+
+    abs_fz = torch.abs(get_current_fz(env, asset_name, fixed_joint_name, joint_prim_relpath))
+    _, _, current_vel_norm = get_current_pose_and_velocity(env, asset_name, body_name)
+    sliding_velocity = current_vel_norm * 1000.0
+    return abs_fz, sliding_velocity, abs_fz * sliding_velocity
+
+
+def get_current_target_pose_for_reward(env: "ManagerBasedRLEnv") -> tuple[torch.Tensor, torch.Tensor]:
+    return _get_target_pose_for_polishing(env)
+
+
+def get_surface_uniformity_reward_value(env):
+    vis_module = importlib.import_module("nrs_rl.tasks.manager_based.nrs_rl.utils.visualization")
+    grid = vis_module._surface_grid
+    valid = grid[grid > 0]
+    if len(valid) < 10:
+        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+    std = float(np.std(valid))
+    reward = 1.0 / (1.0 + std)
+    return torch.full((env.num_envs,), reward, device=env.device, dtype=torch.float32)
 
 
 def _get_traj_indices_from_action(

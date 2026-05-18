@@ -9,97 +9,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 import importlib
 import torch
-import numpy as np
  
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
  
 local_obs = importlib.import_module("nrs_rl.tasks.manager_based.nrs_rl.mdp.observation")
-local_ft_sensor = importlib.import_module(
-    "nrs_rl.tasks.manager_based.nrs_rl.assets.assets.sensors.six_axis_ft_sensor"
-)
  
 # ==========================================
 # Helper Functions
 # ==========================================
-def _get_ee_idx(
-    env: "ManagerBasedRLEnv",
-    asset_name: str = "robot",
-    body_name: str = "spindle_link",
-) -> int:
-    robot = env.scene[asset_name]
-    return int(robot.find_bodies(body_name)[0][0])
- 
-def _get_current_pose_and_velocity(
-    env: "ManagerBasedRLEnv",
-    asset_name: str = "robot",
-    body_name: str = "spindle_link",
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    robot = env.scene[asset_name]
-    ee_idx = _get_ee_idx(env, asset_name=asset_name, body_name=body_name)
-    ee_pos_w = robot.data.body_pos_w[:, ee_idx, :]
-    ee_lin_vel_w = robot.data.body_lin_vel_w[:, ee_idx, :]
-    current_xyz = ee_pos_w - env.scene.env_origins
-    vel_norm = torch.norm(ee_lin_vel_w, dim=-1)
-    return current_xyz, robot.data.body_quat_w[:, ee_idx, :], vel_norm
- 
-def _get_current_fz(
-    env: "ManagerBasedRLEnv",
-    asset_name: str = "robot",
-    fixed_joint_name: str = "tool0_to_spindle",
-    joint_prim_relpath: str = "joints",
-) -> torch.Tensor:
-    wrench = local_ft_sensor.get_6axis_ft_fixed_joint(
-        env=env,
-        asset_name=asset_name,
-        fixed_joint_name=fixed_joint_name,
-        joint_prim_relpath=joint_prim_relpath,
-        verbose=False,
-    )
-    return wrench[:, 2]
-
-def _get_action_term(env: "ManagerBasedRLEnv", action_term_name: str = "arm_action"):
-    am = getattr(env, "action_manager", None)
-    if am is None:
-        return None
-    if hasattr(am, "get_term"):
-        try:
-            return am.get_term(action_term_name)
-        except Exception:
-            pass
-    if hasattr(am, "_terms"):
-        terms = am._terms
-        if isinstance(terms, dict) and action_term_name in terms:
-            return terms[action_term_name]
-    if hasattr(am, action_term_name):
-        return getattr(am, action_term_name)
-    return None
-
-def _get_path_sliding_metrics(
-    env: "ManagerBasedRLEnv",
-    action_term_name: str = "arm_action",
-    asset_name: str = "robot",
-    body_name: str = "spindle_link",
-    fixed_joint_name: str = "tool0_to_spindle",
-    joint_prim_relpath: str = "joints",
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    term = _get_action_term(env, action_term_name)
-    if term is not None and hasattr(term, "current_sliding_velocity_mm_s"):
-        sliding_velocity = term.current_sliding_velocity_mm_s.to(device=env.device, dtype=torch.float32)
-        abs_fz = term.current_abs_fz.to(device=env.device, dtype=torch.float32)
-        current_mrr = term.current_mrr_n_mm_s.to(device=env.device, dtype=torch.float32)
-        return abs_fz, sliding_velocity, current_mrr
-
-    abs_fz = torch.abs(_get_current_fz(env, asset_name, fixed_joint_name, joint_prim_relpath))
-    _, _, current_vel_norm = _get_current_pose_and_velocity(env, asset_name, body_name)
-    sliding_velocity = current_vel_norm * 1000.0
-    return abs_fz, sliding_velocity, abs_fz * sliding_velocity
- 
-def _get_current_target_pose(
-    env: "ManagerBasedRLEnv",
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return local_obs._get_target_pose_for_polishing(env)
- 
 def _soft_gate(
     value: torch.Tensor,
     threshold: float,
@@ -136,7 +54,7 @@ def adaptive_mrr_reward(
     joint_prim_relpath: str = "joints",
     action_term_name: str = "arm_action",
 ) -> torch.Tensor:
-    current_fz, sliding_velocity, current_mrr = _get_path_sliding_metrics(
+    current_fz, sliding_velocity, current_mrr = local_obs.get_path_sliding_metrics(
         env,
         action_term_name=action_term_name,
         asset_name=asset_name,
@@ -172,7 +90,7 @@ def inverse_fv_bonus(
     joint_prim_relpath: str = "joints",
     action_term_name: str = "arm_action",
 ) -> torch.Tensor:
-    current_fz, sliding_velocity, _ = _get_path_sliding_metrics(
+    current_fz, sliding_velocity, _ = local_obs.get_path_sliding_metrics(
         env,
         action_term_name=action_term_name,
         asset_name=asset_name,
@@ -203,8 +121,8 @@ def trajectory_tracking_reward(
 ) -> torch.Tensor:
     current_pose = local_obs.get_ee_pose(env, asset_name=asset_name)
     current_xyz = current_pose[:, :3]
-    _, _, current_vel_norm = _get_current_pose_and_velocity(env, asset_name, body_name)
-    target_xyz, _ = _get_current_target_pose(env)
+    _, _, current_vel_norm = local_obs.get_current_pose_and_velocity(env, asset_name, body_name)
+    target_xyz, _ = local_obs.get_current_target_pose_for_reward(env)
  
     pos_error = torch.norm(current_xyz - target_xyz, dim=-1)
     pos_reward = torch.exp(-torch.square(pos_error / pos_sigma))
@@ -225,7 +143,7 @@ def anti_lazy_immobility_penalty(
     body_name: str = "spindle_link",
 ) -> torch.Tensor:
     """움직이지 않고 제자리에 버티며 에러 꼼수 부리는 행동 실시간 가스실 송행"""
-    _, _, current_vel_norm = _get_current_pose_and_velocity(env, asset_name, body_name)
+    _, _, current_vel_norm = local_obs.get_current_pose_and_velocity(env, asset_name, body_name)
     
     # 속도가 기준치 미만이면 가만히 있는 것으로 간주 (True = 1.0)
     is_lazy = (current_vel_norm < min_velocity).float()
@@ -246,10 +164,10 @@ def physical_completion_reward(
     if not reset_buf.any():
         return reward
 
-    term = _get_action_term(env, "arm_action")
+    term = local_obs.get_action_term(env, "arm_action")
     is_path_done = term.path_done.to(device=env.device, dtype=torch.bool) if term is not None and hasattr(term, "path_done") else reset_buf
     current_xyz = local_obs.get_ee_pose(env, asset_name=asset_name)[:, :3]
-    target_xyz, _ = _get_current_target_pose(env)
+    target_xyz, _ = local_obs.get_current_target_pose_for_reward(env)
     distance_error = torch.norm(current_xyz - target_xyz, dim=-1)
     
     success = distance_error < distance_threshold
@@ -286,18 +204,8 @@ def surface_coverage_reward(
 # ==========================================
 # 🎨 6. Surface Uniformity
 # ==========================================
-def _get_surface_uniformity_reward(env):
-    vis_module = importlib.import_module("nrs_rl.tasks.manager_based.nrs_rl.utils.visualization")
-    grid = vis_module._surface_grid
-    valid = grid[grid > 0]
-    if len(valid) < 10:
-        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
-    std = float(np.std(valid))
-    reward = 1.0 / (1.0 + std)
-    return torch.full((env.num_envs,), reward, device=env.device, dtype=torch.float32)
-
 def surface_uniformity_reward(env, scale: float = 3.0):
-    reward = _get_surface_uniformity_reward(env)
+    reward = local_obs.get_surface_uniformity_reward_value(env)
     return reward * scale
 
 # ==========================================
@@ -316,7 +224,7 @@ def machining_safety_penalty(
     fixed_joint_name: str = "tool0_to_spindle",
     joint_prim_relpath: str = "joints",
 ) -> torch.Tensor:
-    current_fz = torch.abs(_get_current_fz(env, asset_name, fixed_joint_name, joint_prim_relpath))
+    current_fz = torch.abs(local_obs.get_current_fz(env, asset_name, fixed_joint_name, joint_prim_relpath))
     violation = current_fz > max_force
     return torch.where(
         violation,

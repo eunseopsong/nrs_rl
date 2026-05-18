@@ -653,14 +653,13 @@ class AdmittanceControlAction(ActionTerm):
                 target_force=self.des_force[debug_env_id].detach().cpu(),
             )
             local_debug.print_info(
-                f"[Action Mode ] env={debug_env_id} mode=variable_speed_path_follow "
+                f"[Polishing Live] env={debug_env_id} "
+                f"| normal_force_N={float(self.current_abs_fz[debug_env_id].item()):.4f} "
+                f"| sliding_velocity_mm_s={float(self.current_sliding_velocity_mm_s[debug_env_id].item()):.4f} "
+                f"| removal_rate_N_mm_s={float(self.current_mrr_n_mm_s[debug_env_id].item()):.4f} "
                 f"| action={float(self._processed_actions[debug_env_id, 0].item()):.4f} "
-                f"| measured_fz={float(wrench6[debug_env_id, 2].item()):.6f} "
-                f"| abs_fz={abs(float(wrench6[debug_env_id, 2].item())):.6f} "
                 f"| base_rate={float(self.progress_rate_filtered[debug_env_id].item()):.4f} "
                 f"| final_rate={float(self.current_index_delta[debug_env_id].item()):.4f} "
-                f"| sliding_v_mm_s={float(self.current_sliding_velocity_mm_s[debug_env_id].item()):.4f} "
-                f"| mrr={float(self.current_mrr_n_mm_s[debug_env_id].item()):.4f} "
                 f"| cursor={float(self.path_cursor[debug_env_id].item()):.3f}"
             )
 
