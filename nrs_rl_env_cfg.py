@@ -124,6 +124,7 @@ class ActionsCfg:
             force_band_min_n=8.0,
             force_band_max_n=12.0,
             force_band_index_rate_limit=0.05,
+            force_band_saturated_min_n=7.5,
             path_tracking_slowdown_start_mm=2.0,
             path_tracking_stop_mm=8.0,
             path_tracking_min_rate_scale=0.0,

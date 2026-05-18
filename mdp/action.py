@@ -260,6 +260,7 @@ class ActionIntegrationCfg:
     force_band_min_n: float = 8.0
     force_band_max_n: float = 12.0
     force_band_index_rate_limit: float = 0.05
+    force_band_saturated_min_n: float = 7.5
     force_steady_error_band_n: float = 5.0
     force_overload_ratio: float = 1.5
     force_overload_rate_scale: float = 0.02
@@ -884,8 +885,18 @@ class AdmittanceControlAction(ActionTerm):
                     band_min = float(getattr(self.int_cfg, "force_band_min_n", 0.0))
                     band_max = float(getattr(self.int_cfg, "force_band_max_n", 0.0))
                     if band_min > 0.0 and band_max > band_min and (abs_fz < band_min or abs_fz > band_max):
-                        band_limit = float(getattr(self.int_cfg, "force_band_index_rate_limit", 0.05))
-                        force_rate_limit = band_limit if force_rate_limit is None else min(force_rate_limit, band_limit)
+                        push_sign = 1.0 if float(self.int_cfg.force_normal_push_sign) >= 0.0 else -1.0
+                        push_limit_offset = push_sign * float(self.int_cfg.force_normal_offset_limit_mm)
+                        offset_now = float(self.force_normal_offset_mm[env_id].item())
+                        if push_sign < 0.0:
+                            push_saturated = offset_now <= 0.98 * push_limit_offset
+                        else:
+                            push_saturated = offset_now >= 0.98 * push_limit_offset
+                        saturated_min = float(getattr(self.int_cfg, "force_band_saturated_min_n", band_min))
+                        underforce_but_saturated = abs_fz < band_min and push_saturated and abs_fz >= saturated_min
+                        if not underforce_but_saturated:
+                            band_limit = float(getattr(self.int_cfg, "force_band_index_rate_limit", 0.05))
+                            force_rate_limit = band_limit if force_rate_limit is None else min(force_rate_limit, band_limit)
                 tracking_scale = self._path_tracking_rate_scale(path_tracking_error_mm)
                 final_rate *= tracking_scale
                 if tracking_scale <= 0.0:
