@@ -107,11 +107,13 @@ class ActionsCfg:
             position_dataset_key="position",
             force_dataset_key="force",
 
-            action_dim=2,
+            action_dim=1,
 
+            target_mrr_n_mm_s=500.0,
+            speed_action_scale=0.3,
             base_index_rate=10.0,
-            min_index_rate=3.0,
-            max_index_rate=8.0,
+            min_index_rate=1.0,
+            max_index_rate=16.0,
             progress_rate_ema_beta=0.3,
             force_eps_n=1.0,
 
@@ -236,20 +238,26 @@ class RewardsCfg:
     adaptive_mrr_reward = RewardTermCfg(
         func=custom_rewards.adaptive_mrr_reward,
         weight=5.0,
-        params={"target_mrr": 0.1, "mrr_sigma_start": 1.2, "mrr_sigma_end": 0.3, "curriculum_ramp": 200},
+        params={
+            "target_mrr": 500.0,
+            "mrr_sigma_start": 1.2,
+            "mrr_sigma_end": 0.3,
+            "curriculum_ramp": 200,
+            "min_velocity": 1.0,
+        },
     )
 
     inverse_fv_bonus = RewardTermCfg(
         func=custom_rewards.inverse_fv_bonus,
         weight=2.0,
-        params={"target_mrr": 0.1, "bonus_sigma_start": 0.8, "bonus_sigma_end": 0.25, "curriculum_ramp": 200},
+        params={"target_mrr": 500.0, "bonus_sigma_start": 0.8, "bonus_sigma_end": 0.25, "curriculum_ramp": 200},
     )
 
     # ── 2. 강력한 헌법 (완주 & 커버리지 강제) ──
     physical_completion = RewardTermCfg(
         func=custom_rewards.physical_completion_reward,
         weight=1.0,  # 내부에서 스케일이 매우 크므로 1.0 유지
-        params={"distance_threshold": 0.05},
+        params={"distance_threshold": 50.0},
     )
     
     # surface_coverage = RewardTermCfg(
@@ -262,13 +270,15 @@ class RewardsCfg:
     trajectory_tracking_reward = RewardTermCfg(
         func=custom_rewards.trajectory_tracking_reward,
         weight= 3.0, 
-        params={"pos_sigma": 0.05, "vel_bonus_scale": 0.3},
+        params={"pos_sigma": 5.0, "vel_bonus_scale": 0.3},
     )
 
-    surface_uniformity_reward = RewardTermCfg(
-        func=custom_rewards.surface_uniformity_reward,
-        weight=4.0,
-    )
+    # surface_uniformity_reward는 visualization 전역 grid에 의존하므로
+    # action/reward 연결 검증이 끝날 때까지 비활성화한다.
+    # surface_uniformity_reward = RewardTermCfg(
+    #     func=custom_rewards.surface_uniformity_reward,
+    #     weight=4.0,
+    # )
 
     # ── 4. 제약 사항 (족쇄 해제 및 안전 장치) ──
     action_smoothness_penalty = RewardTermCfg(

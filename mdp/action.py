@@ -234,10 +234,12 @@ class ActionIntegrationCfg:
     position_dataset_key: str = "position"
     force_dataset_key: str = "force"
 
-    action_dim: int = 2
+    action_dim: int = 1
 
+    target_mrr_n_mm_s: float = 500.0
+    speed_action_scale: float = 0.3
     base_index_rate: float = 10.0
-    min_index_rate: float = 3.0
+    min_index_rate: float = 1.0
     max_index_rate: float = 16.0
     progress_rate_ema_beta: float = 0.3
     force_eps_n: float = 1.0
@@ -302,11 +304,23 @@ class AdmittanceControlAction(ActionTerm):
         self.traj_positions = traj_full.contiguous()
         self.traj_forces = force_full.contiguous()
         self.traj_length = self.traj_positions.shape[0]
+        segment_lengths = torch.linalg.norm(
+            self.traj_positions[1:, 0:3] - self.traj_positions[:-1, 0:3],
+            dim=-1,
+        )
+        self.traj_segment_lengths_mm = torch.empty((self.traj_length,), dtype=torch.float32, device=self.device)
+        self.traj_segment_lengths_mm[:-1] = segment_lengths
+        self.traj_segment_lengths_mm[-1] = segment_lengths[-1] if segment_lengths.numel() > 0 else 1.0
+        self.traj_segment_lengths_mm = torch.clamp(self.traj_segment_lengths_mm, min=1.0e-6)
 
         self.path_cursor = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
         self.path_index = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
         self.current_target_index = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
         self.path_done = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
+        self.current_index_delta = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
+        self.current_sliding_velocity_mm_s = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
+        self.current_abs_fz = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
+        self.current_mrr_n_mm_s = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
 
         self.progress_rate_filtered = torch.full(
             (self._num_envs_local,),
@@ -459,10 +473,11 @@ class AdmittanceControlAction(ActionTerm):
     def _reset_force_controller_for_env(self, env_id: int, xd_mm: float):
         self.force_controllers[env_id].reset(float(xd_mm))
 
-    def _compute_progress_rate(self, env_id: int, abs_fz: float, target_fz: float) -> float:
+    def _compute_progress_rate(self, env_id: int, idx: int, abs_fz: float) -> float:
         denom = max(abs_fz, self.int_cfg.force_eps_n)
-        ratio = math.sqrt(target_fz / denom)
-        raw_rate = self.int_cfg.base_index_rate * ratio
+        target_velocity_mm_s = float(self.int_cfg.target_mrr_n_mm_s) / denom
+        segment_length_mm = float(self.traj_segment_lengths_mm[idx].item())
+        raw_rate = target_velocity_mm_s * self._step_dt_local / max(segment_length_mm, 1.0e-6)
 
         raw_rate = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, raw_rate))
 
@@ -487,6 +502,10 @@ class AdmittanceControlAction(ActionTerm):
         self.path_index[env_ids] = 0
         self.current_target_index[env_ids] = 0
         self.path_done[env_ids] = False
+        self.current_index_delta[env_ids] = 0.0
+        self.current_sliding_velocity_mm_s[env_ids] = 0.0
+        self.current_abs_fz[env_ids] = 0.0
+        self.current_mrr_n_mm_s[env_ids] = 0.0
         self.progress_rate_filtered[env_ids] = float(self.int_cfg.base_index_rate)
 
         des = self.traj_positions[0].unsqueeze(0).repeat(len(env_ids), 1)
@@ -507,7 +526,7 @@ class AdmittanceControlAction(ActionTerm):
     @torch.no_grad()
     def process_actions(self, actions: torch.Tensor):
         self._raw_actions = torch.nan_to_num(actions.clone(), nan=0.0)
-        self._processed_actions.zero_()
+        self._processed_actions[:] = torch.clamp(self._raw_actions, -1.0, 1.0)
 
     @torch.no_grad()
     def apply_actions(self):
@@ -564,15 +583,10 @@ class AdmittanceControlAction(ActionTerm):
 
             target_pos_mm = nominal_pos_mm.clone()
 
-            # 💡 RL Action[0]을 이용하여 목표 힘(Target Force) 보정 (예: +-10N 조절)
-            # action 값이 -1.0 ~ 1.0 사이라고 가정하고 스케일을 맞춰줍니다.
-            rl_force_offset = float(self._raw_actions[env_id, 0].item()) * 10.0
-            adjusted_target_fz = float(target_fz) + rl_force_offset
-
             fc_out = self.force_controllers[env_id].step(
                 float(nominal_pos_mm[2].item()),
                 float(cur_pos_mm[2].item()),
-                adjusted_target_fz,  # <--- 기존 target_fz 대신 보정된 힘(adjusted_target_fz) 입력
+                float(target_fz),
                 float(abs_fz),
             )
             z_cmd = float(fc_out[0])
@@ -595,44 +609,19 @@ class AdmittanceControlAction(ActionTerm):
             q_cmd_all[env_id, :6] = q_cmd6
 
             if not bool(self.path_done[env_id].item()):
-                # 기본 진행 속도 계산
-                base_rate = self._compute_progress_rate(env_id, abs_fz, target_fz)
-                
-                # RL Action[1]을 이용하여 진행 속도(Rate) 보정 (예: +-5.0 조절)
-                rl_speed_offset = float(self._raw_actions[env_id, 1].item()) * 5.0
-                final_rate = base_rate + rl_speed_offset
-                
-                # -------------------------------------------------------------
-                # 🚀 [수정] 적응형 경로 추종 (고무줄 로직 + 타임아웃 방지)
-                # -------------------------------------------------------------
-                # 1. 로봇(cur_pos_mm)과 타겟(nominal_pos_mm)의 XY 평면 거리 에러 계산
-                xy_error_mm = float(torch.norm(cur_pos_mm[:2] - nominal_pos_mm[:2]).item())
-                
-                # 2. 에러가 커지면 타겟 속도를 감쇠 (10mm부터 감속 시작, 30mm 이상일 때 최대 감속)
-                if xy_error_mm > 10.0:
-                    scale = 1.0 - min((xy_error_mm - 10.0) / 20.0, 1.0)
-                    final_rate = final_rate * scale
-                
-                # 3. 에러가 10mm 이상이면, 타겟 속도를 0.0(완전 정지) 또는 아주 미세한 속도(0.1)로 낮춰서
-                # 로봇이 10mm 이상 뒤쳐지면, 타겟은 전진 속도를 0.0(완전 정지) 또는 아주 미세한 속도(0.1)로 낮춰서
-                # 로봇이 물리적으로 해당 위치까지 도달할 때까지 무한정 기다려줍니다.
-                dynamic_min_rate = 0.0 if xy_error_mm > 10.0 else self.int_cfg.min_index_rate
-                
-                # 최종 속도 제한 (클리핑)
-                final_rate = max(dynamic_min_rate, min(self.int_cfg.max_index_rate, final_rate))
-                # -------------------------------------------------------------
-                
-                self.path_cursor[env_id] += final_rate
+                base_rate = self._compute_progress_rate(env_id, idx, abs_fz)
+                action_scale = 1.0 + float(self.int_cfg.speed_action_scale) * float(self._processed_actions[env_id, 0].item())
+                action_scale = max(0.05, action_scale)
+                final_rate = base_rate * action_scale
+                final_rate = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, final_rate))
 
-                if self.path_cursor[env_id] >= float(self.traj_length - 1):
-                    self.path_cursor[env_id] = float(self.traj_length - 1)
-                    self.path_done[env_id] = True
-                # -------------------------------------------------------------
+                segment_length_mm = float(self.traj_segment_lengths_mm[idx].item())
+                sliding_velocity_mm_s = final_rate * segment_length_mm / max(self._step_dt_local, 1.0e-8)
 
-                # 속도가 최소/최대 속도 제한을 벗어나지 않도록 (단, final_rate가 0일 때는 제외)
-                if final_rate > 0.0:
-                    final_rate = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, final_rate))
-                
+                self.current_index_delta[env_id] = final_rate
+                self.current_sliding_velocity_mm_s[env_id] = sliding_velocity_mm_s
+                self.current_abs_fz[env_id] = abs_fz
+                self.current_mrr_n_mm_s[env_id] = abs_fz * sliding_velocity_mm_s
                 self.path_cursor[env_id] += final_rate
 
                 if self.path_cursor[env_id] >= float(self.traj_length - 1):
@@ -665,9 +654,13 @@ class AdmittanceControlAction(ActionTerm):
             )
             local_debug.print_info(
                 f"[Action Mode ] env={debug_env_id} mode=variable_speed_path_follow "
+                f"| action={float(self._processed_actions[debug_env_id, 0].item()):.4f} "
                 f"| measured_fz={float(wrench6[debug_env_id, 2].item()):.6f} "
                 f"| abs_fz={abs(float(wrench6[debug_env_id, 2].item())):.6f} "
-                f"| rate={float(self.progress_rate_filtered[debug_env_id].item()):.4f} "
+                f"| base_rate={float(self.progress_rate_filtered[debug_env_id].item()):.4f} "
+                f"| final_rate={float(self.current_index_delta[debug_env_id].item()):.4f} "
+                f"| sliding_v_mm_s={float(self.current_sliding_velocity_mm_s[debug_env_id].item()):.4f} "
+                f"| mrr={float(self.current_mrr_n_mm_s[debug_env_id].item()):.4f} "
                 f"| cursor={float(self.path_cursor[debug_env_id].item()):.3f}"
             )
 

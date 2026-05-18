@@ -17,6 +17,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
 import torch
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
 # ============================================================
 # Local Imports
@@ -45,9 +46,7 @@ PROJECT_ROOT_DIR = CURRENT_FILE_PATH.parent.parent
 BASE_LOG_DIR = PROJECT_ROOT_DIR / "logs" / "polishing_results"
 RUN_LOG_DIR = BASE_LOG_DIR / _run_timestamp
 
-RUN_LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-local_debug.print_info(f"[Init] Polishing log directory created: {RUN_LOG_DIR}")
+local_debug.print_info(f"[Init] Polishing log directory configured: {RUN_LOG_DIR}")
 
 # ============================================================
 # Global Buffers
@@ -57,6 +56,7 @@ _rl_time_buffer = []
 _rl_state_buffer = []
 _rl_force_buffer = []
 _rl_index_buffer = []
+_rl_sliding_velocity_buffer = []
 _rl_reward_components_buffer = defaultdict(list)
 
 _current_ep_reward = 0.0
@@ -65,8 +65,21 @@ _rl_start_time = None
 _episode_counter = 1
 _has_seen_any_step = False
 
-# 🚀 [FIX] 고정 Grid 대신, 누적 좌표와 제거량을 동적으로 저장하는 버퍼로 변경
 _global_removal_history = {"x": [], "y": [], "removal": []}
+
+GRID_SIZE = 128
+
+_surface_grid = np.zeros(
+    (GRID_SIZE, GRID_SIZE),
+    dtype=np.float32,
+)
+
+_surface_extent = {
+    "xmin": -120.0,
+    "xmax": 120.0,
+    "ymin": -120.0,
+    "ymax": 120.0,
+}
 
 # ============================================================
 # Summary Metrics
@@ -90,6 +103,23 @@ def moving_average(x, w=5):
     if len(x) < w:
         return x
     return np.convolve(x, np.ones(w) / w, mode="same")
+
+
+def update_surface_grid(x, y, removal):
+    global _surface_grid
+
+    xmin = _surface_extent["xmin"]
+    xmax = _surface_extent["xmax"]
+    ymin = _surface_extent["ymin"]
+    ymax = _surface_extent["ymax"]
+
+    ix = int((x - xmin) / (xmax - xmin) * (GRID_SIZE - 1))
+    iy = int((y - ymin) / (ymax - ymin) * (GRID_SIZE - 1))
+
+    ix = np.clip(ix, 0, GRID_SIZE - 1)
+    iy = np.clip(iy, 0, GRID_SIZE - 1)
+
+    _surface_grid[iy, ix] += float(removal)
 
 # ============================================================
 # Step Recording
@@ -127,41 +157,7 @@ def record_step(env_ids, state6, force3, sim_time):
 # ============================================================
 
 def save_global_summary():
-    if not _summary_metrics["episode"]:
-        return
-
-    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-    eps = _summary_metrics["episode"]
-
-    axes[0, 0].plot(eps, _summary_metrics["total_removal"], "b-o", markersize=4, alpha=0.7)
-    axes[0, 0].set_title("Total Removal per Episode")
-    axes[0, 0].set_ylabel("Total Removal [a.u.]")
-    axes[0, 0].grid(True, alpha=0.3)
-
-    axes[0, 1].plot(eps, _summary_metrics["mean_mrr_error"], "r-x", markersize=4, alpha=0.7)
-    axes[0, 1].set_title("MRR Tracking Error (Lower is better)")
-    axes[0, 1].set_ylabel("Mean Abs Error")
-    axes[0, 1].grid(True, alpha=0.3)
-
-    reward_arr = np.array(_summary_metrics["episode_reward"])
-    axes[1, 0].plot(eps, reward_arr, color="green", marker="s", markersize=4, alpha=0.3, label="Raw Reward")
-    axes[1, 0].plot(eps, moving_average(reward_arr), color="green", linewidth=2.5, label="Trend (MA)")
-    axes[1, 0].set_title("Total Reward per Episode")
-    axes[1, 0].set_ylabel("Cumulative Reward")
-    axes[1, 0].legend()
-    axes[1, 0].grid(True, alpha=0.3)
-
-    axes[1, 1].plot(eps, _summary_metrics["contact_ratio"], "m-d", markersize=4, alpha=0.7)
-    axes[1, 1].set_title("Contact Ratio")
-    axes[1, 1].set_ylabel("Ratio (Contact/Total)")
-    axes[1, 1].grid(True, alpha=0.3)
-
-    for ax in axes.flat:
-        ax.set_xlabel("Episode")
-
-    fig.tight_layout()
-    fig.savefig(RUN_LOG_DIR / "overall_learning_trend.png", dpi=200)
-    plt.close(fig)
+    return
 
 # ============================================================
 # Episode Processing
@@ -169,7 +165,7 @@ def save_global_summary():
 
 def process_episode():
     global _rl_time_buffer, _rl_state_buffer, _rl_force_buffer
-    global _rl_index_buffer, _rl_reward_components_buffer
+    global _rl_index_buffer, _rl_sliding_velocity_buffer, _rl_reward_components_buffer
     global _rl_start_time, _episode_counter, _summary_metrics
     global _current_ep_reward, _global_removal_history
 
@@ -178,6 +174,7 @@ def process_episode():
         _rl_state_buffer.clear()
         _rl_force_buffer.clear()
         _rl_index_buffer.clear()
+        _rl_sliding_velocity_buffer.clear()
         _rl_reward_components_buffer.clear()
         _rl_start_time = None
         _current_ep_reward = 0.0
@@ -187,6 +184,7 @@ def process_episode():
     s_arr = np.array(_rl_state_buffer, dtype=float)
     f_arr = np.array(_rl_force_buffer, dtype=float)
     idx_arr = np.array(_rl_index_buffer, dtype=float)
+    sliding_velocity_arr = np.array(_rl_sliding_velocity_buffer, dtype=float)
     rw_dict = dict(_rl_reward_components_buffer)
 
     xyz = s_arr[:, :3]
@@ -196,19 +194,22 @@ def process_episode():
         vxyz[:, i] = np.gradient(xyz[:, i], t)
 
     speed = np.linalg.norm(vxyz[:, :2], axis=1)
+    if len(sliding_velocity_arr) == len(t):
+        speed = sliding_velocity_arr
     fn = np.maximum(f_arr[:, 2], 0.0)
     dt = np.diff(t, prepend=t[0] - 1e-3)
 
     removal_rate = np.where((fn > 0.5) & (speed > 0.1), fn * speed, 0.0)
     dremoval = removal_rate * dt
 
-    # 🚀 [FIX] 누적 히스토리에 동적 추가
     _global_removal_history["x"].extend(xyz[:, 0].tolist())
     _global_removal_history["y"].extend(xyz[:, 1].tolist())
     _global_removal_history["removal"].extend(dremoval.tolist())
+    for i in range(len(dremoval)):
+        update_surface_grid(xyz[i, 0], xyz[i, 1], dremoval[i])
 
     ep_dir = RUN_LOG_DIR / f"ep{_episode_counter}"
-    save_plots(ep_dir, t, s_arr, f_arr, dremoval, removal_rate, vxyz, idx_arr, rw_dict)
+    save_plots(ep_dir, t, s_arr, f_arr, dremoval, removal_rate, vxyz, speed)
 
     samples = len(t)
     contact_samples = int(np.sum(fn > 0.5))
@@ -222,9 +223,6 @@ def process_episode():
     _summary_metrics["contact_ratio"].append(contact_samples / samples if samples > 0 else 0)
     _summary_metrics["episode_reward"].append(_current_ep_reward)
 
-    if _episode_counter % 5 == 0:
-        save_global_summary()
-
     local_debug.print_info(f"[STAMP] Ep {_episode_counter} Saved. Reward: {_current_ep_reward:.2f}. Result: {ep_dir}")
 
     _episode_counter += 1
@@ -233,6 +231,7 @@ def process_episode():
     _rl_state_buffer.clear()
     _rl_force_buffer.clear()
     _rl_index_buffer.clear()
+    _rl_sliding_velocity_buffer.clear()
     _rl_reward_components_buffer.clear()
     _rl_start_time = None
     _current_ep_reward = 0.0 
@@ -243,9 +242,12 @@ def process_episode():
 # Plot Saving
 # ============================================================
 
-def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, index_arr=None, reward_dict=None):
-    out_dir.mkdir(parents=True, exist_ok=True)
+def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding_velocity):
     xyz = state6[:, 0:3]
+    if len(t) == 0 or xyz.shape[0] == 0:
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     x, y = xyz[:, 0], xyz[:, 1]
     
@@ -264,72 +266,48 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, index_a
     im = ax.imshow(grid_removal_smoothed, origin="lower", extent=extent, cmap="viridis")
     fig.colorbar(im, label="Removal [a.u.]")
     ax.set_title(f"Episode {_episode_counter} Local Removal Heatmap")
-    fig.savefig(out_dir / "01_local_removal_heatmap.png", dpi=200)
+    fig.savefig(out_dir / "01_removal_heatmap.png", dpi=200)
     plt.close(fig)
 
-    # 🚀 --- 2. [FIX] Global Surface Map 동적 스케일링 렌더링 ---
-    gx = np.array(_global_removal_history["x"])
-    gy = np.array(_global_removal_history["y"])
-    grem = np.array(_global_removal_history["removal"])
-    
-    if len(gx) > 0:
-        g_extent = [np.min(gx) - 20, np.max(gx) + 20, np.min(gy) - 20, np.max(gy) + 20]
-        global_grid, _, _ = np.histogram2d(gx, gy, bins=200, range=[g_extent[:2], g_extent[2:]], weights=grem)
-        global_grid_smoothed = gaussian_filter(global_grid.T, sigma=2.0)
+    cumulative_removal = np.cumsum(dremoval)
+    fig2, ax2 = plt.subplots(figsize=(9, 5))
+    ax2.plot(t, cumulative_removal, color="tab:blue", linewidth=1.8)
+    ax2.set_title(f"Episode {_episode_counter} Cumulative Removal")
+    ax2.set_xlabel("Time [s]")
+    ax2.set_ylabel("Removal [a.u.]")
+    ax2.grid(True, alpha=0.3)
+    fig2.tight_layout()
+    fig2.savefig(out_dir / "02_heatmap_value_vs_time.png", dpi=200)
+    plt.close(fig2)
 
-        fig2, ax2 = plt.subplots(figsize=(8, 7))
-        im2 = ax2.imshow(global_grid_smoothed, origin="lower", extent=g_extent, cmap="viridis")
-        fig2.colorbar(im2)
-        ax2.set_title(f"Cumulative Global Surface Removal (Up to Ep {_episode_counter})")
-        fig2.savefig(out_dir / "02_global_surface_map.png", dpi=200)
-        plt.close(fig2)
-
-    # --- 3. Diagnostic Panel ---
-    fig3, axes3 = plt.subplots(2, 4, figsize=(24, 10))
-    
-    axes3[0, 0].plot(x, y, 'b-', linewidth=1.5)
-    axes3[0, 0].set_title("Toolpath Trajectory (X-Y)")
-    axes3[0, 0].set_xlabel("X")
-    axes3[0, 0].set_ylabel("Y")
-    axes3[0, 0].axis("equal")
-    axes3[0, 0].grid(True)
-
-    force_mag = np.linalg.norm(force3, axis=1)
-    axes3[0, 1].plot(t, force_mag, 'r-')
-    axes3[0, 1].set_title("Force Magnitude over Time")
-    axes3[0, 1].grid(True)
-
-    if index_arr is not None and len(index_arr) == len(t):
-        axes3[0, 2].plot(t, index_arr, 'g-')
-    axes3[0, 2].set_title("Trajectory Index Progression")
-    axes3[0, 2].grid(True)
-
-    if reward_dict:
-        for term_name, values in reward_dict.items():
-            plot_len = min(len(t), len(values))
-            axes3[0, 3].plot(t[:plot_len], values[:plot_len], label=term_name)
-        axes3[0, 3].legend(loc='upper left', fontsize='small')
-    axes3[0, 3].set_title("Cumulative Rewards Breakdown")
-    axes3[0, 3].grid(True)
-
-    visited_mask = (grid_removal.T > 1e-4).astype(np.uint8)
-    axes3[1, 0].imshow(visited_mask, origin="lower", extent=extent, cmap="gray")
-    axes3[1, 0].set_title(f"Coverage Mask (Ratio: {np.mean(visited_mask):.3f})")
-
-    axes3[1, 1].plot(t, (force_mag > 0.5).astype(int), 'm-')
-    axes3[1, 1].set_ylim([-0.1, 1.1])
-    axes3[1, 1].set_title("Contact State (F > 0.5)")
-    axes3[1, 1].grid(True)
-
-    axes3[1, 2].plot(t, np.linalg.norm(vxyz[:, :2], axis=1), 'c-')
-    axes3[1, 2].set_title("Tool Speed (XY Plane)")
-    axes3[1, 2].grid(True)
-
-    axes3[1, 3].axis("off")
-
+    normal_force = np.maximum(force3[:, 2], 0.0)
+    fig3, axes3 = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    axes3[0].plot(t, normal_force, color="tab:red", linewidth=1.5)
+    axes3[0].set_title("Normal Force")
+    axes3[0].set_ylabel("Force [N]")
+    axes3[0].grid(True, alpha=0.3)
+    axes3[1].plot(t, sliding_velocity, color="tab:green", linewidth=1.5)
+    axes3[1].set_title("Sliding Velocity")
+    axes3[1].set_xlabel("Time [s]")
+    axes3[1].set_ylabel("Velocity [mm/s]")
+    axes3[1].grid(True, alpha=0.3)
     fig3.tight_layout()
-    fig3.savefig(out_dir / "03_diagnostic_panel.png", dpi=200)
+    fig3.savefig(out_dir / "03_signals_subplot.png", dpi=200)
     plt.close(fig3)
+
+    fig4 = plt.figure(figsize=(8, 7))
+    ax4 = fig4.add_subplot(111, projection="3d")
+    ax4.plot(xyz[:, 0], xyz[:, 1], xyz[:, 2], color="tab:blue", linewidth=1.5)
+    ax4.scatter(xyz[0, 0], xyz[0, 1], xyz[0, 2], color="green", s=35, label="start")
+    ax4.scatter(xyz[-1, 0], xyz[-1, 1], xyz[-1, 2], color="red", s=35, label="end")
+    ax4.set_title(f"Episode {_episode_counter} EE Path")
+    ax4.set_xlabel("X [mm]")
+    ax4.set_ylabel("Y [mm]")
+    ax4.set_zlabel("Z [mm]")
+    ax4.legend()
+    fig4.tight_layout()
+    fig4.savefig(out_dir / "04_3d_path_w.png", dpi=200)
+    plt.close(fig4)
 
 # ============================================================
 # RL Hooks
@@ -351,7 +329,6 @@ def on_episode_reset(env, env_ids=None):
 
         if env is not None:
             env._ep_curriculum = getattr(env, "_ep_curriculum", 0) + 1
-            save_global_summary()
             
     except Exception as e:
         local_debug.print_exception("Visualization on_episode_reset failed", e)
@@ -361,7 +338,7 @@ def on_episode_reset(env, env_ids=None):
 # ============================================================
 
 def rl_step_hook(env, action_term_name="arm_action", asset_name="robot", fixed_joint_name="tool0_to_spindle", joint_prim_relpath="joints"):
-    global _current_ep_reward, _rl_index_buffer, _rl_reward_components_buffer
+    global _current_ep_reward, _rl_index_buffer, _rl_sliding_velocity_buffer, _rl_reward_components_buffer
     
     try:
         num_envs = env.num_envs
@@ -376,9 +353,19 @@ def rl_step_hook(env, action_term_name="arm_action", asset_name="robot", fixed_j
 
         try:
             term = env.action_manager.get_term(action_term_name)
-            _rl_index_buffer.append(float(term._integration_manager.current_index[0].item()))
+            if hasattr(term, "path_cursor"):
+                _rl_index_buffer.append(float(term.path_cursor[0].item()))
+            elif hasattr(term, "current_target_index"):
+                _rl_index_buffer.append(float(term.current_target_index[0].item()))
+            else:
+                _rl_index_buffer.append(0.0)
+            if hasattr(term, "current_sliding_velocity_mm_s"):
+                _rl_sliding_velocity_buffer.append(float(term.current_sliding_velocity_mm_s[0].item()))
+            else:
+                _rl_sliding_velocity_buffer.append(float("nan"))
         except Exception:
             _rl_index_buffer.append(0.0)
+            _rl_sliding_velocity_buffer.append(float("nan"))
 
         # 🚀 [FIX] Reward Tracking 보완 (IsaacLab의 protected 속성까지 긁어옴)
         try:

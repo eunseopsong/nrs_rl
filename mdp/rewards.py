@@ -57,6 +57,43 @@ def _get_current_fz(
         verbose=False,
     )
     return wrench[:, 2]
+
+def _get_action_term(env: "ManagerBasedRLEnv", action_term_name: str = "arm_action"):
+    am = getattr(env, "action_manager", None)
+    if am is None:
+        return None
+    if hasattr(am, "get_term"):
+        try:
+            return am.get_term(action_term_name)
+        except Exception:
+            pass
+    if hasattr(am, "_terms"):
+        terms = am._terms
+        if isinstance(terms, dict) and action_term_name in terms:
+            return terms[action_term_name]
+    if hasattr(am, action_term_name):
+        return getattr(am, action_term_name)
+    return None
+
+def _get_path_sliding_metrics(
+    env: "ManagerBasedRLEnv",
+    action_term_name: str = "arm_action",
+    asset_name: str = "robot",
+    body_name: str = "spindle_link",
+    fixed_joint_name: str = "tool0_to_spindle",
+    joint_prim_relpath: str = "joints",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    term = _get_action_term(env, action_term_name)
+    if term is not None and hasattr(term, "current_sliding_velocity_mm_s"):
+        sliding_velocity = term.current_sliding_velocity_mm_s.to(device=env.device, dtype=torch.float32)
+        abs_fz = term.current_abs_fz.to(device=env.device, dtype=torch.float32)
+        current_mrr = term.current_mrr_n_mm_s.to(device=env.device, dtype=torch.float32)
+        return abs_fz, sliding_velocity, current_mrr
+
+    abs_fz = torch.abs(_get_current_fz(env, asset_name, fixed_joint_name, joint_prim_relpath))
+    _, _, current_vel_norm = _get_current_pose_and_velocity(env, asset_name, body_name)
+    sliding_velocity = current_vel_norm * 1000.0
+    return abs_fz, sliding_velocity, abs_fz * sliding_velocity
  
 def _get_current_target_pose(
     env: "ManagerBasedRLEnv",
@@ -86,7 +123,7 @@ def _curriculum_sigma(
 # ==========================================
 def adaptive_mrr_reward(
     env: "ManagerBasedRLEnv",
-    target_mrr: float = 0.1,
+    target_mrr: float = 500.0,
     mrr_sigma_start: float = 1.2,
     mrr_sigma_end: float = 0.3,
     curriculum_ramp: int = 200,
@@ -97,15 +134,21 @@ def adaptive_mrr_reward(
     body_name: str = "spindle_link",
     fixed_joint_name: str = "tool0_to_spindle",
     joint_prim_relpath: str = "joints",
+    action_term_name: str = "arm_action",
 ) -> torch.Tensor:
-    current_fz = torch.abs(_get_current_fz(env, asset_name, fixed_joint_name, joint_prim_relpath))
-    _, _, current_vel_norm = _get_current_pose_and_velocity(env, asset_name, body_name)
+    current_fz, sliding_velocity, current_mrr = _get_path_sliding_metrics(
+        env,
+        action_term_name=action_term_name,
+        asset_name=asset_name,
+        body_name=body_name,
+        fixed_joint_name=fixed_joint_name,
+        joint_prim_relpath=joint_prim_relpath,
+    )
  
     force_gate = _soft_gate(current_fz, min_contact_force, gate_sharpness)
-    vel_gate = _soft_gate(current_vel_norm, min_velocity, gate_sharpness)
+    vel_gate = _soft_gate(sliding_velocity, min_velocity, gate_sharpness)
     activity_gate = force_gate * vel_gate
  
-    current_mrr = current_fz * current_vel_norm
     log_ratio = torch.log(torch.clamp(current_mrr / max(target_mrr, 1e-6), min=1e-4, max=1e4))
     sigma = _curriculum_sigma(env, mrr_sigma_start, mrr_sigma_end, curriculum_ramp)
  
@@ -117,7 +160,7 @@ def adaptive_mrr_reward(
 # ==========================================
 def inverse_fv_bonus(
     env: "ManagerBasedRLEnv",
-    target_mrr: float = 0.1,
+    target_mrr: float = 500.0,
     bonus_sigma_start: float = 0.8,
     bonus_sigma_end: float = 0.25,
     curriculum_ramp: int = 200,
@@ -127,13 +170,20 @@ def inverse_fv_bonus(
     body_name: str = "spindle_link",
     fixed_joint_name: str = "tool0_to_spindle",
     joint_prim_relpath: str = "joints",
+    action_term_name: str = "arm_action",
 ) -> torch.Tensor:
-    current_fz = torch.abs(_get_current_fz(env, asset_name, fixed_joint_name, joint_prim_relpath))
-    _, _, current_vel_norm = _get_current_pose_and_velocity(env, asset_name, body_name)
+    current_fz, sliding_velocity, _ = _get_path_sliding_metrics(
+        env,
+        action_term_name=action_term_name,
+        asset_name=asset_name,
+        body_name=body_name,
+        fixed_joint_name=fixed_joint_name,
+        joint_prim_relpath=joint_prim_relpath,
+    )
  
     force_gate = _soft_gate(current_fz, min_contact_force, gate_sharpness)
     ideal_velocity = target_mrr / torch.clamp(current_fz, min=1e-3)
-    log_vel_ratio = torch.log(torch.clamp(current_vel_norm / torch.clamp(ideal_velocity, min=1e-5), min=1e-4, max=1e4))
+    log_vel_ratio = torch.log(torch.clamp(sliding_velocity / torch.clamp(ideal_velocity, min=1e-5), min=1e-4, max=1e4))
     sigma = _curriculum_sigma(env, bonus_sigma_start, bonus_sigma_end, curriculum_ramp)
  
     bonus = torch.exp(-torch.square(log_vel_ratio / sigma))
@@ -151,7 +201,9 @@ def trajectory_tracking_reward(
     asset_name: str = "robot",
     body_name: str = "spindle_link",
 ) -> torch.Tensor:
-    current_xyz, _, current_vel_norm = _get_current_pose_and_velocity(env, asset_name, body_name)
+    current_pose = local_obs.get_ee_pose(env, asset_name=asset_name)
+    current_xyz = current_pose[:, :3]
+    _, _, current_vel_norm = _get_current_pose_and_velocity(env, asset_name, body_name)
     target_xyz, _ = _get_current_target_pose(env)
  
     pos_error = torch.norm(current_xyz - target_xyz, dim=-1)
@@ -189,33 +241,25 @@ def physical_completion_reward(
     asset_name: str = "robot",
     body_name: str = "spindle_link",
 ) -> torch.Tensor:
-    """에피소드 종료 시, 중도 탈락(Early Termination)은 지옥의 페널티를 주고 완주 시에만 거리 검사"""
     reset_buf = env.reset_buf
     reward = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
     if not reset_buf.any():
         return reward
 
-    # IsaacLab/IsaacSim에서 에피소드 최대 타임아웃에 도달했는지 확인하는 일반적인 플래그 (학습 설정에 따라 맞춰 확인 필요)
-    # 보통 timeout_buf나 episode_length_buf가 max_episode_length를 채웠는지 확인
-    is_timeout = env.episode_length_buf >= env.max_episode_length
-
-    current_xyz, _, _ = _get_current_pose_and_velocity(env, asset_name, body_name)
+    term = _get_action_term(env, "arm_action")
+    is_path_done = term.path_done.to(device=env.device, dtype=torch.bool) if term is not None and hasattr(term, "path_done") else reset_buf
+    current_xyz = local_obs.get_ee_pose(env, asset_name=asset_name)[:, :3]
     target_xyz, _ = _get_current_target_pose(env)
     distance_error = torch.norm(current_xyz - target_xyz, dim=-1)
     
-    # 1. 시간 다 채워서 완주한 경우
     success = distance_error < distance_threshold
-    timeout_score = torch.where(
+    completion_score = torch.where(
         success,
-        torch.tensor(2000.0, device=env.device, dtype=torch.float32), # 완주 대성공 보상 상향
+        torch.tensor(2000.0, device=env.device, dtype=torch.float32),
         -500.0 * (distance_error + 1.0) 
     )
-    
-    # 2. 일찍 죽어버린 경우 (에러 세탁용 중도 자살 꼼수 차단)
-    # 완주고 나발이고 중간에 탈락하면 대가리를 깨버립니다.
     early_termination_penalty = torch.tensor(-2500.0, device=env.device, dtype=torch.float32)
-    
-    final_score = torch.where(is_timeout, timeout_score, early_termination_penalty)
+    final_score = torch.where(is_path_done, completion_score, early_termination_penalty)
     
     reward[reset_buf] = final_score[reset_buf]
     return reward
