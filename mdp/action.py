@@ -236,23 +236,38 @@ class ActionIntegrationCfg:
 
     action_dim: int = 1
 
-    target_mrr_n_mm_s: float = 500.0
-    speed_action_scale: float = 0.3
-    base_index_rate: float = 10.0
+    target_mrr_n_mm_s: float = 2500.0
+    speed_action_scale: float = 0.35
+    base_index_rate: float = 48.0
     min_index_rate: float = 1.0
-    max_index_rate: float = 16.0
-    progress_rate_ema_beta: float = 0.3
+    max_index_rate: float = 96.0
+    progress_rate_ema_beta: float = 0.55
     force_eps_n: float = 1.0
     force_tracking_ready_ratio: float = 0.8
     min_force_rate_scale: float = 0.25
-    force_z_integral_gain_mm_per_n_s: float = 0.35
-    force_z_release_gain_mm_per_n_s: float = 0.7
-    force_z_deadband_n: float = 1.0
-    force_z_max_delta_mm: float = 0.03
-    force_z_offset_min_mm: float = -8.0
-    force_z_offset_max_mm: float = 2.0
     force_error_slowdown_ratio: float = 0.35
     min_force_error_rate_scale: float = 0.35
+    force_normal_push_sign: float = -1.0
+    force_normal_kp_mm_per_n: float = 0.26
+    force_normal_ki_mm_per_n_s: float = 4.00
+    force_normal_release_kp_mm_per_n: float = 0.35
+    force_normal_max_step_mm: float = 2.00
+    force_normal_offset_limit_mm: float = 28.0
+    force_admittance_delta_limit_mm: float = 1.5
+    force_total_normal_delta_limit_mm: float = 30.0
+    force_normal_deadband_n: float = 0.35
+    force_steady_error_band_n: float = 5.0
+    force_overload_ratio: float = 1.5
+    force_overload_rate_scale: float = 0.02
+    path_tracking_slowdown_start_mm: float = 3.0
+    path_tracking_stop_mm: float = 12.0
+    path_tracking_min_rate_scale: float = 0.0
+    path_projection_window: int = 1200
+    path_lookahead_min_index: float = 20.0
+    path_lookahead_max_index: float = 240.0
+    path_lookahead_time_s: float = 0.18
+    path_command_max_xy_step_mm: float = 3.0
+    path_command_max_z_step_mm: float = 4.0
     approach_interpolation_enabled: bool = True
     approach_duration_s: float = 2.0
 
@@ -334,7 +349,9 @@ class AdmittanceControlAction(ActionTerm):
         self.current_abs_fz = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
         self.current_mrr_n_mm_s = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
         self.cumulative_removal = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
-        self.force_z_offset_mm = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
+        self.current_path_tracking_error_mm = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
+        self.force_normal_offset_mm = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
+        self.force_normal_error_i = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
         self.approach_active = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
         self.approach_step = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
         self.approach_start_pos_mm = torch.zeros((self._num_envs_local, 3), dtype=torch.float32, device=self.device)
@@ -493,7 +510,7 @@ class AdmittanceControlAction(ActionTerm):
         return q_next, pos_err_norm_mm, rot_err_norm_rad, dq_norm
 
     def _reset_force_controller_for_env(self, env_id: int, xd_mm: float):
-        self.force_controllers[env_id].reset(float(xd_mm))
+        self.force_controllers[env_id].reset(float(xd_mm) / 1000.0)
 
     def _compute_progress_rate(self, env_id: int, idx: int, abs_fz: float) -> float:
         denom = max(abs_fz, self.int_cfg.force_eps_n)
@@ -505,24 +522,15 @@ class AdmittanceControlAction(ActionTerm):
 
         target_abs_fz = abs(float(self.traj_forces[idx, 2].item()))
         if target_abs_fz > self.int_cfg.force_eps_n:
-            ready_force = max(self.int_cfg.force_eps_n, self.int_cfg.force_tracking_ready_ratio * target_abs_fz)
-            force_scale = max(
-                self.int_cfg.min_force_rate_scale,
-                min(1.0, abs_fz / ready_force),
-            )
-            force_limited_max_rate = max(
-                self.int_cfg.min_index_rate,
-                self.int_cfg.max_index_rate * force_scale,
-            )
-            raw_rate = min(raw_rate, force_limited_max_rate)
-
-            error_ratio = abs(abs_fz - target_abs_fz) / max(target_abs_fz, self.int_cfg.force_eps_n)
-            if error_ratio > self.int_cfg.force_error_slowdown_ratio:
+            steady_band = float(getattr(self.int_cfg, "force_steady_error_band_n", 5.0))
+            if abs_fz > target_abs_fz + steady_band:
+                error_ratio = (abs_fz - target_abs_fz) / max(target_abs_fz, self.int_cfg.force_eps_n)
                 error_scale = max(
                     self.int_cfg.min_force_error_rate_scale,
                     1.0 - (error_ratio - self.int_cfg.force_error_slowdown_ratio),
                 )
                 raw_rate *= error_scale
+                raw_rate *= 0.35
 
         beta = self.int_cfg.progress_rate_ema_beta
         prev = float(self.progress_rate_filtered[env_id].item())
@@ -536,30 +544,117 @@ class AdmittanceControlAction(ActionTerm):
         x = max(0.0, min(1.0, x))
         return x * x * (3.0 - 2.0 * x)
 
-    def _update_force_z_offset(self, env_id: int, target_abs_fz: float, abs_fz: float) -> float:
+    def _path_tracking_rate_scale(self, tracking_error_mm: float) -> float:
+        start = float(self.int_cfg.path_tracking_slowdown_start_mm)
+        stop = float(self.int_cfg.path_tracking_stop_mm)
+        min_scale = float(self.int_cfg.path_tracking_min_rate_scale)
+        if stop <= start:
+            return 1.0
+        if tracking_error_mm <= start:
+            return 1.0
+        if tracking_error_mm >= stop:
+            return min_scale
+        ratio = (tracking_error_mm - start) / (stop - start)
+        return 1.0 - ratio * (1.0 - min_scale)
+
+    def _project_cursor_to_path(self, env_id: int, current_pos_mm: torch.Tensor) -> float:
+        window = max(8, int(self.int_cfg.path_projection_window))
+        center = int(max(0, min(self.traj_length - 1, round(float(self.path_cursor[env_id].item())))))
+        start = max(0, center - window // 3)
+        end = min(self.traj_length, center + window)
+        if end <= start:
+            return float(center)
+
+        xy = self.traj_positions[start:end, 0:2]
+        delta = xy - current_pos_mm[0:2].unsqueeze(0)
+        dist2 = torch.sum(delta * delta, dim=1)
+        local_idx = int(torch.argmin(dist2).item())
+        projected = float(start + local_idx)
+        return max(float(self.path_cursor[env_id].item()) - float(window), projected)
+
+    def _compute_lookahead_indices(self, base_rate: float) -> float:
+        lookahead = base_rate * float(self.int_cfg.path_lookahead_time_s) / max(self._step_dt_local, 1.0e-8)
+        return max(
+            float(self.int_cfg.path_lookahead_min_index),
+            min(float(self.int_cfg.path_lookahead_max_index), lookahead),
+        )
+
+    def _limit_command_step(self, current_pos_mm: torch.Tensor, target_pos_mm: torch.Tensor) -> torch.Tensor:
+        limited = target_pos_mm.clone()
+
+        xy_delta = target_pos_mm[0:2] - current_pos_mm[0:2]
+        xy_norm = float(torch.linalg.norm(xy_delta).item())
+        max_xy = float(self.int_cfg.path_command_max_xy_step_mm)
+        if xy_norm > max_xy > 0.0:
+            limited[0:2] = current_pos_mm[0:2] + xy_delta * (max_xy / max(xy_norm, 1.0e-6))
+
+        z_delta = float((target_pos_mm[2] - current_pos_mm[2]).item())
+        max_z = float(self.int_cfg.path_command_max_z_step_mm)
+        if max_z > 0.0:
+            z_delta = max(-max_z, min(max_z, z_delta))
+            limited[2] = current_pos_mm[2] + z_delta
+
+        return limited
+
+    def _update_force_normal_offset(
+        self,
+        env_id: int,
+        target_abs_fz: float,
+        measured_fz: float,
+    ) -> float:
         if target_abs_fz <= self.int_cfg.force_eps_n:
-            self.force_z_offset_mm[env_id] = 0.0
+            self.force_normal_offset_mm[env_id] = 0.0
+            self.force_normal_error_i[env_id] = 0.0
             return 0.0
 
-        error_n = target_abs_fz - abs_fz
-        if abs(error_n) <= self.int_cfg.force_z_deadband_n:
-            return float(self.force_z_offset_mm[env_id].item())
+        abs_fz = abs(measured_fz)
+        error_n = abs_fz - target_abs_fz
+        if abs(error_n) < float(self.int_cfg.force_normal_deadband_n):
+            error_n = 0.0
+
+        push_sign = 1.0 if float(self.int_cfg.force_normal_push_sign) >= 0.0 else -1.0
+        retract_sign = -push_sign
+
+        prev_offset = float(self.force_normal_offset_mm[env_id].item())
 
         if error_n > 0.0:
-            delta = -float(self.int_cfg.force_z_integral_gain_mm_per_n_s) * error_n * self._step_dt_local
+            self.force_normal_error_i[env_id] -= float(error_n) * self._step_dt_local
+            i_limit = float(self.int_cfg.force_normal_offset_limit_mm) / max(
+                float(self.int_cfg.force_normal_ki_mm_per_n_s),
+                1.0e-6,
+            )
+            self.force_normal_error_i[env_id] = torch.clamp(
+                self.force_normal_error_i[env_id],
+                -i_limit,
+                i_limit,
+            )
+            target_offset = retract_sign * (
+                float(self.int_cfg.force_normal_kp_mm_per_n) * error_n
+            )
         else:
-            delta = -float(self.int_cfg.force_z_release_gain_mm_per_n_s) * error_n * self._step_dt_local
-        delta = max(
-            -float(self.int_cfg.force_z_max_delta_mm),
-            min(float(self.int_cfg.force_z_max_delta_mm), delta),
-        )
+            underforce_n = max(0.0, target_abs_fz - abs_fz - float(self.int_cfg.force_normal_deadband_n))
+            self.force_normal_error_i[env_id] += float(underforce_n) * self._step_dt_local
+            i_limit = float(self.int_cfg.force_normal_offset_limit_mm) / max(
+                float(self.int_cfg.force_normal_ki_mm_per_n_s),
+                1.0e-6,
+            )
+            self.force_normal_error_i[env_id] = torch.clamp(
+                self.force_normal_error_i[env_id],
+                -i_limit,
+                i_limit,
+            )
+            target_offset = push_sign * (
+                float(self.int_cfg.force_normal_release_kp_mm_per_n) * underforce_n
+                + float(self.int_cfg.force_normal_ki_mm_per_n_s) * float(self.force_normal_error_i[env_id].item())
+            )
 
-        next_offset = float(self.force_z_offset_mm[env_id].item()) + delta
-        next_offset = max(
-            float(self.int_cfg.force_z_offset_min_mm),
-            min(float(self.int_cfg.force_z_offset_max_mm), next_offset),
-        )
-        self.force_z_offset_mm[env_id] = next_offset
+        limit = float(self.int_cfg.force_normal_offset_limit_mm)
+        target_offset = max(-limit, min(limit, target_offset))
+
+        max_step = float(self.int_cfg.force_normal_max_step_mm)
+        delta = max(-max_step, min(max_step, target_offset - prev_offset))
+        next_offset = prev_offset + delta
+        self.force_normal_offset_mm[env_id] = next_offset
         return next_offset
 
     @torch.no_grad()
@@ -580,7 +675,9 @@ class AdmittanceControlAction(ActionTerm):
         self.current_abs_fz[env_ids] = 0.0
         self.current_mrr_n_mm_s[env_ids] = 0.0
         self.cumulative_removal[env_ids] = 0.0
-        self.force_z_offset_mm[env_ids] = 0.0
+        self.current_path_tracking_error_mm[env_ids] = 0.0
+        self.force_normal_offset_mm[env_ids] = 0.0
+        self.force_normal_error_i[env_ids] = 0.0
         self.progress_rate_filtered[env_ids] = float(self.int_cfg.base_index_rate)
         self.approach_step[env_ids] = 0
         self.approach_active[env_ids] = bool(self.int_cfg.approach_interpolation_enabled)
@@ -667,6 +764,9 @@ class AdmittanceControlAction(ActionTerm):
                 self.current_sliding_velocity_mm_s[env_id] = 0.0
                 self.current_abs_fz[env_id] = abs(float(wrench6[env_id, 2].item()))
                 self.current_mrr_n_mm_s[env_id] = 0.0
+                self.current_path_tracking_error_mm[env_id] = float(torch.linalg.norm(target_pos_mm[0:2] - self.approach_start_pos_mm[env_id, 0:2]).item())
+                self.force_normal_offset_mm[env_id] = 0.0
+                self.force_normal_error_i[env_id] = 0.0
 
                 pybind_called = True
                 q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_single_step_ik(
@@ -690,18 +790,24 @@ class AdmittanceControlAction(ActionTerm):
                     self._reset_force_controller_for_env(env_id, float(self.traj_positions[0, 2].item()))
                 continue
 
-            idx = int(self.path_cursor[env_id].item())
+            cur_pos_mm, _, _, cur_rotm = self._fk_pose_pybind_corrected(q[env_id])
+
+            projected_cursor = self._project_cursor_to_path(env_id, cur_pos_mm)
+            self.path_cursor[env_id] = min(max(float(self.path_cursor[env_id].item()), projected_cursor), float(self.traj_length - 1))
+            idx_for_rate = int(min(max(0, round(float(self.path_cursor[env_id].item()))), self.traj_length - 1))
+            base_rate_for_lookahead = self._compute_progress_rate(env_id, idx_for_rate, float(self.current_abs_fz[env_id].item()))
+            lookahead_idx = self._compute_lookahead_indices(base_rate_for_lookahead)
+            target_cursor = min(float(self.path_cursor[env_id].item()) + lookahead_idx, float(self.traj_length - 1))
+
+            idx = int(target_cursor)
             if idx >= self.traj_length:
                 idx = self.traj_length - 1
                 self.path_done[env_id] = True
 
-            self.path_index[env_id] = idx
+            self.path_index[env_id] = int(self.path_cursor[env_id].item())
             self.current_target_index[env_id] = idx
 
-            cur_pos_mm, _, _, _ = self._fk_pose_pybind_corrected(q_seed)
-
-            measured_fz = float(wrench6[env_id, 2].item())
-            abs_fz = abs(measured_fz)
+            measured_force_base = wrench6[env_id, 0:3]
             target_fz = float(self.traj_forces[idx, 2].item())
 
             self.des_pos_mm_raw[env_id] = self.traj_positions[idx, 0:3]
@@ -712,18 +818,29 @@ class AdmittanceControlAction(ActionTerm):
             target_rotm = spatial_to_rotmat(self.traj_positions[idx, 3:6].view(1, 3)).squeeze(0)
 
             target_pos_mm = nominal_pos_mm.clone()
+            normal_axis = cur_rotm[:, 2]
+            measured_fz = float(torch.dot(normal_axis, measured_force_base).item())
+            abs_fz = abs(measured_fz)
+            path_tracking_error_mm = float(torch.linalg.norm(cur_pos_mm[0:2] - nominal_pos_mm[0:2]).item())
+            self.current_path_tracking_error_mm[env_id] = path_tracking_error_mm
+            nominal_tcp_z_m = float(torch.dot(normal_axis, nominal_pos_mm).item()) / 1000.0
+            current_tcp_z_m = float(torch.dot(normal_axis, cur_pos_mm).item()) / 1000.0
 
             fc_out = self.force_controllers[env_id].step(
-                float(nominal_pos_mm[2].item()),
-                float(cur_pos_mm[2].item()),
+                nominal_tcp_z_m,
+                current_tcp_z_m,
                 float(target_fz),
-                float(abs_fz),
+                float(measured_fz),
             )
-            z_cmd = float(fc_out[0])
-            target_abs_fz = abs(target_fz)
-            z_cmd += self._update_force_z_offset(env_id, target_abs_fz, abs_fz)
+            normal_delta_mm = (float(fc_out[0]) - nominal_tcp_z_m) * 1000.0
+            admittance_limit = float(self.int_cfg.force_admittance_delta_limit_mm)
+            normal_delta_mm = max(-admittance_limit, min(admittance_limit, normal_delta_mm))
+            normal_delta_mm += self._update_force_normal_offset(env_id, abs(target_fz), measured_fz)
+            total_limit = float(self.int_cfg.force_total_normal_delta_limit_mm)
+            normal_delta_mm = max(-total_limit, min(total_limit, normal_delta_mm))
 
-            target_pos_mm[2] = z_cmd
+            target_pos_mm = nominal_pos_mm + normal_axis * normal_delta_mm
+            target_pos_mm = self._limit_command_step(cur_pos_mm, target_pos_mm)
             self.cmd_target_xyz_mm[env_id] = target_pos_mm
 
             pybind_called = True
@@ -741,11 +858,22 @@ class AdmittanceControlAction(ActionTerm):
             q_cmd_all[env_id, :6] = q_cmd6
 
             if not bool(self.path_done[env_id].item()):
-                base_rate = self._compute_progress_rate(env_id, idx, abs_fz)
+                base_rate = self._compute_progress_rate(env_id, idx_for_rate, abs_fz)
                 action_scale = 1.0 + float(self.int_cfg.speed_action_scale) * float(self._processed_actions[env_id, 0].item())
                 action_scale = max(0.05, action_scale)
                 final_rate = base_rate * action_scale
                 final_rate = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, final_rate))
+                target_abs_fz = abs(target_fz)
+                if target_abs_fz > self.int_cfg.force_eps_n:
+                    overload_force = float(self.int_cfg.force_overload_ratio) * target_abs_fz
+                    if abs_fz > overload_force:
+                        final_rate = min(final_rate, float(self.int_cfg.force_overload_rate_scale))
+                tracking_scale = self._path_tracking_rate_scale(path_tracking_error_mm)
+                final_rate *= tracking_scale
+                if tracking_scale <= 0.0:
+                    final_rate = 0.0
+                else:
+                    final_rate = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, final_rate))
 
                 segment_length_mm = float(self.traj_segment_lengths_mm[idx].item())
                 sliding_velocity_mm_s = final_rate * segment_length_mm / max(self._step_dt_local, 1.0e-8)
@@ -755,7 +883,7 @@ class AdmittanceControlAction(ActionTerm):
                 self.current_abs_fz[env_id] = abs_fz
                 self.current_mrr_n_mm_s[env_id] = abs_fz * sliding_velocity_mm_s
                 self.cumulative_removal[env_id] += self.current_mrr_n_mm_s[env_id] * self._step_dt_local
-                self.path_cursor[env_id] += final_rate
+                self.path_cursor[env_id] = min(float(self.path_cursor[env_id].item()) + final_rate, target_cursor)
 
                 if self.path_cursor[env_id] >= float(self.traj_length - 1):
                     self.path_cursor[env_id] = float(self.traj_length - 1)
@@ -766,18 +894,34 @@ class AdmittanceControlAction(ActionTerm):
         if debug_needed:
             current_index = int(self.current_target_index[debug_env_id].item())
             progress_pct = 100.0 * float(self.path_cursor[debug_env_id].item()) / max(float(self.traj_length - 1), 1.0)
+            episode_number = int(getattr(self._env, "_ep_curriculum", 0)) + 1
+            cur_dbg_xyz_mm, _, cur_dbg_wxyz, _ = self._fk_pose_pybind_corrected(q[debug_env_id])
+            tgt_dbg_xyz_mm = self.des_pos_mm_raw[debug_env_id]
+            tgt_dbg_wxyz = self.des_wxyz_raw[debug_env_id]
+            cmd_dbg_xyz_mm = self.cmd_target_xyz_mm[debug_env_id]
             local_debug.print_info(
-                f"[Polishing Live] step={global_step} env={debug_env_id} "
+                f"\n[Polishing Live] ep{episode_number} step={global_step} env={debug_env_id} "
                 f"| hdf5_index={current_index}/{self.traj_length - 1} ({progress_pct:.1f}%) "
+                f"| cursor={float(self.path_cursor[debug_env_id].item()):.3f}\n"
+                f"  current xyz/wxyz = "
+                f"({float(cur_dbg_xyz_mm[0].item()):.3f}, {float(cur_dbg_xyz_mm[1].item()):.3f}, {float(cur_dbg_xyz_mm[2].item()):.3f}) / "
+                f"({float(cur_dbg_wxyz[0].item()):.4f}, {float(cur_dbg_wxyz[1].item()):.4f}, {float(cur_dbg_wxyz[2].item()):.4f})\n"
+                f"  target  xyz/wxyz = "
+                f"({float(tgt_dbg_xyz_mm[0].item()):.3f}, {float(tgt_dbg_xyz_mm[1].item()):.3f}, {float(tgt_dbg_xyz_mm[2].item()):.3f}) / "
+                f"({float(tgt_dbg_wxyz[0].item()):.4f}, {float(tgt_dbg_wxyz[1].item()):.4f}, {float(tgt_dbg_wxyz[2].item()):.4f})\n"
+                f"  command xyz      = "
+                f"({float(cmd_dbg_xyz_mm[0].item()):.3f}, {float(cmd_dbg_xyz_mm[1].item()):.3f}, {float(cmd_dbg_xyz_mm[2].item()):.3f})\n"
+                f"  force/speed      = "
                 f"| target_force_N={abs(float(self.des_force[debug_env_id, 2].item())):.4f} "
                 f"| normal_force_N={float(self.current_abs_fz[debug_env_id].item()):.4f} "
                 f"| sliding_velocity_mm_s={float(self.current_sliding_velocity_mm_s[debug_env_id].item()):.4f} "
                 f"| removal_rate_N_mm_s={float(self.current_mrr_n_mm_s[debug_env_id].item()):.4f} "
-                f"| cumulative_removal={float(self.cumulative_removal[debug_env_id].item()):.4f} "
-                f"| z_offset_mm={float(self.force_z_offset_mm[debug_env_id].item()):.4f} "
+                f"| cumulative_removal={float(self.cumulative_removal[debug_env_id].item()):.4f}\n"
+                f"  control          = "
+                f"| fn_offset_mm={float(self.force_normal_offset_mm[debug_env_id].item()):.4f} "
                 f"| action={float(self._processed_actions[debug_env_id, 0].item()):.4f} "
                 f"| index_rate={float(self.current_index_delta[debug_env_id].item()):.4f} "
-                f"| cursor={float(self.path_cursor[debug_env_id].item()):.3f}"
+                f"| path_err_xy_mm={float(self.current_path_tracking_error_mm[debug_env_id].item()):.3f}\n"
             )
 
 

@@ -1,3 +1,5 @@
+import torch  # noqa: F401 - load torch symbols before the pybind extension
+
 from ._y2_control_pybind import (
     UR10eKinematics,
     Admittance1D,
@@ -21,6 +23,7 @@ from .config import (
     TCP_LENGTH_MM,
     EE2TCP,
     CHECKPOINT_DIR,
+    ORIGINAL_Y2_FORCECON_CHECKPOINT_DIR,
     CONTEXT_NAF_MDGRADI_CKPT,
     FORCECON_MODE5_MD_RATIO,
     FORCECON_MODE5_FC_FEXT,
@@ -59,6 +62,7 @@ __all__ = [
     "TCP_LENGTH_MM",
     "EE2TCP",
     "CHECKPOINT_DIR",
+    "ORIGINAL_Y2_FORCECON_CHECKPOINT_DIR",
     "CONTEXT_NAF_MDGRADI_CKPT",
     "FORCECON_MODE5_MD_RATIO",
     "FORCECON_MODE5_FC_FEXT",

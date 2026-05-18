@@ -29,6 +29,17 @@ double clamp_positive(double v, double fallback) {
     return (std::isfinite(v) && v > 0.0) ? v : fallback;
 }
 
+double exp_smoothing_alpha(double dt, double tau) {
+    if (tau <= 0.0) {
+        return 1.0;
+    }
+    return 1.0 - std::exp(-dt / tau);
+}
+
+double signed_force_hold(double desired_force, double hold_force) {
+    return desired_force < 0.0 ? -hold_force : hold_force;
+}
+
 }  // namespace
 
 // =============================
@@ -177,6 +188,7 @@ ForceCon1DMode5::ForceCon1DMode5(
   current_mass_(free_mass),
   current_damping_(free_damping),
   current_stiffness_(free_stiffness),
+  last_xc_(0.0),
   adm_(dt)
 {
     policy_ = std::make_unique<RL_ContextNAF_mdGradi>(
@@ -206,6 +218,7 @@ void ForceCon1DMode5::reset(double xd) {
     current_stiffness_ = free_stiffness_;
     adm_.adm_1D_MDK(current_mass_, current_damping_, current_stiffness_);
     adm_.reset(xd);
+    last_xc_ = xd;
 }
 
 void ForceCon1DMode5::set_free_mdk(double mass, double damping, double stiffness) {
@@ -230,9 +243,21 @@ void ForceCon1DMode5::set_md_ratio(double md_ratio) {
 std::vector<double> ForceCon1DMode5::step(double xd, double x, double fd, double fext) {
     double applied_alpha = 0.0;
 
-    if (std::fabs(fd) > 0.01) {
+    constexpr double desired_force_threshold = 0.01;
+    constexpr double actual_force_threshold = 1.50;
+    constexpr double precontact_force_hold = 10.00;
+    constexpr double return_tau = 0.20;
+
+    const bool desired_force_active = std::fabs(fd) > desired_force_threshold;
+    const bool actual_force_active = std::fabs(fext) > actual_force_threshold;
+    const bool force_control_active = desired_force_active && actual_force_active;
+    const double commanded_fd = (desired_force_active && !actual_force_active)
+        ? signed_force_hold(fd, precontact_force_hold)
+        : fd;
+
+    if (force_control_active) {
         const std::vector<double> out = policy_->run(
-            static_cast<float>(xd),
+            static_cast<float>(last_xc_),
             static_cast<float>(x),
             static_cast<float>(fd),
             static_cast<float>(fext)
@@ -247,12 +272,13 @@ std::vector<double> ForceCon1DMode5::step(double xd, double x, double fd, double
         current_damping_ = current_mass_ * applied_alpha * md_ratio_;
         current_stiffness_ = contact_stiffness_;
     } else {
-        const double tau = clamp_positive(recovery_tau_, 3.0);
-        const double alpha = 1.0 - std::exp(-dt_ / tau);
+        const double tau = clamp_positive(recovery_tau_, return_tau);
+        const double alpha = exp_smoothing_alpha(dt_, tau);
 
         current_mass_      = current_mass_      + alpha * (free_mass_      - current_mass_);
         current_damping_   = current_damping_   + alpha * (free_damping_   - current_damping_);
-        current_stiffness_ = current_stiffness_ + alpha * (free_stiffness_ - current_stiffness_);
+        const double target_stiffness = desired_force_active ? 0.0 : free_stiffness_;
+        current_stiffness_ = current_stiffness_ + alpha * (target_stiffness - current_stiffness_);
 
         if (current_mass_ > 1e-9 && md_ratio_ > 1e-9) {
             applied_alpha = current_damping_ / (current_mass_ * md_ratio_);
@@ -262,7 +288,8 @@ std::vector<double> ForceCon1DMode5::step(double xd, double x, double fd, double
     }
 
     adm_.adm_1D_MDK(current_mass_, current_damping_, current_stiffness_);
-    const double xc = adm_.adm_1D_control(xd, fd, fext);
+    const double xc = adm_.adm_1D_control(xd, commanded_fd, fext);
+    last_xc_ = xc;
 
     return {
         xc,

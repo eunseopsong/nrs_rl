@@ -125,6 +125,7 @@ private:
     double current_mass_;
     double current_damping_;
     double current_stiffness_;
+    double last_xc_;
 
     std::unique_ptr<RL_ContextNAF_mdGradi> policy_;
     Yadmittance_control adm_;

@@ -15,9 +15,9 @@ NUMBER_OF_JOINTS = 6
 PACKAGE_BUNDLE_DIR = "/home/eunseop/dev_ws/src/y2_ur10skku_control"
 
 TRAJECTORY_MODE = 2
-FORCE_CON_COORDINATE = 0
+FORCE_CON_COORDINATE = 1
 
-CONTROL_PERIOD = 0.002
+CONTROL_PERIOD = 0.008
 ROBOT_NAME = "ur10skku"
 
 TEST_MODE = 0
@@ -50,8 +50,11 @@ _THIS_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _THIS_DIR.parent
 
 CHECKPOINT_DIR = _PROJECT_ROOT / "checkpoints"
+ORIGINAL_Y2_FORCECON_CHECKPOINT_DIR = (
+    Path(PACKAGE_BUNDLE_DIR) / "Y2ForceCon" / "src" / "checkpoints"
+)
 CONTEXT_NAF_MDGRADI_CKPT = str(
-    CHECKPOINT_DIR / "ContextNAF_MDGradi" / "contextNAF_mdGradi_policy_script.pt"
+    ORIGINAL_Y2_FORCECON_CHECKPOINT_DIR / "ContextNAF_MDGradi" / "contextNAF_mdGradi_policy_script.pt"
 )
 
 # ----------------------------------------------------------------------
@@ -69,7 +72,7 @@ FORCECON_MODE5_FREE_MASS = 2.0
 FORCECON_MODE5_FREE_DAMPING = 6000.0
 FORCECON_MODE5_FREE_STIFFNESS = 2000.0
 FORCECON_MODE5_CONTACT_STIFFNESS = 0.0
-FORCECON_MODE5_RECOVERY_TAU = 3.0
+FORCECON_MODE5_RECOVERY_TAU = 0.2
 
 FORCECON_MODE5_ACTION_LOW = [-0.25, -0.25]
 FORCECON_MODE5_ACTION_HIGH = [0.25, 0.25]
