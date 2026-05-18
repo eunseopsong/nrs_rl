@@ -27,6 +27,7 @@ y2_pb = importlib.import_module(
 _hdf5_position: torch.Tensor | None = None
 _hdf5_force: torch.Tensor | None = None
 _hdf5_traj_len: int = 0
+_hdf5_cache_key: tuple | None = None
 
 _y2_kin_solver = None
 
@@ -464,8 +465,12 @@ def load_hdf5_trajectory(
     position_dataset_key: str = "position",
     force_dataset_key: str = "force",
 ):
-    global _hdf5_position, _hdf5_force, _hdf5_traj_len
+    global _hdf5_position, _hdf5_force, _hdf5_traj_len, _hdf5_cache_key
     import h5py
+
+    cache_key = (file_path, position_dataset_key, force_dataset_key, str(env.device))
+    if _hdf5_cache_key == cache_key and _hdf5_position is not None and _hdf5_force is not None:
+        return
 
     with h5py.File(file_path, "r") as f:
         if position_dataset_key not in f:
@@ -490,6 +495,7 @@ def load_hdf5_trajectory(
     _hdf5_position = torch.tensor(pos, dtype=torch.float32, device=env.device)
     _hdf5_force = torch.tensor(frc, dtype=torch.float32, device=env.device)
     _hdf5_traj_len = int(pos.shape[0])
+    _hdf5_cache_key = cache_key
 
     local_debug.print_hdf5_positions_loaded(_hdf5_position.shape, file_path)
 

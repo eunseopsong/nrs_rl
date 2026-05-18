@@ -320,13 +320,44 @@ def rl_step(env_ids, state6, force3, sim_time):
 def rl_episode_done():
     return process_episode()
 
+def _clear_episode_buffers():
+    global _rl_start_time, _current_ep_reward
+    _rl_time_buffer.clear()
+    _rl_state_buffer.clear()
+    _rl_force_buffer.clear()
+    _rl_index_buffer.clear()
+    _rl_sliding_velocity_buffer.clear()
+    _rl_reward_components_buffer.clear()
+    _rl_start_time = None
+    _current_ep_reward = 0.0
+
+def _get_visualization_cfg(env):
+    return getattr(getattr(env, "cfg", None), "visualization", None)
+
+def _visualization_enabled(env) -> bool:
+    cfg = _get_visualization_cfg(env)
+    return bool(getattr(cfg, "enable_visualizer", True))
+
+def _should_save_episode(env) -> bool:
+    cfg = _get_visualization_cfg(env)
+    interval = int(getattr(cfg, "save_interval_episodes", 1))
+    if interval <= 0:
+        return False
+    return (_episode_counter % interval) == 0
+
 def on_episode_reset(env, env_ids=None):
-    global _has_seen_any_step, _current_ep_reward
+    global _has_seen_any_step, _current_ep_reward, _episode_counter
     try:
+        if not _visualization_enabled(env):
+            return
         if not _has_seen_any_step:
             return
         if len(_rl_time_buffer) > 0:
-            rl_episode_done()
+            if _should_save_episode(env):
+                rl_episode_done()
+            else:
+                _clear_episode_buffers()
+                _episode_counter += 1
 
         if env is not None:
             env._ep_curriculum = getattr(env, "_ep_curriculum", 0) + 1
@@ -342,6 +373,9 @@ def rl_step_hook(env, action_term_name="arm_action", asset_name="robot", fixed_j
     global _current_ep_reward, _rl_index_buffer, _rl_sliding_velocity_buffer, _rl_reward_components_buffer
     
     try:
+        if not _visualization_enabled(env):
+            return torch.zeros((env.num_envs, 1), device=env.device, dtype=torch.float32)
+
         num_envs = env.num_envs
         device = env.device
         env_ids = torch.arange(num_envs, device=device, dtype=torch.long)
