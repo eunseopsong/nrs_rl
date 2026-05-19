@@ -47,6 +47,7 @@ CURRENT_FILE_PATH = Path(__file__).resolve()
 PROJECT_ROOT_DIR = CURRENT_FILE_PATH.parent.parent
 BASE_LOG_DIR = PROJECT_ROOT_DIR / "logs" / "polishing_results"
 RUN_LOG_DIR = BASE_LOG_DIR / _run_timestamp
+REWARD_LOG_DIR = RUN_LOG_DIR / "reward_logs"
 
 local_debug.print_info(f"[Init] Polishing log directory configured: {RUN_LOG_DIR}")
 
@@ -480,10 +481,10 @@ def _write_reward_component_logs():
     if not _reward_component_history["episode"]:
         return
 
-    RUN_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    REWARD_LOG_DIR.mkdir(parents=True, exist_ok=True)
     keys = ["episode", "total_reward"] + list(_reward_component_names)
 
-    csv_path = RUN_LOG_DIR / "00_reward_components.csv"
+    csv_path = REWARD_LOG_DIR / "00_reward_components.csv"
     row_count = len(_reward_component_history["episode"])
     with csv_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=keys)
@@ -522,7 +523,7 @@ def _write_reward_component_logs():
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
-    fig.savefig(RUN_LOG_DIR / "00_reward_components.png", dpi=200)
+    fig.savefig(REWARD_LOG_DIR / "00_reward_components.png", dpi=200)
     plt.close(fig)
 
 
