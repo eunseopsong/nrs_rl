@@ -252,6 +252,10 @@ class ActionIntegrationCfg:
     command_velocity_spike_return_ratio: float = 0.20
     command_velocity_hard_stop_decay: float = 0.85
     command_velocity_max_mm_s: float = 45.0
+    force_filter_beta: float = 0.20
+    force_spike_delta_n: float = 1.20
+    force_spike_hold_steps: int = 8
+    force_spike_velocity_decay: float = 0.92
     command_mrr_ema_beta: float = 0.12
     command_mrr_max_delta_up_n_mm_s: float = 35.0
     command_mrr_max_delta_down_n_mm_s: float = 70.0
@@ -276,6 +280,8 @@ class ActionIntegrationCfg:
     force_band_max_n: float = 12.0
     force_band_index_rate_limit: float = 0.05
     force_band_saturated_min_n: float = 7.5
+    force_band_low_speed_scale: float = 0.65
+    force_band_high_speed_scale: float = 0.45
     force_steady_error_band_n: float = 5.0
     force_overload_ratio: float = 1.5
     force_overload_rate_scale: float = 0.02
@@ -373,6 +379,8 @@ class AdmittanceControlAction(ActionTerm):
             device=self.device,
         )
         self.current_abs_fz = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
+        self.filtered_abs_fz = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
+        self.force_spike_hold_count = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
         self.current_mrr_n_mm_s = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
         self.prev_mrr_n_mm_s = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
         self.current_mrr_delta_n_mm_s = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
@@ -642,6 +650,36 @@ class AdmittanceControlAction(ActionTerm):
         self.command_velocity_filtered_mm_s[env_id] = smoothed_velocity
         return smoothed_velocity
 
+    def _filter_normal_force(self, env_id: int, raw_abs_fz: float) -> float:
+        raw_abs_fz = max(0.0, float(raw_abs_fz))
+        prev = float(self.filtered_abs_fz[env_id].item())
+        beta = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_filter_beta", 0.20))))
+        if prev <= 0.0:
+            filtered = raw_abs_fz
+        else:
+            filtered = beta * raw_abs_fz + (1.0 - beta) * prev
+
+        spike_delta = max(0.0, float(getattr(self.int_cfg, "force_spike_delta_n", 1.20)))
+        if spike_delta > 0.0 and prev > 0.0 and abs(raw_abs_fz - prev) > spike_delta:
+            self.force_spike_hold_count[env_id] = int(getattr(self.int_cfg, "force_spike_hold_steps", 8))
+            direction = 1.0 if raw_abs_fz > prev else -1.0
+            filtered = prev + direction * spike_delta * 0.25
+
+        self.filtered_abs_fz[env_id] = filtered
+        return filtered
+
+    def _protect_velocity_on_force_spike(self, env_id: int, velocity_mm_s: float) -> float:
+        hold_count = int(self.force_spike_hold_count[env_id].item())
+        if hold_count <= 0:
+            return velocity_mm_s
+
+        decay = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_spike_velocity_decay", 0.92))))
+        prev = float(self.command_velocity_filtered_mm_s[env_id].item())
+        protected_velocity = min(float(velocity_mm_s), prev * decay)
+        self.command_velocity_filtered_mm_s[env_id] = max(0.0, protected_velocity)
+        self.force_spike_hold_count[env_id] = max(0, hold_count - 1)
+        return max(0.0, protected_velocity)
+
     def _smooth_command_mrr(self, env_id: int, desired_mrr_n_mm_s: float, hard_stop: bool = False) -> float:
         if hard_stop:
             self.command_mrr_filtered_n_mm_s[env_id] = 0.0
@@ -807,6 +845,8 @@ class AdmittanceControlAction(ActionTerm):
         self.current_sliding_velocity_mm_s[env_ids] = 0.0
         self.command_velocity_filtered_mm_s[env_ids] = 0.0
         self.current_abs_fz[env_ids] = 0.0
+        self.filtered_abs_fz[env_ids] = 0.0
+        self.force_spike_hold_count[env_ids] = 0
         self.current_mrr_n_mm_s[env_ids] = 0.0
         self.prev_mrr_n_mm_s[env_ids] = 0.0
         self.current_mrr_delta_n_mm_s[env_ids] = 0.0
@@ -970,7 +1010,9 @@ class AdmittanceControlAction(ActionTerm):
             target_pos_mm = nominal_pos_mm.clone()
             normal_axis = cur_rotm[:, 2]
             measured_fz = float(torch.dot(normal_axis, measured_force_base).item())
-            abs_fz = abs(measured_fz)
+            raw_abs_fz = abs(measured_fz)
+            abs_fz = self._filter_normal_force(env_id, raw_abs_fz)
+            filtered_measured_fz = measured_fz if raw_abs_fz <= 1.0e-6 else (1.0 if measured_fz >= 0.0 else -1.0) * abs_fz
             path_tracking_error_mm = float(torch.linalg.norm(cur_pos_mm[0:2] - nominal_pos_mm[0:2]).item())
             self.current_path_tracking_error_mm[env_id] = path_tracking_error_mm
             nominal_tcp_z_m = float(torch.dot(normal_axis, nominal_pos_mm).item()) / 1000.0
@@ -980,12 +1022,12 @@ class AdmittanceControlAction(ActionTerm):
                 nominal_tcp_z_m,
                 current_tcp_z_m,
                 float(target_fz),
-                float(measured_fz),
+                float(filtered_measured_fz),
             )
             normal_delta_mm = (float(fc_out[0]) - nominal_tcp_z_m) * 1000.0
             admittance_limit = float(self.int_cfg.force_admittance_delta_limit_mm)
             normal_delta_mm = max(-admittance_limit, min(admittance_limit, normal_delta_mm))
-            normal_delta_mm += self._update_force_normal_offset(env_id, abs(target_fz), measured_fz)
+            normal_delta_mm += self._update_force_normal_offset(env_id, abs(target_fz), filtered_measured_fz)
             total_limit = float(self.int_cfg.force_total_normal_delta_limit_mm)
             normal_delta_mm = max(-total_limit, min(total_limit, normal_delta_mm))
 
@@ -1024,6 +1066,14 @@ class AdmittanceControlAction(ActionTerm):
                     band_min = float(getattr(self.int_cfg, "force_band_min_n", 0.0))
                     band_max = float(getattr(self.int_cfg, "force_band_max_n", 0.0))
                     if band_min > 0.0 and band_max > band_min and (abs_fz < band_min or abs_fz > band_max):
+                        if abs_fz < band_min:
+                            low_scale = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_band_low_speed_scale", 0.65))))
+                            deficit_ratio = min(1.0, max(0.0, (band_min - abs_fz) / max(band_min, self.int_cfg.force_eps_n)))
+                            final_rate *= 1.0 - (1.0 - low_scale) * deficit_ratio
+                        else:
+                            high_scale = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_band_high_speed_scale", 0.45))))
+                            excess_ratio = min(1.0, max(0.0, (abs_fz - band_max) / max(band_max, self.int_cfg.force_eps_n)))
+                            final_rate *= 1.0 - (1.0 - high_scale) * excess_ratio
                         saturated_min = float(getattr(self.int_cfg, "force_band_saturated_min_n", band_min))
                         mild_underforce = abs_fz < band_min and abs_fz >= saturated_min
                         if not mild_underforce:
@@ -1079,6 +1129,7 @@ class AdmittanceControlAction(ActionTerm):
                         mrr_limited_velocity_mm_s,
                         hard_stop=hard_stop,
                     )
+                sliding_velocity_mm_s = self._protect_velocity_on_force_spike(env_id, sliding_velocity_mm_s)
                 final_rate = sliding_velocity_mm_s * self._step_dt_local / max(segment_length_mm, 1.0e-6)
                 final_rate = max(0.0, min(self.int_cfg.max_index_rate, final_rate))
                 self.command_rate_filtered[env_id] = final_rate
