@@ -121,10 +121,11 @@ class ActionsCfg:
             command_velocity_ema_beta=0.15,
             command_velocity_max_delta_up_mm_s=12.0,
             command_velocity_max_delta_down_mm_s=36.0,
-            command_mrr_ema_beta=0.25,
-            command_mrr_max_delta_up_n_mm_s=80.0,
-            command_mrr_max_delta_down_n_mm_s=160.0,
-            command_mrr_max_ratio=1.6,
+            command_mrr_ema_beta=0.12,
+            command_mrr_max_delta_up_n_mm_s=35.0,
+            command_mrr_max_delta_down_n_mm_s=70.0,
+            command_mrr_min_ratio=0.55,
+            command_mrr_max_ratio=1.25,
             force_eps_n=1.0,
             force_tracking_ready_ratio=0.8,
             min_force_rate_scale=0.25,
@@ -133,7 +134,7 @@ class ActionsCfg:
             force_normal_retract_max_step_mm=6.00,
             force_band_min_n=8.0,
             force_band_max_n=12.0,
-            force_band_index_rate_limit=0.05,
+            force_band_index_rate_limit=12.0,
             force_band_saturated_min_n=7.5,
             path_tracking_slowdown_start_mm=2.0,
             path_tracking_stop_mm=8.0,
@@ -282,6 +283,17 @@ class RewardsCfg:
         func=custom_rewards.inverse_fv_bonus,
         weight=2.0,
         params={"target_mrr": 500.0, "bonus_sigma_start": 0.45, "bonus_sigma_end": 0.18, "curriculum_ramp": 200},
+    )
+
+    mrr_flatness_reward = RewardTermCfg(
+        func=custom_rewards.mrr_flatness_reward,
+        weight=4.0,
+        params={
+            "target_mrr": 500.0,
+            "band_tau": 0.25,
+            "delta_tau": 60.0,
+            "min_velocity": 1.0,
+        },
     )
 
     # ── 2. 강력한 헌법 (완주 & 커버리지 강제) ──

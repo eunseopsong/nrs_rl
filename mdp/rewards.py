@@ -123,6 +123,50 @@ def inverse_fv_bonus(
  
     bonus = _exponential_target_reward(sliding_velocity, ideal_velocity, tau)
     return bonus * force_gate
+
+
+def mrr_flatness_reward(
+    env: "ManagerBasedRLEnv",
+    target_mrr: float = 500.0,
+    band_tau: float = 0.25,
+    delta_tau: float = 60.0,
+    min_contact_force: float = 1.0,
+    min_velocity: float = 1.0,
+    gate_sharpness: float = 8.0,
+    asset_name: str = "robot",
+    body_name: str = "spindle_link",
+    fixed_joint_name: str = "tool0_to_spindle",
+    joint_prim_relpath: str = "joints",
+    action_term_name: str = "arm_action",
+) -> torch.Tensor:
+    current_fz, sliding_velocity, current_mrr = local_obs.get_path_sliding_metrics(
+        env,
+        action_term_name=action_term_name,
+        asset_name=asset_name,
+        body_name=body_name,
+        fixed_joint_name=fixed_joint_name,
+        joint_prim_relpath=joint_prim_relpath,
+    )
+
+    term = local_obs.get_action_term(env, action_term_name)
+    if term is not None and hasattr(term, "current_mrr_delta_n_mm_s"):
+        mrr_delta = torch.abs(term.current_mrr_delta_n_mm_s.to(device=env.device, dtype=torch.float32))
+    else:
+        mrr_delta = torch.zeros_like(current_mrr)
+
+    force_gate = _soft_gate(current_fz, min_contact_force, gate_sharpness)
+    vel_gate = _soft_gate(sliding_velocity, min_velocity, gate_sharpness)
+    activity_gate = force_gate * vel_gate
+
+    band_reward = _exponential_target_reward(
+        current_mrr,
+        target_mrr,
+        tau=band_tau,
+        progress_tau=0.25,
+        max_ratio=2.5,
+    )
+    delta_reward = torch.exp(-mrr_delta / max(delta_tau, 1.0e-6))
+    return band_reward * delta_reward * activity_gate
  
 # ==========================================
 # 🚀 3. Trajectory Tracking Reward
