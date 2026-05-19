@@ -242,6 +242,9 @@ class ActionIntegrationCfg:
     min_index_rate: float = 1.0
     max_index_rate: float = 96.0
     progress_rate_ema_beta: float = 0.55
+    command_rate_ema_beta: float = 0.20
+    command_rate_max_delta_up: float = 4.0
+    command_rate_max_delta_down: float = 12.0
     force_eps_n: float = 1.0
     force_tracking_ready_ratio: float = 0.8
     min_force_rate_scale: float = 0.25
@@ -370,6 +373,12 @@ class AdmittanceControlAction(ActionTerm):
         self.progress_rate_filtered = torch.full(
             (self._num_envs_local,),
             float(self.int_cfg.base_index_rate),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.command_rate_filtered = torch.full(
+            (self._num_envs_local,),
+            float(self.int_cfg.min_index_rate),
             dtype=torch.float32,
             device=self.device,
         )
@@ -546,6 +555,27 @@ class AdmittanceControlAction(ActionTerm):
         self.progress_rate_filtered[env_id] = filt
         return filt
 
+    def _smooth_command_rate(self, env_id: int, desired_rate: float, hard_stop: bool = False) -> float:
+        if hard_stop:
+            self.command_rate_filtered[env_id] = 0.0
+            return 0.0
+
+        desired_rate = max(0.0, min(float(self.int_cfg.max_index_rate), float(desired_rate)))
+        prev = float(self.command_rate_filtered[env_id].item())
+        beta = float(getattr(self.int_cfg, "command_rate_ema_beta", 0.20))
+        beta = max(0.0, min(1.0, beta))
+
+        ema_rate = beta * desired_rate + (1.0 - beta) * prev
+        max_delta_up = max(0.0, float(getattr(self.int_cfg, "command_rate_max_delta_up", 4.0)))
+        max_delta_down = max(0.0, float(getattr(self.int_cfg, "command_rate_max_delta_down", 12.0)))
+        lower = prev - max_delta_down
+        upper = prev + max_delta_up
+        smoothed_rate = max(lower, min(upper, ema_rate))
+        smoothed_rate = max(0.0, min(float(self.int_cfg.max_index_rate), smoothed_rate))
+
+        self.command_rate_filtered[env_id] = smoothed_rate
+        return smoothed_rate
+
     def _smoothstep(self, x: float) -> float:
         x = max(0.0, min(1.0, x))
         return x * x * (3.0 - 2.0 * x)
@@ -692,6 +722,7 @@ class AdmittanceControlAction(ActionTerm):
         self.force_normal_offset_mm[env_ids] = 0.0
         self.force_normal_error_i[env_ids] = 0.0
         self.progress_rate_filtered[env_ids] = float(self.int_cfg.base_index_rate)
+        self.command_rate_filtered[env_ids] = float(self.int_cfg.min_index_rate)
         self.approach_step[env_ids] = 0
         self.approach_active[env_ids] = bool(self.int_cfg.approach_interpolation_enabled)
 
@@ -800,6 +831,7 @@ class AdmittanceControlAction(ActionTerm):
                     self.approach_active[env_id] = False
                     self.path_cursor[env_id] = 0.0
                     self.progress_rate_filtered[env_id] = float(self.int_cfg.base_index_rate)
+                    self.command_rate_filtered[env_id] = float(self.int_cfg.min_index_rate)
                     self._reset_force_controller_for_env(env_id, float(self.traj_positions[0, 2].item()))
                 continue
 
@@ -892,12 +924,21 @@ class AdmittanceControlAction(ActionTerm):
                             force_rate_limit = band_limit if force_rate_limit is None else min(force_rate_limit, band_limit)
                 tracking_scale = self._path_tracking_rate_scale(path_tracking_error_mm)
                 final_rate *= tracking_scale
+                hard_stop = False
                 if tracking_scale <= 0.0:
                     final_rate = 0.0
+                    hard_stop = True
                 else:
                     final_rate = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, final_rate))
                 if force_rate_limit is not None:
-                    final_rate = min(final_rate, max(0.0, force_rate_limit))
+                    force_limited_rate = min(final_rate, max(0.0, force_rate_limit))
+                    if force_limited_rate < final_rate:
+                        final_rate = force_limited_rate
+                        self.command_rate_filtered[env_id] = final_rate
+                    else:
+                        final_rate = self._smooth_command_rate(env_id, final_rate, hard_stop=hard_stop)
+                else:
+                    final_rate = self._smooth_command_rate(env_id, final_rate, hard_stop=hard_stop)
 
                 segment_length_mm = float(self.traj_segment_lengths_mm[idx].item())
                 sliding_velocity_mm_s = final_rate * segment_length_mm / max(self._step_dt_local, 1.0e-8)
