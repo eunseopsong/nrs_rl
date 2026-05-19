@@ -69,6 +69,8 @@ _has_seen_any_step = False
 _last_processed_reset_step = None
 
 _global_removal_history = {"x": [], "y": [], "removal": []}
+_reward_component_history = {"episode": [], "total_reward": []}
+_reward_component_names = []
 
 GRID_SIZE = 128
 CONTACT_FORCE_THRESHOLD_N = 0.5
@@ -449,6 +451,81 @@ def save_global_summary():
             f.write(f"contact_cv_removal_delta_from_prev: {(contact_cv[-1] - contact_cv[-2]):.9g}\n")
 
 
+def _episode_reward_components(reward_components):
+    components = {}
+    for term_name, values in reward_components.items():
+        finite_values = np.asarray(values, dtype=float)
+        finite_values = finite_values[np.isfinite(finite_values)]
+        if finite_values.size > 0:
+            components[str(term_name)] = float(finite_values[-1])
+    return components
+
+
+def _append_reward_component_history(episode, total_reward, reward_components):
+    global _reward_component_names
+
+    components = _episode_reward_components(reward_components)
+    for term_name in components:
+        if term_name not in _reward_component_names:
+            _reward_component_names.append(term_name)
+            _reward_component_history[term_name] = [np.nan] * (len(_reward_component_history["episode"]))
+
+    _reward_component_history["episode"].append(int(episode))
+    _reward_component_history["total_reward"].append(float(total_reward))
+    for term_name in _reward_component_names:
+        _reward_component_history[term_name].append(components.get(term_name, np.nan))
+
+
+def _write_reward_component_logs():
+    if not _reward_component_history["episode"]:
+        return
+
+    RUN_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    keys = ["episode", "total_reward"] + list(_reward_component_names)
+
+    csv_path = RUN_LOG_DIR / "00_reward_components.csv"
+    row_count = len(_reward_component_history["episode"])
+    with csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+        for i in range(row_count):
+            writer.writerow({key: _reward_component_history[key][i] for key in keys})
+
+    episode = np.asarray(_reward_component_history["episode"], dtype=float)
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for term_name in _reward_component_names:
+        values = np.asarray(_reward_component_history[term_name], dtype=float)
+        finite_mask = np.isfinite(values)
+        if np.any(finite_mask):
+            ax.plot(
+                episode[finite_mask],
+                values[finite_mask],
+                marker="o",
+                linewidth=1.8,
+                markersize=3.5,
+                label=term_name,
+            )
+            if np.count_nonzero(finite_mask) >= 5:
+                smooth_values = moving_average(values[finite_mask], w=5)
+                ax.plot(
+                    episode[finite_mask],
+                    smooth_values,
+                    linestyle="--",
+                    linewidth=1.2,
+                    alpha=0.75,
+                    label=f"{term_name} ma5",
+                )
+
+    ax.set_title("Episode Reward Components")
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Episode cumulative reward")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(RUN_LOG_DIR / "00_reward_components.png", dpi=200)
+    plt.close(fig)
+
+
 def _write_episode_summary(out_dir, summary):
     out_dir.mkdir(parents=True, exist_ok=True)
     txt_path = out_dir / "00_summary.txt"
@@ -536,6 +613,8 @@ def process_episode():
     for key in _summary_metrics:
         _summary_metrics[key].append(summary[key])
     save_global_summary()
+    _append_reward_component_history(_episode_counter, _current_ep_reward, rw_dict)
+    _write_reward_component_logs()
 
     local_debug.print_info(f"[STAMP] Ep {_episode_counter} Saved. Reward: {_current_ep_reward:.2f}. Result: {ep_dir}")
 

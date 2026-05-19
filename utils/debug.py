@@ -118,6 +118,32 @@ def print_polishing_metrics_debug(step: int, metrics_env0):
     _last_polishing_debug["metrics"] = vals[:8]
 
 
+def format_reward_debug(env, env_id: int = 0) -> str:
+    reward_parts = []
+
+    try:
+        if hasattr(env, "reward_buf"):
+            reward_buf = env.reward_buf
+            if isinstance(reward_buf, torch.Tensor) and reward_buf.numel() > int(env_id):
+                reward_parts.append(f"last_total={float(reward_buf[int(env_id)].item()):.6f}")
+
+        if hasattr(env, "reward_manager"):
+            reward_dict = getattr(env.reward_manager, "episode_sums", getattr(env.reward_manager, "_episode_sums", {}))
+            for term_name, value_tensor in reward_dict.items():
+                if isinstance(value_tensor, torch.Tensor):
+                    value = float(value_tensor[int(env_id)].item())
+                else:
+                    values = _as_float_list(value_tensor)
+                    value = values[int(env_id)] if len(values) > int(env_id) else values[0]
+                reward_parts.append(f"{term_name}_episode_sum={value:.6f}")
+    except Exception as e:
+        return f"reward_debug_error={repr(e)}"
+
+    if not reward_parts:
+        return "No reward debug data"
+    return " | ".join(reward_parts)
+
+
 # ============================================================
 # Unified action runtime print
 # ============================================================

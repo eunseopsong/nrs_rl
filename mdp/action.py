@@ -924,6 +924,7 @@ class AdmittanceControlAction(ActionTerm):
             tgt_dbg_xyz_mm = self.des_pos_mm_raw[debug_env_id]
             tgt_dbg_wxyz = self.des_wxyz_raw[debug_env_id]
             cmd_dbg_xyz_mm = self.cmd_target_xyz_mm[debug_env_id]
+            reward_debug = local_debug.format_reward_debug(self._env, debug_env_id)
             local_debug.print_info(
                 f"\n[Polishing Live] ep{episode_number} step={global_step} env={debug_env_id} "
                 f"| hdf5_index={current_index}/{self.traj_length - 1} ({progress_pct:.1f}%) "
@@ -948,6 +949,7 @@ class AdmittanceControlAction(ActionTerm):
                 f"| action={float(self._processed_actions[debug_env_id, 0].item()):.4f} "
                 f"| index_rate={float(self.current_index_delta[debug_env_id].item()):.4f} "
                 f"| path_err_xy_mm={float(self.current_path_tracking_error_mm[debug_env_id].item()):.3f}\n"
+                f"  rewards          = | {reward_debug}\n"
             )
 
 
