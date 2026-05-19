@@ -275,11 +275,11 @@ class RewardsCfg:
     )
 
     # ── 2. 강력한 헌법 (완주 & 커버리지 강제) ──
-    physical_completion = RewardTermCfg(
-        func=custom_rewards.physical_completion_reward,
-        weight=1.0,  # 내부에서 스케일이 매우 크므로 1.0 유지
-        params={"distance_threshold": 50.0},
-    )
+    # physical_completion = RewardTermCfg(
+    #     func=custom_rewards.physical_completion_reward,
+    #     weight=1.0,  # 내부에서 스케일이 매우 크므로 1.0 유지
+    #     params={"distance_threshold": 50.0},
+    # )
     
     # surface_coverage = RewardTermCfg(
     #     func=custom_rewards.surface_coverage_reward,
@@ -288,30 +288,28 @@ class RewardsCfg:
     # )
 
     # ── 3. 보조 목표 (비중 축소) ──
-    trajectory_tracking_reward = RewardTermCfg(
-        func=custom_rewards.trajectory_tracking_reward,
-        weight= 3.0, 
-        params={"pos_sigma": 5.0, "vel_bonus_scale": 0.3},
-    )
-
-    # surface_uniformity_reward는 visualization 전역 grid에 의존하므로
-    # action/reward 연결 검증이 끝날 때까지 비활성화한다.
-    # surface_uniformity_reward = RewardTermCfg(
-    #     func=custom_rewards.surface_uniformity_reward,
-    #     weight=4.0,
+    # trajectory_tracking_reward = RewardTermCfg(
+    #     func=custom_rewards.trajectory_tracking_reward,
+    #     weight= 3.0,
+    #     params={"pos_sigma": 5.0, "vel_bonus_scale": 0.3},
     # )
 
-    # ── 4. 제약 사항 (족쇄 해제 및 안전 장치) ──
-    action_smoothness_penalty = RewardTermCfg(
-        func=custom_rewards.action_smoothness_penalty,
-        weight=0.01, # 기존 0.2에서 0.01로 대폭 축소 (자유로운 탐색 장려)
+    surface_uniformity_reward = RewardTermCfg(
+        func=custom_rewards.surface_uniformity_reward,
+        weight=4.0,
     )
 
-    machining_safety_penalty = RewardTermCfg(
-        func=custom_rewards.machining_safety_penalty,
-        weight=5.0,
-        params={"max_force": 50.0},
-    )
+    # ── 4. 제약 사항 (족쇄 해제 및 안전 장치) ──
+    # action_smoothness_penalty = RewardTermCfg(
+    #     func=custom_rewards.action_smoothness_penalty,
+    #     weight=0.01, # 기존 0.2에서 0.01로 대폭 축소 (자유로운 탐색 장려)
+    # )
+
+    # machining_safety_penalty = RewardTermCfg(
+    #     func=custom_rewards.machining_safety_penalty,
+    #     weight=5.0,
+    #     params={"max_force": 50.0},
+    # )
     
     # ❌ force_stability_reward는 적응형 폴리싱을 방해하므로 완전히 삭제함
 
