@@ -251,6 +251,7 @@ class ActionIntegrationCfg:
     command_velocity_spike_delta_mm_s: float = 8.0
     command_velocity_spike_return_ratio: float = 0.20
     command_velocity_hard_stop_decay: float = 0.85
+    command_velocity_max_mm_s: float = 45.0
     command_mrr_ema_beta: float = 0.12
     command_mrr_max_delta_up_n_mm_s: float = 35.0
     command_mrr_max_delta_down_n_mm_s: float = 70.0
@@ -618,7 +619,8 @@ class AdmittanceControlAction(ActionTerm):
             self.command_velocity_filtered_mm_s[env_id] = smoothed_velocity
             return smoothed_velocity
 
-        desired_velocity_mm_s = max(0.0, float(desired_velocity_mm_s))
+        max_velocity = max(0.0, float(getattr(self.int_cfg, "command_velocity_max_mm_s", 45.0)))
+        desired_velocity_mm_s = max(0.0, min(max_velocity, float(desired_velocity_mm_s)))
         beta = float(getattr(self.int_cfg, "command_velocity_ema_beta", 0.15))
         beta = max(0.0, min(1.0, beta))
 
@@ -628,14 +630,14 @@ class AdmittanceControlAction(ActionTerm):
         lower = prev - max_delta_down
         upper = prev + max_delta_up
         smoothed_velocity = max(lower, min(upper, ema_velocity))
-        smoothed_velocity = max(0.0, smoothed_velocity)
+        smoothed_velocity = max(0.0, min(max_velocity, smoothed_velocity))
 
         spike_delta = max(0.0, float(getattr(self.int_cfg, "command_velocity_spike_delta_mm_s", 8.0)))
         if spike_delta > 0.0 and abs(smoothed_velocity - prev) > spike_delta:
             return_ratio = max(0.0, min(1.0, float(getattr(self.int_cfg, "command_velocity_spike_return_ratio", 0.20))))
             direction = 1.0 if smoothed_velocity > prev else -1.0
             smoothed_velocity = prev + direction * spike_delta * return_ratio
-            smoothed_velocity = max(0.0, smoothed_velocity)
+            smoothed_velocity = max(0.0, min(max_velocity, smoothed_velocity))
 
         self.command_velocity_filtered_mm_s[env_id] = smoothed_velocity
         return smoothed_velocity
