@@ -141,7 +141,7 @@ def format_reward_debug(env, env_id: int = 0) -> str:
 
     if not reward_parts:
         return "No reward debug data"
-    return " | ".join(reward_parts)
+    return "\n                     ".join(f"| {part}" for part in reward_parts)
 
 
 # ============================================================

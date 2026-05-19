@@ -119,8 +119,11 @@ class ActionsCfg:
             command_rate_max_delta_up=4.0,
             command_rate_max_delta_down=12.0,
             command_velocity_ema_beta=0.15,
-            command_velocity_max_delta_up_mm_s=12.0,
-            command_velocity_max_delta_down_mm_s=36.0,
+            command_velocity_max_delta_up_mm_s=6.0,
+            command_velocity_max_delta_down_mm_s=6.0,
+            command_velocity_spike_delta_mm_s=6.0,
+            command_velocity_spike_return_ratio=0.15,
+            command_velocity_hard_stop_decay=0.90,
             command_mrr_ema_beta=0.12,
             command_mrr_max_delta_up_n_mm_s=35.0,
             command_mrr_max_delta_down_n_mm_s=70.0,
@@ -266,101 +269,47 @@ class EventCfg:
 class RewardsCfg:
     """Reward terms for the RL environment."""
 
-    # ── 1. 메인 퀘스트 ──
-    adaptive_mrr_reward = RewardTermCfg(
-        func=custom_rewards.adaptive_mrr_reward,
-        weight=5.0,
-        params={
-            "target_mrr": 500.0,
-            "mrr_sigma_start": 0.45,
-            "mrr_sigma_end": 0.18,
-            "curriculum_ramp": 200,
-            "min_velocity": 1.0,
-        },
-    )
-
-    inverse_fv_bonus = RewardTermCfg(
-        func=custom_rewards.inverse_fv_bonus,
+    removal_rate_reward = RewardTermCfg(
+        func=custom_rewards.removal_rate_reward,
         weight=2.0,
-        params={"target_mrr": 500.0, "bonus_sigma_start": 0.45, "bonus_sigma_end": 0.18, "curriculum_ramp": 200},
-    )
-
-    mrr_flatness_reward = RewardTermCfg(
-        func=custom_rewards.mrr_flatness_reward,
-        weight=4.0,
         params={
-            "target_mrr": 500.0,
-            "band_tau": 0.25,
-            "delta_tau": 60.0,
-            "min_velocity": 1.0,
+            "saturation_mrr": 500.0,
+            "min_contact_force": 1.0,
         },
     )
 
-    mrr_slope_reward = RewardTermCfg(
-        func=custom_rewards.mrr_slope_reward,
-        weight=0.4,
-        params={
-            "slope_tau": 7500.0,
-            "spike_slope": 12000.0,
-            "spike_tau": 2500.0,
-            "target_mrr": 500.0,
-            "band_tau": 0.35,
-            "min_velocity": 1.0,
-        },
-    )
-
-    mrr_spike_penalty = RewardTermCfg(
-        func=custom_rewards.mrr_spike_penalty,
+    removal_constancy_reward = RewardTermCfg(
+        func=custom_rewards.removal_constancy_reward,
         weight=4.0,
         params={
-            "spike_slope": 8000.0,
-            "spike_tau": 1500.0,
+            "delta_tau": 25.0,
+            "min_contact_force": 1.0,
             "min_active_mrr": 80.0,
         },
     )
 
-    # ── 2. 강력한 헌법 (완주 & 커버리지 강제) ──
-    # physical_completion = RewardTermCfg(
-    #     func=custom_rewards.physical_completion_reward,
-    #     weight=1.0,  # 내부에서 스케일이 매우 크므로 1.0 유지
-    #     params={"distance_threshold": 50.0},
-    # )
-    
-    # surface_coverage = RewardTermCfg(
-    #     func=custom_rewards.surface_coverage_reward,
-    #     weight=50.0, # 면적을 넓게 닦을수록 강력한 보상
-    #     params={"target_cells": 1800}, # 필요시 HDF5 궤적 길이에 맞게 조절
-    # )
-
-    # ── 3. 보조 목표 (비중 축소) ──
-    # trajectory_tracking_reward = RewardTermCfg(
-    #     func=custom_rewards.trajectory_tracking_reward,
-    #     weight= 3.0,
-    #     params={"pos_sigma": 5.0, "vel_bonus_scale": 0.3},
-    # )
-
-    surface_uniformity_reward = RewardTermCfg(
-        func=custom_rewards.surface_uniformity_reward,
-        weight=4.0,
+    removal_instability_penalty = RewardTermCfg(
+        func=custom_rewards.removal_instability_penalty,
+        weight=20.0,
         params={
-            "scale": 3.0,
-            "cv_tau": 0.35,
+            "spike_delta": 35.0,
+            "spike_tau": 20.0,
+            "dip_mrr": 220.0,
+            "dip_tau": 35.0,
+            "dip_weight": 2.0,
+            "min_contact_force": 1.0,
+            "min_prev_mrr": 180.0,
         },
     )
 
-    # ── 4. 제약 사항 (족쇄 해제 및 안전 장치) ──
-    # action_smoothness_penalty = RewardTermCfg(
-    #     func=custom_rewards.action_smoothness_penalty,
-    #     weight=0.01, # 기존 0.2에서 0.01로 대폭 축소 (자유로운 탐색 장려)
-    # )
-
-    # machining_safety_penalty = RewardTermCfg(
-    #     func=custom_rewards.machining_safety_penalty,
-    #     weight=5.0,
-    #     params={"max_force": 50.0},
-    # )
-    
-    # ❌ force_stability_reward는 적응형 폴리싱을 방해하므로 완전히 삭제함
+    surface_uniformity_reward = RewardTermCfg(
+        func=custom_rewards.surface_uniformity_reward,
+        weight=8.0,
+        params={
+            "cv_tau": 0.35,
+            "total_tau": 5500.0,
+        },
+    )
 
 @configclass
 class TerminationsCfg:
