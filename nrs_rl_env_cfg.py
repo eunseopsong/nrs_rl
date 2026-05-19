@@ -296,6 +296,29 @@ class RewardsCfg:
         },
     )
 
+    mrr_slope_reward = RewardTermCfg(
+        func=custom_rewards.mrr_slope_reward,
+        weight=0.4,
+        params={
+            "slope_tau": 7500.0,
+            "spike_slope": 12000.0,
+            "spike_tau": 2500.0,
+            "target_mrr": 500.0,
+            "band_tau": 0.35,
+            "min_velocity": 1.0,
+        },
+    )
+
+    mrr_spike_penalty = RewardTermCfg(
+        func=custom_rewards.mrr_spike_penalty,
+        weight=4.0,
+        params={
+            "spike_slope": 8000.0,
+            "spike_tau": 1500.0,
+            "min_active_mrr": 80.0,
+        },
+    )
+
     # ── 2. 강력한 헌법 (완주 & 커버리지 강제) ──
     # physical_completion = RewardTermCfg(
     #     func=custom_rewards.physical_completion_reward,
@@ -319,6 +342,10 @@ class RewardsCfg:
     surface_uniformity_reward = RewardTermCfg(
         func=custom_rewards.surface_uniformity_reward,
         weight=4.0,
+        params={
+            "scale": 3.0,
+            "cv_tau": 0.35,
+        },
     )
 
     # ── 4. 제약 사항 (족쇄 해제 및 안전 장치) ──

@@ -167,6 +167,100 @@ def mrr_flatness_reward(
     )
     delta_reward = torch.exp(-mrr_delta / max(delta_tau, 1.0e-6))
     return band_reward * delta_reward * activity_gate
+
+
+def mrr_slope_reward(
+    env: "ManagerBasedRLEnv",
+    slope_tau: float = 7500.0,
+    spike_slope: float = 12000.0,
+    spike_tau: float = 2500.0,
+    target_mrr: float = 500.0,
+    band_tau: float = 0.35,
+    min_contact_force: float = 1.0,
+    min_velocity: float = 1.0,
+    gate_sharpness: float = 8.0,
+    asset_name: str = "robot",
+    body_name: str = "spindle_link",
+    fixed_joint_name: str = "tool0_to_spindle",
+    joint_prim_relpath: str = "joints",
+    action_term_name: str = "arm_action",
+) -> torch.Tensor:
+    current_fz, sliding_velocity, current_mrr = local_obs.get_path_sliding_metrics(
+        env,
+        action_term_name=action_term_name,
+        asset_name=asset_name,
+        body_name=body_name,
+        fixed_joint_name=fixed_joint_name,
+        joint_prim_relpath=joint_prim_relpath,
+    )
+
+    term = local_obs.get_action_term(env, action_term_name)
+    if term is not None and hasattr(term, "current_mrr_delta_n_mm_s"):
+        mrr_delta = term.current_mrr_delta_n_mm_s.to(device=env.device, dtype=torch.float32)
+        step_dt = float(getattr(term, "_step_dt_local", getattr(env, "step_dt", 1.0)))
+        mrr_slope = mrr_delta / max(step_dt, 1.0e-8)
+    else:
+        mrr_slope = torch.zeros_like(current_mrr)
+
+    force_gate = _soft_gate(current_fz, min_contact_force, gate_sharpness)
+    vel_gate = _soft_gate(sliding_velocity, min_velocity, gate_sharpness)
+    activity_gate = force_gate * vel_gate
+
+    slope_reward = torch.exp(-torch.abs(mrr_slope) / max(slope_tau, 1.0e-6))
+    spike_excess = torch.clamp(torch.abs(mrr_slope) - spike_slope, min=0.0)
+    spike_reward = torch.exp(-spike_excess / max(spike_tau, 1.0e-6))
+    band_reward = _exponential_target_reward(
+        current_mrr,
+        target_mrr,
+        tau=band_tau,
+        progress_tau=0.25,
+        max_ratio=2.5,
+    )
+    return slope_reward * spike_reward * band_reward * activity_gate
+
+
+def mrr_spike_penalty(
+    env: "ManagerBasedRLEnv",
+    spike_slope: float = 8000.0,
+    spike_tau: float = 1500.0,
+    min_contact_force: float = 1.0,
+    min_active_mrr: float = 80.0,
+    gate_sharpness: float = 8.0,
+    action_term_name: str = "arm_action",
+    asset_name: str = "robot",
+    body_name: str = "spindle_link",
+    fixed_joint_name: str = "tool0_to_spindle",
+    joint_prim_relpath: str = "joints",
+) -> torch.Tensor:
+    current_fz, _, current_mrr = local_obs.get_path_sliding_metrics(
+        env,
+        action_term_name=action_term_name,
+        asset_name=asset_name,
+        body_name=body_name,
+        fixed_joint_name=fixed_joint_name,
+        joint_prim_relpath=joint_prim_relpath,
+    )
+
+    term = local_obs.get_action_term(env, action_term_name)
+    if term is None or not hasattr(term, "current_mrr_delta_n_mm_s"):
+        return torch.zeros_like(current_mrr)
+
+    mrr_delta = term.current_mrr_delta_n_mm_s.to(device=env.device, dtype=torch.float32)
+    prev_mrr = (
+        term.prev_mrr_n_mm_s.to(device=env.device, dtype=torch.float32)
+        if hasattr(term, "prev_mrr_n_mm_s")
+        else current_mrr - mrr_delta
+    )
+    step_dt = float(getattr(term, "_step_dt_local", getattr(env, "step_dt", 1.0)))
+    mrr_slope = mrr_delta / max(step_dt, 1.0e-8)
+
+    force_gate = _soft_gate(current_fz, min_contact_force, gate_sharpness)
+    active_mrr = torch.maximum(torch.abs(prev_mrr), torch.abs(current_mrr))
+    active_gate = _soft_gate(active_mrr, min_active_mrr, gate_sharpness)
+
+    spike_excess = torch.clamp(torch.abs(mrr_slope) - spike_slope, min=0.0)
+    penalty = 1.0 - torch.exp(-spike_excess / max(spike_tau, 1.0e-6))
+    return -penalty * force_gate * active_gate
  
 # ==========================================
 # 🚀 3. Trajectory Tracking Reward
@@ -265,8 +359,43 @@ def surface_coverage_reward(
 # ==========================================
 # 🎨 6. Surface Uniformity
 # ==========================================
-def surface_uniformity_reward(env, scale: float = 3.0):
-    reward = local_obs.get_surface_uniformity_reward_value(env)
+def surface_uniformity_reward(
+    env,
+    scale: float = 3.0,
+    cv_tau: float = 0.35,
+    min_mean_removal: float = 1.0e-6,
+    action_term_name: str = "arm_action",
+):
+    reward = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+    reset_buf = getattr(env, "reset_buf", None)
+    if reset_buf is None or not reset_buf.any():
+        return reward
+
+    term = local_obs.get_action_term(env, action_term_name)
+    if term is None or not hasattr(term, "surface_removal_by_index"):
+        return reward
+
+    removal_by_index = term.surface_removal_by_index.to(device=env.device, dtype=torch.float32)
+    path_done = (
+        term.path_done.to(device=env.device, dtype=torch.bool)
+        if hasattr(term, "path_done")
+        else torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    )
+
+    traj_length = int(removal_by_index.shape[1])
+    for env_id in torch.nonzero(reset_buf, as_tuple=False).flatten().tolist():
+        if not bool(path_done[env_id].item()):
+            continue
+
+        values = removal_by_index[env_id, :traj_length]
+        mean_removal = torch.mean(values)
+        if float(mean_removal.item()) <= min_mean_removal:
+            continue
+
+        std_removal = torch.std(values, unbiased=False)
+        cv = std_removal / torch.clamp(mean_removal, min=min_mean_removal)
+        reward[env_id] = torch.exp(-cv / max(cv_tau, 1.0e-6))
+
     return reward * scale
 
 # ==========================================

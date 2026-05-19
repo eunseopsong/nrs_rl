@@ -378,6 +378,17 @@ class AdmittanceControlAction(ActionTerm):
             device=self.device,
         )
         self.cumulative_removal = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
+        self.surface_removal_by_index = torch.zeros(
+            (self._num_envs_local, self.traj_length),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.surface_visit_counts = torch.zeros(
+            (self._num_envs_local, self.traj_length),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.surface_last_index = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
         self.current_path_tracking_error_mm = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
         self.force_normal_offset_mm = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
         self.force_normal_error_i = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
@@ -787,6 +798,9 @@ class AdmittanceControlAction(ActionTerm):
         self.current_mrr_delta_n_mm_s[env_ids] = 0.0
         self.command_mrr_filtered_n_mm_s[env_ids] = 0.0
         self.cumulative_removal[env_ids] = 0.0
+        self.surface_removal_by_index[env_ids] = 0.0
+        self.surface_visit_counts[env_ids] = 0.0
+        self.surface_last_index[env_ids] = 0
         self.current_path_tracking_error_mm[env_ids] = 0.0
         self.force_normal_offset_mm[env_ids] = 0.0
         self.force_normal_error_i[env_ids] = 0.0
@@ -1055,7 +1069,13 @@ class AdmittanceControlAction(ActionTerm):
                 self.prev_mrr_n_mm_s[env_id] = prev_mrr_n_mm_s
                 self.current_mrr_n_mm_s[env_id] = current_mrr_n_mm_s
                 self.current_mrr_delta_n_mm_s[env_id] = current_mrr_n_mm_s - prev_mrr_n_mm_s
-                self.cumulative_removal[env_id] += self.current_mrr_n_mm_s[env_id] * self._step_dt_local
+                removal_amount = self.current_mrr_n_mm_s[env_id] * self._step_dt_local
+                self.cumulative_removal[env_id] += removal_amount
+                removal_bin = int(min(max(0, idx_for_rate), self.traj_length - 1))
+                if float(removal_amount.item()) > 0.0:
+                    self.surface_removal_by_index[env_id, removal_bin] += removal_amount
+                    self.surface_visit_counts[env_id, removal_bin] += 1.0
+                    self.surface_last_index[env_id] = max(int(self.surface_last_index[env_id].item()), removal_bin)
                 self.path_cursor[env_id] = min(float(self.path_cursor[env_id].item()) + final_rate, target_cursor)
 
                 if self.path_cursor[env_id] >= float(self.traj_length - 1):
