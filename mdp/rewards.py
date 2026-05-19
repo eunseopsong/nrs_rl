@@ -35,6 +35,25 @@ def _curriculum_sigma(
         env._ep_curriculum = 0
     progress = float(min(env._ep_curriculum, ramp)) / float(max(ramp, 1))
     return sigma_start + (sigma_end - sigma_start) * progress
+
+
+def _exponential_target_reward(
+    value: torch.Tensor,
+    target: float | torch.Tensor,
+    tau: float,
+    progress_tau: float = 0.35,
+    max_ratio: float = 4.0,
+) -> torch.Tensor:
+    target_tensor = torch.as_tensor(target, device=value.device, dtype=value.dtype)
+    ratio = torch.clamp(value / torch.clamp(target_tensor, min=1.0e-6), min=0.0, max=max_ratio)
+    relative_error = torch.abs(ratio - 1.0)
+    tracking_reward = torch.exp(-relative_error / max(tau, 1.0e-6))
+
+    progress_gate = 1.0 - torch.exp(-ratio / max(progress_tau, 1.0e-6))
+    target_gate = 1.0 - torch.exp(torch.tensor(-1.0 / max(progress_tau, 1.0e-6), device=value.device, dtype=value.dtype))
+    progress_gate = torch.clamp(progress_gate / torch.clamp(target_gate, min=1.0e-6), max=1.0)
+
+    return tracking_reward * progress_gate
  
 # ==========================================
 # 🚀 1. Core Adaptive MRR Reward
@@ -67,10 +86,9 @@ def adaptive_mrr_reward(
     vel_gate = _soft_gate(sliding_velocity, min_velocity, gate_sharpness)
     activity_gate = force_gate * vel_gate
  
-    log_ratio = torch.log(torch.clamp(current_mrr / max(target_mrr, 1e-6), min=1e-4, max=1e4))
-    sigma = _curriculum_sigma(env, mrr_sigma_start, mrr_sigma_end, curriculum_ramp)
+    tau = _curriculum_sigma(env, mrr_sigma_start, mrr_sigma_end, curriculum_ramp)
  
-    reward = torch.exp(-torch.square(log_ratio / sigma))
+    reward = _exponential_target_reward(current_mrr, target_mrr, tau)
     return reward * activity_gate
  
 # ==========================================
@@ -101,10 +119,9 @@ def inverse_fv_bonus(
  
     force_gate = _soft_gate(current_fz, min_contact_force, gate_sharpness)
     ideal_velocity = target_mrr / torch.clamp(current_fz, min=1e-3)
-    log_vel_ratio = torch.log(torch.clamp(sliding_velocity / torch.clamp(ideal_velocity, min=1e-5), min=1e-4, max=1e4))
-    sigma = _curriculum_sigma(env, bonus_sigma_start, bonus_sigma_end, curriculum_ramp)
+    tau = _curriculum_sigma(env, bonus_sigma_start, bonus_sigma_end, curriculum_ramp)
  
-    bonus = torch.exp(-torch.square(log_vel_ratio / sigma))
+    bonus = _exponential_target_reward(sliding_velocity, ideal_velocity, tau)
     return bonus * force_gate
  
 # ==========================================

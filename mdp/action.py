@@ -236,7 +236,7 @@ class ActionIntegrationCfg:
 
     action_dim: int = 1
 
-    target_mrr_n_mm_s: float = 2500.0
+    target_mrr_n_mm_s: float = 500.0
     speed_action_scale: float = 0.35
     base_index_rate: float = 48.0
     min_index_rate: float = 1.0
@@ -245,6 +245,13 @@ class ActionIntegrationCfg:
     command_rate_ema_beta: float = 0.20
     command_rate_max_delta_up: float = 4.0
     command_rate_max_delta_down: float = 12.0
+    command_velocity_ema_beta: float = 0.15
+    command_velocity_max_delta_up_mm_s: float = 12.0
+    command_velocity_max_delta_down_mm_s: float = 36.0
+    command_mrr_ema_beta: float = 0.25
+    command_mrr_max_delta_up_n_mm_s: float = 80.0
+    command_mrr_max_delta_down_n_mm_s: float = 160.0
+    command_mrr_max_ratio: float = 1.6
     force_eps_n: float = 1.0
     force_tracking_ready_ratio: float = 0.8
     min_force_rate_scale: float = 0.25
@@ -355,8 +362,18 @@ class AdmittanceControlAction(ActionTerm):
         self.path_done = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
         self.current_index_delta = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
         self.current_sliding_velocity_mm_s = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
+        self.command_velocity_filtered_mm_s = torch.zeros(
+            (self._num_envs_local,),
+            dtype=torch.float32,
+            device=self.device,
+        )
         self.current_abs_fz = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
         self.current_mrr_n_mm_s = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
+        self.command_mrr_filtered_n_mm_s = torch.zeros(
+            (self._num_envs_local,),
+            dtype=torch.float32,
+            device=self.device,
+        )
         self.cumulative_removal = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
         self.current_path_tracking_error_mm = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
         self.force_normal_offset_mm = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
@@ -576,6 +593,49 @@ class AdmittanceControlAction(ActionTerm):
         self.command_rate_filtered[env_id] = smoothed_rate
         return smoothed_rate
 
+    def _smooth_command_velocity(self, env_id: int, desired_velocity_mm_s: float, hard_stop: bool = False) -> float:
+        if hard_stop:
+            self.command_velocity_filtered_mm_s[env_id] = 0.0
+            return 0.0
+
+        desired_velocity_mm_s = max(0.0, float(desired_velocity_mm_s))
+        prev = float(self.command_velocity_filtered_mm_s[env_id].item())
+        beta = float(getattr(self.int_cfg, "command_velocity_ema_beta", 0.15))
+        beta = max(0.0, min(1.0, beta))
+
+        ema_velocity = beta * desired_velocity_mm_s + (1.0 - beta) * prev
+        max_delta_up = max(0.0, float(getattr(self.int_cfg, "command_velocity_max_delta_up_mm_s", 12.0)))
+        max_delta_down = max(0.0, float(getattr(self.int_cfg, "command_velocity_max_delta_down_mm_s", 36.0)))
+        lower = prev - max_delta_down
+        upper = prev + max_delta_up
+        smoothed_velocity = max(lower, min(upper, ema_velocity))
+        smoothed_velocity = max(0.0, smoothed_velocity)
+
+        self.command_velocity_filtered_mm_s[env_id] = smoothed_velocity
+        return smoothed_velocity
+
+    def _smooth_command_mrr(self, env_id: int, desired_mrr_n_mm_s: float, hard_stop: bool = False) -> float:
+        if hard_stop:
+            self.command_mrr_filtered_n_mm_s[env_id] = 0.0
+            return 0.0
+
+        max_mrr = float(self.int_cfg.target_mrr_n_mm_s) * float(getattr(self.int_cfg, "command_mrr_max_ratio", 1.6))
+        desired_mrr_n_mm_s = max(0.0, min(max_mrr, float(desired_mrr_n_mm_s)))
+        prev = float(self.command_mrr_filtered_n_mm_s[env_id].item())
+        beta = float(getattr(self.int_cfg, "command_mrr_ema_beta", 0.25))
+        beta = max(0.0, min(1.0, beta))
+
+        ema_mrr = beta * desired_mrr_n_mm_s + (1.0 - beta) * prev
+        max_delta_up = max(0.0, float(getattr(self.int_cfg, "command_mrr_max_delta_up_n_mm_s", 80.0)))
+        max_delta_down = max(0.0, float(getattr(self.int_cfg, "command_mrr_max_delta_down_n_mm_s", 160.0)))
+        lower = prev - max_delta_down
+        upper = prev + max_delta_up
+        smoothed_mrr = max(lower, min(upper, ema_mrr))
+        smoothed_mrr = max(0.0, min(max_mrr, smoothed_mrr))
+
+        self.command_mrr_filtered_n_mm_s[env_id] = smoothed_mrr
+        return smoothed_mrr
+
     def _smoothstep(self, x: float) -> float:
         x = max(0.0, min(1.0, x))
         return x * x * (3.0 - 2.0 * x)
@@ -715,8 +775,10 @@ class AdmittanceControlAction(ActionTerm):
         self.path_done[env_ids] = False
         self.current_index_delta[env_ids] = 0.0
         self.current_sliding_velocity_mm_s[env_ids] = 0.0
+        self.command_velocity_filtered_mm_s[env_ids] = 0.0
         self.current_abs_fz[env_ids] = 0.0
         self.current_mrr_n_mm_s[env_ids] = 0.0
+        self.command_mrr_filtered_n_mm_s[env_ids] = 0.0
         self.cumulative_removal[env_ids] = 0.0
         self.current_path_tracking_error_mm[env_ids] = 0.0
         self.force_normal_offset_mm[env_ids] = 0.0
@@ -806,8 +868,10 @@ class AdmittanceControlAction(ActionTerm):
                 self.cmd_target_xyz_mm[env_id] = target_pos_mm
                 self.current_index_delta[env_id] = 0.0
                 self.current_sliding_velocity_mm_s[env_id] = 0.0
+                self.command_velocity_filtered_mm_s[env_id] = 0.0
                 self.current_abs_fz[env_id] = abs(float(wrench6[env_id, 2].item()))
                 self.current_mrr_n_mm_s[env_id] = 0.0
+                self.command_mrr_filtered_n_mm_s[env_id] = 0.0
                 self.current_path_tracking_error_mm[env_id] = float(torch.linalg.norm(target_pos_mm[0:2] - self.approach_start_pos_mm[env_id, 0:2]).item())
                 self.force_normal_offset_mm[env_id] = 0.0
                 self.force_normal_error_i[env_id] = 0.0
@@ -832,6 +896,8 @@ class AdmittanceControlAction(ActionTerm):
                     self.path_cursor[env_id] = 0.0
                     self.progress_rate_filtered[env_id] = float(self.int_cfg.base_index_rate)
                     self.command_rate_filtered[env_id] = float(self.int_cfg.min_index_rate)
+                    self.command_velocity_filtered_mm_s[env_id] = 0.0
+                    self.command_mrr_filtered_n_mm_s[env_id] = 0.0
                     self._reset_force_controller_for_env(env_id, float(self.traj_positions[0, 2].item()))
                 continue
 
@@ -925,6 +991,7 @@ class AdmittanceControlAction(ActionTerm):
                 tracking_scale = self._path_tracking_rate_scale(path_tracking_error_mm)
                 final_rate *= tracking_scale
                 hard_stop = False
+                force_limited = False
                 if tracking_scale <= 0.0:
                     final_rate = 0.0
                     hard_stop = True
@@ -935,6 +1002,7 @@ class AdmittanceControlAction(ActionTerm):
                     if force_limited_rate < final_rate:
                         final_rate = force_limited_rate
                         self.command_rate_filtered[env_id] = final_rate
+                        force_limited = True
                     else:
                         final_rate = self._smooth_command_rate(env_id, final_rate, hard_stop=hard_stop)
                 else:
@@ -942,6 +1010,26 @@ class AdmittanceControlAction(ActionTerm):
 
                 segment_length_mm = float(self.traj_segment_lengths_mm[idx].item())
                 sliding_velocity_mm_s = final_rate * segment_length_mm / max(self._step_dt_local, 1.0e-8)
+                if force_limited:
+                    self.command_velocity_filtered_mm_s[env_id] = sliding_velocity_mm_s
+                    self.command_mrr_filtered_n_mm_s[env_id] = abs_fz * sliding_velocity_mm_s
+                else:
+                    sliding_velocity_mm_s = self._smooth_command_velocity(
+                        env_id,
+                        sliding_velocity_mm_s,
+                        hard_stop=hard_stop,
+                    )
+                    desired_mrr_n_mm_s = abs_fz * sliding_velocity_mm_s
+                    smoothed_mrr_n_mm_s = self._smooth_command_mrr(
+                        env_id,
+                        desired_mrr_n_mm_s,
+                        hard_stop=hard_stop,
+                    )
+                    sliding_velocity_mm_s = smoothed_mrr_n_mm_s / max(abs_fz, self.int_cfg.force_eps_n)
+                    self.command_velocity_filtered_mm_s[env_id] = sliding_velocity_mm_s
+                final_rate = sliding_velocity_mm_s * self._step_dt_local / max(segment_length_mm, 1.0e-6)
+                final_rate = max(0.0, min(self.int_cfg.max_index_rate, final_rate))
+                self.command_rate_filtered[env_id] = final_rate
 
                 self.current_index_delta[env_id] = final_rate
                 self.current_sliding_velocity_mm_s[env_id] = sliding_velocity_mm_s

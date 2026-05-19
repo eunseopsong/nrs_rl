@@ -109,7 +109,7 @@ class ActionsCfg:
 
             action_dim=1,
 
-            target_mrr_n_mm_s=2500.0,
+            target_mrr_n_mm_s=500.0,
             speed_action_scale=0.35,
             base_index_rate=48.0,
             min_index_rate=1.0,
@@ -118,6 +118,13 @@ class ActionsCfg:
             command_rate_ema_beta=0.20,
             command_rate_max_delta_up=4.0,
             command_rate_max_delta_down=12.0,
+            command_velocity_ema_beta=0.15,
+            command_velocity_max_delta_up_mm_s=12.0,
+            command_velocity_max_delta_down_mm_s=36.0,
+            command_mrr_ema_beta=0.25,
+            command_mrr_max_delta_up_n_mm_s=80.0,
+            command_mrr_max_delta_down_n_mm_s=160.0,
+            command_mrr_max_ratio=1.6,
             force_eps_n=1.0,
             force_tracking_ready_ratio=0.8,
             min_force_rate_scale=0.25,
@@ -264,8 +271,8 @@ class RewardsCfg:
         weight=5.0,
         params={
             "target_mrr": 500.0,
-            "mrr_sigma_start": 1.2,
-            "mrr_sigma_end": 0.3,
+            "mrr_sigma_start": 0.45,
+            "mrr_sigma_end": 0.18,
             "curriculum_ramp": 200,
             "min_velocity": 1.0,
         },
@@ -274,7 +281,7 @@ class RewardsCfg:
     inverse_fv_bonus = RewardTermCfg(
         func=custom_rewards.inverse_fv_bonus,
         weight=2.0,
-        params={"target_mrr": 500.0, "bonus_sigma_start": 0.8, "bonus_sigma_end": 0.25, "curriculum_ramp": 200},
+        params={"target_mrr": 500.0, "bonus_sigma_start": 0.45, "bonus_sigma_end": 0.18, "curriculum_ramp": 200},
     )
 
     # ── 2. 강력한 헌법 (완주 & 커버리지 강제) ──
