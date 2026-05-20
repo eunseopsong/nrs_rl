@@ -256,6 +256,7 @@ class ActionIntegrationCfg:
     force_spike_delta_n: float = 1.20
     force_spike_hold_steps: int = 8
     force_spike_velocity_decay: float = 0.92
+    force_velocity_compensation: float = 0.25
     command_mrr_ema_beta: float = 0.12
     command_mrr_max_delta_up_n_mm_s: float = 35.0
     command_mrr_max_delta_down_n_mm_s: float = 70.0
@@ -282,6 +283,7 @@ class ActionIntegrationCfg:
     force_band_saturated_min_n: float = 7.5
     force_band_low_speed_scale: float = 0.65
     force_band_high_speed_scale: float = 0.45
+    force_band_hold_progress: bool = True
     force_steady_error_band_n: float = 5.0
     force_overload_ratio: float = 1.5
     force_overload_rate_scale: float = 0.02
@@ -571,14 +573,16 @@ class AdmittanceControlAction(ActionTerm):
         self.force_controllers[env_id].reset(float(xd_mm) / 1000.0)
 
     def _compute_progress_rate(self, env_id: int, idx: int, abs_fz: float) -> float:
-        denom = max(abs_fz, self.int_cfg.force_eps_n)
+        target_abs_fz = abs(float(self.traj_forces[idx, 2].item()))
+        nominal_force = target_abs_fz if target_abs_fz > self.int_cfg.force_eps_n else abs_fz
+        force_blend = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_velocity_compensation", 0.25))))
+        denom = (1.0 - force_blend) * max(nominal_force, self.int_cfg.force_eps_n) + force_blend * max(abs_fz, self.int_cfg.force_eps_n)
         target_velocity_mm_s = float(self.int_cfg.target_mrr_n_mm_s) / denom
         segment_length_mm = float(self.traj_segment_lengths_mm[idx].item())
         raw_rate = target_velocity_mm_s * self._step_dt_local / max(segment_length_mm, 1.0e-6)
 
         raw_rate = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, raw_rate))
 
-        target_abs_fz = abs(float(self.traj_forces[idx, 2].item()))
         if target_abs_fz > self.int_cfg.force_eps_n:
             steady_band = float(getattr(self.int_cfg, "force_steady_error_band_n", 5.0))
             if abs_fz > target_abs_fz + steady_band:
@@ -673,9 +677,8 @@ class AdmittanceControlAction(ActionTerm):
         if hold_count <= 0:
             return velocity_mm_s
 
-        decay = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_spike_velocity_decay", 0.92))))
         prev = float(self.command_velocity_filtered_mm_s[env_id].item())
-        protected_velocity = min(float(velocity_mm_s), prev * decay)
+        protected_velocity = prev
         self.command_velocity_filtered_mm_s[env_id] = max(0.0, protected_velocity)
         self.force_spike_hold_count[env_id] = max(0, hold_count - 1)
         return max(0.0, protected_velocity)
@@ -1058,6 +1061,7 @@ class AdmittanceControlAction(ActionTerm):
                 target_abs_fz = abs(target_fz)
                 force_rate_limit = None
                 force_limit_is_emergency = False
+                force_band_hold = False
                 if target_abs_fz > self.int_cfg.force_eps_n:
                     overload_force = float(self.int_cfg.force_overload_ratio) * target_abs_fz
                     if abs_fz > overload_force:
@@ -1066,6 +1070,7 @@ class AdmittanceControlAction(ActionTerm):
                     band_min = float(getattr(self.int_cfg, "force_band_min_n", 0.0))
                     band_max = float(getattr(self.int_cfg, "force_band_max_n", 0.0))
                     if band_min > 0.0 and band_max > band_min and (abs_fz < band_min or abs_fz > band_max):
+                        force_band_hold = bool(getattr(self.int_cfg, "force_band_hold_progress", True))
                         if abs_fz < band_min:
                             low_scale = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_band_low_speed_scale", 0.65))))
                             deficit_ratio = min(1.0, max(0.0, (band_min - abs_fz) / max(band_min, self.int_cfg.force_eps_n)))
@@ -1074,15 +1079,15 @@ class AdmittanceControlAction(ActionTerm):
                             high_scale = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_band_high_speed_scale", 0.45))))
                             excess_ratio = min(1.0, max(0.0, (abs_fz - band_max) / max(band_max, self.int_cfg.force_eps_n)))
                             final_rate *= 1.0 - (1.0 - high_scale) * excess_ratio
-                        saturated_min = float(getattr(self.int_cfg, "force_band_saturated_min_n", band_min))
-                        mild_underforce = abs_fz < band_min and abs_fz >= saturated_min
-                        if not mild_underforce:
-                            band_limit = float(getattr(self.int_cfg, "force_band_index_rate_limit", 0.05))
-                            force_rate_limit = band_limit if force_rate_limit is None else min(force_rate_limit, band_limit)
+                        band_limit = float(getattr(self.int_cfg, "force_band_index_rate_limit", 0.05))
+                        force_rate_limit = band_limit if force_rate_limit is None else min(force_rate_limit, band_limit)
                 tracking_scale = self._path_tracking_rate_scale(path_tracking_error_mm)
                 final_rate *= tracking_scale
                 hard_stop = False
                 force_limited = False
+                if force_band_hold:
+                    final_rate = 0.0
+                    hard_stop = True
                 if tracking_scale <= 0.0:
                     final_rate = 0.0
                     hard_stop = True
@@ -1104,7 +1109,12 @@ class AdmittanceControlAction(ActionTerm):
 
                 segment_length_mm = float(self.traj_segment_lengths_mm[idx].item())
                 sliding_velocity_mm_s = final_rate * segment_length_mm / max(self._step_dt_local, 1.0e-8)
-                if force_limited:
+                if force_band_hold:
+                    sliding_velocity_mm_s = 0.0
+                    self.command_velocity_filtered_mm_s[env_id] = 0.0
+                    self.command_mrr_filtered_n_mm_s[env_id] = 0.0
+                    self.command_rate_filtered[env_id] = 0.0
+                elif force_limited:
                     sliding_velocity_mm_s = self._smooth_command_velocity(
                         env_id,
                         sliding_velocity_mm_s,
