@@ -284,6 +284,8 @@ class ActionIntegrationCfg:
     force_band_low_speed_scale: float = 0.65
     force_band_high_speed_scale: float = 0.45
     force_band_hold_progress: bool = True
+    force_severe_underforce_n: float = 7.0
+    force_severe_underforce_hold_progress: bool = True
     force_steady_error_band_n: float = 5.0
     force_overload_ratio: float = 1.5
     force_overload_rate_scale: float = 0.02
@@ -678,7 +680,13 @@ class AdmittanceControlAction(ActionTerm):
             return velocity_mm_s
 
         prev = float(self.command_velocity_filtered_mm_s[env_id].item())
-        protected_velocity = prev
+        abs_fz = float(self.filtered_abs_fz[env_id].item())
+        band_min = float(getattr(self.int_cfg, "force_band_min_n", 0.0))
+        if band_min > 0.0 and abs_fz < band_min:
+            decay = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_spike_velocity_decay", 0.92))))
+            protected_velocity = min(float(velocity_mm_s), prev * decay)
+        else:
+            protected_velocity = prev
         self.command_velocity_filtered_mm_s[env_id] = max(0.0, protected_velocity)
         self.force_spike_hold_count[env_id] = max(0, hold_count - 1)
         return max(0.0, protected_velocity)
@@ -1071,16 +1079,24 @@ class AdmittanceControlAction(ActionTerm):
                     band_max = float(getattr(self.int_cfg, "force_band_max_n", 0.0))
                     if band_min > 0.0 and band_max > band_min and (abs_fz < band_min or abs_fz > band_max):
                         force_band_hold = bool(getattr(self.int_cfg, "force_band_hold_progress", True))
+                        force_band_should_limit_rate = True
                         if abs_fz < band_min:
+                            severe_min = float(getattr(self.int_cfg, "force_severe_underforce_n", 0.0))
+                            if severe_min > 0.0 and abs_fz < severe_min:
+                                force_band_hold = bool(getattr(self.int_cfg, "force_severe_underforce_hold_progress", True))
                             low_scale = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_band_low_speed_scale", 0.65))))
                             deficit_ratio = min(1.0, max(0.0, (band_min - abs_fz) / max(band_min, self.int_cfg.force_eps_n)))
                             final_rate *= 1.0 - (1.0 - low_scale) * deficit_ratio
+                            saturated_min = float(getattr(self.int_cfg, "force_band_saturated_min_n", band_min))
+                            if abs_fz >= saturated_min:
+                                force_band_should_limit_rate = False
                         else:
                             high_scale = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_band_high_speed_scale", 0.45))))
                             excess_ratio = min(1.0, max(0.0, (abs_fz - band_max) / max(band_max, self.int_cfg.force_eps_n)))
                             final_rate *= 1.0 - (1.0 - high_scale) * excess_ratio
-                        band_limit = float(getattr(self.int_cfg, "force_band_index_rate_limit", 0.05))
-                        force_rate_limit = band_limit if force_rate_limit is None else min(force_rate_limit, band_limit)
+                        if force_band_should_limit_rate:
+                            band_limit = float(getattr(self.int_cfg, "force_band_index_rate_limit", 0.05))
+                            force_rate_limit = band_limit if force_rate_limit is None else min(force_rate_limit, band_limit)
                 tracking_scale = self._path_tracking_rate_scale(path_tracking_error_mm)
                 final_rate *= tracking_scale
                 hard_stop = False
