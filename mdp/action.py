@@ -286,6 +286,11 @@ class ActionIntegrationCfg:
     force_band_hold_progress: bool = True
     force_severe_underforce_n: float = 7.0
     force_severe_underforce_hold_progress: bool = True
+    surface_uniformity_feedback_gain: float = 0.0
+    surface_uniformity_feedback_deadband: float = 0.08
+    surface_uniformity_feedback_min_scale: float = 0.85
+    surface_uniformity_feedback_max_scale: float = 1.15
+    surface_uniformity_feedback_warmup_bins: int = 8
     force_steady_error_band_n: float = 5.0
     force_overload_ratio: float = 1.5
     force_overload_rate_scale: float = 0.02
@@ -715,6 +720,39 @@ class AdmittanceControlAction(ActionTerm):
         self.command_mrr_filtered_n_mm_s[env_id] = smoothed_mrr
         return smoothed_mrr
 
+    def _surface_uniformity_rate_scale(self, env_id: int, idx: int) -> float:
+        gain = max(0.0, float(getattr(self.int_cfg, "surface_uniformity_feedback_gain", 0.0)))
+        if gain <= 0.0:
+            return 1.0
+
+        warmup_bins = max(1, int(getattr(self.int_cfg, "surface_uniformity_feedback_warmup_bins", 8)))
+        last_idx = int(self.surface_last_index[env_id].item())
+        if last_idx < warmup_bins:
+            return 1.0
+
+        idx = int(min(max(0, idx), self.traj_length - 1))
+        upto = min(max(last_idx, idx), self.traj_length - 1)
+        values = self.surface_removal_by_index[env_id, : upto + 1]
+        visited_values = values[values > 0.0]
+        if visited_values.numel() < warmup_bins:
+            return 1.0
+
+        mean_removal = float(torch.mean(visited_values).item())
+        if mean_removal <= 1.0e-6:
+            return 1.0
+
+        current_removal = float(self.surface_removal_by_index[env_id, idx].item())
+        relative_error = (mean_removal - current_removal) / mean_removal
+        deadband = max(0.0, float(getattr(self.int_cfg, "surface_uniformity_feedback_deadband", 0.08)))
+        if abs(relative_error) <= deadband:
+            return 1.0
+
+        signed_error = relative_error - deadband if relative_error > 0.0 else relative_error + deadband
+        scale = 1.0 - gain * signed_error
+        min_scale = max(0.0, float(getattr(self.int_cfg, "surface_uniformity_feedback_min_scale", 0.85)))
+        max_scale = max(min_scale, float(getattr(self.int_cfg, "surface_uniformity_feedback_max_scale", 1.15)))
+        return max(min_scale, min(max_scale, scale))
+
     def _smoothstep(self, x: float) -> float:
         x = max(0.0, min(1.0, x))
         return x * x * (3.0 - 2.0 * x)
@@ -1065,6 +1103,7 @@ class AdmittanceControlAction(ActionTerm):
                 action_scale = 1.0 + float(self.int_cfg.speed_action_scale) * float(self._processed_actions[env_id, 0].item())
                 action_scale = max(0.05, action_scale)
                 final_rate = base_rate * action_scale
+                final_rate *= self._surface_uniformity_rate_scale(env_id, idx_for_rate)
                 final_rate = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, final_rate))
                 target_abs_fz = abs(target_fz)
                 force_rate_limit = None

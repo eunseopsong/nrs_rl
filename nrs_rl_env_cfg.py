@@ -46,7 +46,8 @@ from nrs_rl.tasks.manager_based.nrs_rl.assets.assets.robots.ur10e_w_spindle impo
     UR10E_W_SPINDLE_HIGH_PD_CFG,
 )
 
-HDF5_TRAJ_PATH = "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/cmd_continue9D.h5"
+# HDF5_TRAJ_PATH = "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/cmd_continue9D_flat.h5"
+HDF5_TRAJ_PATH = "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/cmd_continue9D_convex_2.h5"
 
 
 @configclass
@@ -157,6 +158,11 @@ class ActionsCfg:
             force_band_hold_progress=False,
             force_severe_underforce_n=7.0,
             force_severe_underforce_hold_progress=False,
+            surface_uniformity_feedback_gain=0.18,
+            surface_uniformity_feedback_deadband=0.10,
+            surface_uniformity_feedback_min_scale=0.90,
+            surface_uniformity_feedback_max_scale=1.08,
+            surface_uniformity_feedback_warmup_bins=10,
             path_tracking_slowdown_start_mm=2.0,
             path_tracking_stop_mm=8.0,
             path_tracking_min_rate_scale=0.0,

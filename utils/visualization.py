@@ -79,6 +79,14 @@ MIN_CONTACT_FORCE_FRACTION = 0.05
 MIN_SLIDING_SPEED_MM_S = 0.1
 HEATMAP_SMOOTHING_SIGMA_MM = 8.0
 HEATMAP_MIN_SMOOTHING_SIGMA_CELLS = 2.6
+HEATMAP_DISPLAY_GAMMA = 0.82
+HEATMAP_DISPLAY_SMOOTHING_MULTIPLIER = 1.45
+HEATMAP_DISPLAY_NOISE_FLOOR_FRACTION = 0.035
+PLOT_MM_TO_M = 1.0e-3
+PLOT_SIGNAL_SMOOTHING_WINDOW = 101
+PLOT_STABILITY_BAND_FRACTION = 0.05
+PLOT_AXIS_EXPAND_FACTOR = 4.0
+PLOT_MIN_RELATIVE_AXIS_SPAN = 0.85
 
 _surface_grid = np.zeros(
     (GRID_SIZE, GRID_SIZE),
@@ -132,6 +140,67 @@ def moving_average(x, w=5):
     if len(x) < w:
         return x
     return np.convolve(x, np.ones(w) / w, mode="same")
+
+
+def _smooth_for_plot(x, window=PLOT_SIGNAL_SMOOTHING_WINDOW):
+    x = np.asarray(x, dtype=float)
+    if window <= 1 or len(x) < 3:
+        return x
+    window = min(int(window), len(x))
+    if window % 2 == 0:
+        window -= 1
+    if window < 3:
+        return x
+    finite_mask = np.isfinite(x)
+    if not np.any(finite_mask):
+        return x
+    if not np.all(finite_mask):
+        idx = np.arange(len(x))
+        x = np.interp(idx, idx[finite_mask], x[finite_mask])
+    pad = window // 2
+    padded = np.pad(x, pad_width=pad, mode="edge")
+    kernel = np.ones(window, dtype=float) / float(window)
+    return np.convolve(padded, kernel, mode="valid")
+
+
+def _finite_percentile_limits(x, lower=2.0, upper=98.0, pad_fraction=0.12):
+    values = np.asarray(x, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return None
+    lo = float(np.nanpercentile(values, lower))
+    hi = float(np.nanpercentile(values, upper))
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        return None
+    if hi <= lo:
+        center = 0.5 * (hi + lo)
+        spread = max(abs(center) * 0.05, 1.0e-6)
+        return center - spread, center + spread
+    pad = (hi - lo) * pad_fraction
+    return lo - pad, hi + pad
+
+
+def _wide_axis_limits_for_plot(x, center=None, expand_factor=PLOT_AXIS_EXPAND_FACTOR, min_relative_span=PLOT_MIN_RELATIVE_AXIS_SPAN):
+    values = np.asarray(x, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return None
+    lo = float(np.nanpercentile(values, 1.0))
+    hi = float(np.nanpercentile(values, 99.0))
+    if center is None:
+        center = float(np.nanmean(values))
+    center = float(center)
+    if not np.isfinite(lo) or not np.isfinite(hi) or not np.isfinite(center):
+        return None
+    data_span = max(hi - lo, 1.0e-9)
+    min_span = max(abs(center) * float(min_relative_span), 1.0e-9)
+    span = max(data_span * float(expand_factor), min_span)
+    lower = center - 0.5 * span
+    upper = center + 0.5 * span
+    if lower < 0.0 and np.nanmin(values) >= 0.0:
+        upper += -lower
+        lower = 0.0
+    return lower, upper
 
 
 def update_surface_grid(x, y, removal):
@@ -664,7 +733,6 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
 
     # --- 1. Local Removal Heatmap ---
     bins = min(140, max(64, int(np.sqrt(len(x)) * 3)))
-    grid_removal, _, _ = np.histogram2d(x, y, bins=bins, range=[extent[:2], extent[2:]], weights=dremoval_plot)
     cell_size_x = (extent[1] - extent[0]) / max(bins, 1)
     cell_size_y = (extent[3] - extent[2]) / max(bins, 1)
     mean_cell_size = max(0.5 * (cell_size_x + cell_size_y), 1.0e-6)
@@ -672,58 +740,83 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         HEATMAP_MIN_SMOOTHING_SIGMA_CELLS,
         HEATMAP_SMOOTHING_SIGMA_MM / mean_cell_size,
     )
-    grid_removal_smoothed = gaussian_filter(grid_removal.T, sigma=smoothing_sigma_cells)
+    grid_removal, _, _ = np.histogram2d(x, y, bins=bins, range=[extent[:2], extent[2:]], weights=dremoval_plot)
+    grid_removal_smoothed = gaussian_filter(
+        grid_removal.T,
+        sigma=smoothing_sigma_cells * HEATMAP_DISPLAY_SMOOTHING_MULTIPLIER,
+    )
     max_removal = float(np.nanmax(grid_removal_smoothed)) if grid_removal_smoothed.size else 0.0
     if max_removal > 0.0 and np.isfinite(max_removal):
         positive_values = grid_removal_smoothed[grid_removal_smoothed > 0.0]
         robust_max = float(np.nanpercentile(positive_values, 99.5))
         normalizer = max(robust_max, max_removal * 0.25, 1e-12)
         grid_display = np.clip(grid_removal_smoothed / normalizer, 0.0, 1.0)
+        grid_display[grid_display < HEATMAP_DISPLAY_NOISE_FLOOR_FRACTION] = 0.0
+        grid_display = np.power(grid_display, HEATMAP_DISPLAY_GAMMA)
     else:
-        positive_values = np.array([], dtype=float)
         grid_display = grid_removal_smoothed
 
-    fig, ax = plt.subplots(figsize=(9, 7))
-    im = ax.imshow(grid_display, origin="lower", extent=extent, cmap="viridis", vmin=0.0, vmax=1.0, interpolation="bilinear")
-    fig.colorbar(im, label="Cell removal [a.u.]")
-    ax.set_title("Removal Heatmap")
-    ax.set_xlabel("X [mm]")
-    ax.set_ylabel("Y [mm]")
+    fig, ax = plt.subplots(figsize=(9.8, 7.6), facecolor="white")
+    im = ax.imshow(
+        grid_display,
+        origin="lower",
+        extent=extent,
+        cmap="Blues",
+        vmin=0.0,
+        vmax=1.0,
+        interpolation="bicubic",
+    )
+    colorbar = fig.colorbar(im, ax=ax, fraction=0.048, pad=0.035)
+    colorbar.set_label("Cell removal [a.u.]", fontsize=11)
+    colorbar.ax.tick_params(labelsize=10)
+    ax.set_title("Removal Heatmap", fontsize=15, pad=12)
+    ax.set_xlabel("X [mm]", fontsize=11)
+    ax.set_ylabel("Y [mm]", fontsize=11)
     ax.set_aspect("equal", adjustable="box")
-    display_positive_values = grid_display[grid_display > 0.0]
-    stats_mean = float(np.mean(display_positive_values)) if display_positive_values.size else 0.0
-    stats_std = float(np.std(display_positive_values)) if display_positive_values.size else 0.0
-    contact_samples = int(np.count_nonzero(dremoval_plot > 0.0))
-    stats_text = (
-        f"mean = {stats_mean:.6f} [a.u.]\n"
-        f"std  = {stats_std:.6f} [a.u.]\n"
-        f"samples = {len(t_plot)}\n"
-        f"contact = {contact_samples}"
-    )
-    ax.text(
-        0.02,
-        0.98,
-        stats_text,
-        transform=ax.transAxes,
-        ha="left",
-        va="top",
-        fontsize=9,
-        bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "black", "alpha": 0.85},
-    )
+    ax.tick_params(labelsize=10)
+    ax.grid(False)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.9)
+        spine.set_color("#333333")
     fig.tight_layout()
-    fig.savefig(out_dir / "01_removal_heatmap.png", dpi=200)
+    fig.savefig(out_dir / "01_removal_heatmap.png", dpi=360)
     plt.close(fig)
 
+    removal_rate_plot_m_s = removal_rate_plot * PLOT_MM_TO_M
+    removal_rate_plot_m_s_smooth = _smooth_for_plot(removal_rate_plot_m_s)
+    rate_mean = float(np.nanmean(removal_rate_plot_m_s)) if len(removal_rate_plot_m_s) else 0.0
+    rate_band = abs(rate_mean) * PLOT_STABILITY_BAND_FRACTION
+
     fig2, ax2 = plt.subplots(figsize=(9, 5))
-    ax2.plot(t_plot, removal_rate_plot, color="tab:blue", linewidth=1.8)
-    ax2.axhline(np.mean(removal_rate_plot), color="tab:orange", linestyle="--", linewidth=1.2, label="contact-window mean")
+    ax2.plot(t_plot, removal_rate_plot_m_s, color="tab:blue", linewidth=0.8, alpha=0.14, label="raw")
+    ax2.plot(t_plot, removal_rate_plot_m_s_smooth, color="tab:blue", linewidth=2.1, label="smoothed trend")
+    if rate_band > 0.0:
+        ax2.fill_between(
+            t_plot,
+            rate_mean - rate_band,
+            rate_mean + rate_band,
+            color="tab:green",
+            alpha=0.14,
+            linewidth=0.0,
+            label=f"mean +/- {PLOT_STABILITY_BAND_FRACTION * 100:.0f}%",
+        )
+    ax2.axhline(
+        rate_mean,
+        color="tab:orange",
+        linestyle="--",
+        linewidth=1.2,
+        label="contact-window mean",
+    )
     ax2.set_title(f"Episode {_episode_counter} Removal Rate")
     ax2.set_xlabel("Time [s]")
-    ax2.set_ylabel("Normal Force x Sliding Velocity")
+    ax2.set_ylabel("Normal Force x Sliding Velocity [N*m/s]")
+    rate_limits = _wide_axis_limits_for_plot(removal_rate_plot_m_s_smooth, center=rate_mean)
+    if rate_limits is not None:
+        ax2.set_ylim(*rate_limits)
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     fig2.tight_layout()
-    fig2.savefig(out_dir / "02_heatmap_value_vs_time.png", dpi=200)
+    fig2.savefig(out_dir / "02_heatmap_value_vs_time.png", dpi=300)
     plt.close(fig2)
 
     normal_force = _normal_force_from_force3(force3)
@@ -734,14 +827,27 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         axes3[0].legend()
     axes3[0].set_title("Normal Force")
     axes3[0].set_ylabel("Force [N]")
+    force_limits = _wide_axis_limits_for_plot(normal_force, center=float(np.nanmean(normal_force)) if len(normal_force) else None)
+    if force_limits is not None:
+        axes3[0].set_ylim(*force_limits)
     axes3[0].grid(True, alpha=0.3)
-    axes3[1].plot(t, sliding_velocity, color="tab:green", linewidth=1.5)
+    sliding_velocity_m_s = sliding_velocity * PLOT_MM_TO_M
+    sliding_velocity_m_s_smooth = _smooth_for_plot(sliding_velocity_m_s)
+    axes3[1].plot(t, sliding_velocity_m_s, color="tab:green", linewidth=0.7, alpha=0.08, label="raw")
+    axes3[1].plot(t, sliding_velocity_m_s_smooth, color="tab:green", linewidth=2.2, label="smoothed trend")
     if contact_start_idx is not None:
         axes3[1].axvline(t[plot_start], color="0.25", linestyle="--", linewidth=1.0)
     axes3[1].set_title("Sliding Velocity")
     axes3[1].set_xlabel("Time [s]")
-    axes3[1].set_ylabel("Velocity [mm/s]")
+    axes3[1].set_ylabel("Velocity [m/s]")
+    velocity_limits = _wide_axis_limits_for_plot(
+        sliding_velocity_m_s_smooth,
+        center=float(np.nanmean(sliding_velocity_m_s_smooth)) if len(sliding_velocity_m_s_smooth) else None,
+    )
+    if velocity_limits is not None:
+        axes3[1].set_ylim(*velocity_limits)
     axes3[1].grid(True, alpha=0.3)
+    axes3[1].legend(loc="best")
     fig3.tight_layout()
     fig3.savefig(out_dir / "03_signals_subplot.png", dpi=200)
     plt.close(fig3)
