@@ -966,13 +966,8 @@ def _save_velocity_comparison_plots(
     constant_rate = profiles["constant_rate"]
     reward_action_rate = profiles["reward_action_rate"]
 
-    constant_display, constant_grid = _mean_rate_heatmap_display(x, y, constant_rate, extent, bins)
-    reward_display, reward_grid = _mean_rate_heatmap_display(x, y, reward_action_rate, extent, bins)
-    display_range = _comparison_heatmap_display_range(constant_grid, reward_grid)
-    if display_range is not None:
-        display_lower, display_upper = display_range
-        constant_display = _heatmap_display_with_range(constant_grid, display_lower, display_upper)
-        reward_display = _heatmap_display_with_range(reward_grid, display_lower, display_upper)
+    constant_display, _ = _removal_heatmap_display(x, y, constant_rate, extent, bins)
+    reward_display, _ = _removal_heatmap_display(x, y, reward_action_rate, extent, bins)
 
     constant_cell_cv = profiles["constant_rate_cv"]
     reward_cell_cv = profiles["reward_rate_cv"]
