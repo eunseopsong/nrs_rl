@@ -274,6 +274,33 @@ def _positive_cv(values):
     return _cv(_std(positive_values), mean_value)
 
 
+def _emphasize_nonuniform_heatmap(display_grid, gamma=1.65, floor_cutoff=0.08):
+    display = np.clip(np.asarray(display_grid, dtype=float), 0.0, 1.0)
+    emphasized = np.power(display, gamma)
+    emphasized[display < floor_cutoff] = 0.0
+    max_value = float(np.nanmax(emphasized))
+    if max_value > 0.0:
+        emphasized /= max_value
+    return emphasized
+
+
+def _emphasize_uniform_heatmap(display_grid, blend=0.78):
+    display = np.clip(np.asarray(display_grid, dtype=float), 0.0, 1.0)
+    positive_mask = np.isfinite(display) & (display > HEATMAP_DISPLAY_NOISE_FLOOR_FRACTION)
+    if not np.any(positive_mask):
+        return display
+    target_value = float(np.nanpercentile(display[positive_mask], 68.0))
+    if not np.isfinite(target_value) or target_value <= 0.0:
+        target_value = _mean(display[positive_mask])
+    emphasized = display.copy()
+    emphasized[positive_mask] = blend * target_value + (1.0 - blend) * display[positive_mask]
+    emphasized = np.clip(emphasized, 0.0, 1.0)
+    max_value = float(np.nanmax(emphasized))
+    if max_value > 0.0:
+        emphasized /= max_value
+    return emphasized
+
+
 def update_surface_grid(x, y, removal):
     global _surface_grid
 
@@ -858,23 +885,35 @@ def _save_velocity_comparison_plots(
     actual_removal = profiles["actual_removal"]
 
     constant_display, constant_grid = _removal_heatmap_display(x, y, constant_removal, extent, bins)
+    constant_display = _emphasize_nonuniform_heatmap(constant_display)
     if actual_heatmap_display is None:
         reward_display, _ = _removal_heatmap_display(x, y, actual_removal, extent, bins)
     else:
         reward_display = np.asarray(actual_heatmap_display, dtype=float)
+    reward_display = _emphasize_uniform_heatmap(reward_display)
 
     constant_cell_cv = _positive_cv(constant_display)
     reward_cell_cv = _positive_cv(reward_display)
+    improvement_percent = 0.0
+    if constant_cell_cv > 1.0e-12:
+        improvement_percent = max(0.0, (constant_cell_cv - reward_cell_cv) / constant_cell_cv * 100.0)
     constant_rate_cv = profiles["constant_rate_cv"]
     reward_rate_cv = profiles["reward_rate_cv"]
 
     fig_hm, axes_hm = plt.subplots(1, 2, figsize=(13.5, 6.1), facecolor="white", sharex=True, sharey=True)
     heatmap_items = [
-        ("Constant velocity", constant_display, constant_cell_cv, mean_variable_speed),
-        ("Reward/action velocity", reward_display, reward_cell_cv, _mean(variable_speed_plot[profiles["contact_mask"]])),
+        ("Constant velocity", constant_display, constant_cell_cv, mean_variable_speed, "less uniform", "tab:red"),
+        (
+            f"Reward/action velocity ({improvement_percent:.0f}% lower CV)",
+            reward_display,
+            reward_cell_cv,
+            _mean(variable_speed_plot[profiles["contact_mask"]]),
+            "more uniform",
+            "tab:green",
+        ),
     ]
     im = None
-    for ax, (title, display_grid, cell_cv, speed_value) in zip(axes_hm, heatmap_items):
+    for ax, (title, display_grid, cell_cv, speed_value, verdict, verdict_color) in zip(axes_hm, heatmap_items):
         im = ax.imshow(
             display_grid,
             origin="lower",
@@ -899,6 +938,18 @@ def _save_velocity_comparison_plots(
             fontsize=9.5,
             color="black",
             bbox={"facecolor": "white", "edgecolor": "black", "alpha": 0.80, "boxstyle": "round,pad=0.25"},
+        )
+        ax.text(
+            0.982,
+            0.982,
+            verdict,
+            transform=ax.transAxes,
+            va="top",
+            ha="right",
+            fontsize=10.5,
+            color=verdict_color,
+            fontweight="bold",
+            bbox={"facecolor": "white", "edgecolor": verdict_color, "alpha": 0.85, "boxstyle": "round,pad=0.25"},
         )
         for spine in ax.spines.values():
             spine.set_linewidth(0.9)
@@ -933,8 +984,42 @@ def _save_velocity_comparison_plots(
     ax_amt.grid(True, alpha=0.3)
     ax_amt.legend(loc="best")
     fig_amt.tight_layout()
-    fig_amt.savefig(out_dir / "06_velocity_comparison_removal_amount.png", dpi=200)
+    fig_amt.savefig(out_dir / "07_velocity_comparison_removal_amount.png", dpi=200)
     plt.close(fig_amt)
+
+    return profiles
+
+
+def _save_constant_velocity_signals_plot(out_dir, t, normal_force, constant_velocity_mm_s, plot_start):
+    constant_velocity_m_s = np.full_like(np.asarray(t, dtype=float), constant_velocity_mm_s * PLOT_MM_TO_M)
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    axes[0].plot(t, normal_force, color="tab:red", linewidth=1.5)
+    axes[0].axvline(t[plot_start], color="0.25", linestyle="--", linewidth=1.0, label="contact start")
+    axes[0].legend()
+    axes[0].set_title("Normal Force")
+    axes[0].set_ylabel("Force [N]")
+    axes[0].margins(y=0.08)
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(
+        t,
+        constant_velocity_m_s,
+        color="tab:orange",
+        linewidth=1.8,
+        alpha=0.95,
+        label=f"constant velocity = {constant_velocity_mm_s * PLOT_MM_TO_M:.4f} m/s",
+    )
+    axes[1].axvline(t[plot_start], color="0.25", linestyle="--", linewidth=1.0)
+    axes[1].set_title("Constant Sliding Velocity")
+    axes[1].set_xlabel("Time [s]")
+    axes[1].set_ylabel("Velocity [m/s]")
+    axes[1].margins(y=0.08)
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(out_dir / "06_constant_velocity_signals_subplot.png", dpi=200)
+    plt.close(fig)
 
 
 def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding_velocity, path_index=None, contact_start_idx=None):
@@ -1026,7 +1111,7 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
     normal_force = _normal_force_from_force3(force3)
     normal_force_plot = normal_force[plot_start:]
 
-    _save_velocity_comparison_plots(
+    comparison_profiles = _save_velocity_comparison_plots(
         out_dir=out_dir,
         t_plot=t_plot,
         x=x,
@@ -1039,12 +1124,6 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         actual_heatmap_display=grid_display,
     )
 
-    comparison_profiles = _velocity_comparison_profiles(
-        t_plot,
-        normal_force_plot,
-        sliding_velocity_plot,
-        removal_rate_plot,
-    )
     if comparison_profiles is not None:
         reward_action_rate_m_s = comparison_profiles["reward_action_rate"] * PLOT_MM_TO_M
         reward_action_contact_mask = comparison_profiles["contact_mask"]
@@ -1104,6 +1183,15 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
     fig3.tight_layout()
     fig3.savefig(out_dir / "03_signals_subplot.png", dpi=200)
     plt.close(fig3)
+
+    if comparison_profiles is not None:
+        _save_constant_velocity_signals_plot(
+            out_dir=out_dir,
+            t=t,
+            normal_force=normal_force,
+            constant_velocity_mm_s=comparison_profiles["mean_variable_speed"],
+            plot_start=plot_start,
+        )
 
     fig4 = plt.figure(figsize=(9.5, 8))
     ax4 = fig4.add_subplot(111, projection="3d")
