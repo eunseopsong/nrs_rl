@@ -21,6 +21,22 @@ import torch
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
+plt.rcParams.update(
+    {
+        "font.family": "DejaVu Sans",
+        "font.size": 9,
+        "axes.titlesize": 10,
+        "axes.labelsize": 9,
+        "legend.fontsize": 8,
+        "xtick.labelsize": 8,
+        "ytick.labelsize": 8,
+        "figure.titlesize": 11,
+        "axes.linewidth": 0.8,
+        "lines.linewidth": 1.4,
+        "savefig.dpi": 300,
+    }
+)
+
 # ============================================================
 # Local Imports
 # ============================================================
@@ -102,12 +118,18 @@ HEATMAP_DISPLAY_SMOOTHING_MULTIPLIER = 1.0
 HEATMAP_DISPLAY_NOISE_FLOOR_FRACTION = 0.006
 HEATMAP_DISPLAY_LOWER_PERCENTILE = 1.0
 HEATMAP_DISPLAY_UPPER_PERCENTILE = 99.2
+PRESTON_RATE_PATH_MASK_FRACTION = 0.08
 COMPARISON_REWARD_ACTION_IDEAL_BLEND = 0.88
 PLOT_MM_TO_M = 1.0e-3
 PLOT_SIGNAL_SMOOTHING_WINDOW = 101
 PLOT_STABILITY_BAND_FRACTION = 0.05
 PLOT_AXIS_EXPAND_FACTOR = 4.0
 PLOT_MIN_RELATIVE_AXIS_SPAN = 0.85
+PAPER_FORCE_COLOR = "#B2182B"
+PAPER_ADAPTIVE_COLOR = "#2166AC"
+PAPER_CONSTANT_COLOR = "#D6604D"
+PAPER_VELOCITY_COLOR = "#1B7837"
+PAPER_REFERENCE_COLOR = "#4D4D4D"
 
 _surface_grid = np.zeros(
     (GRID_SIZE, GRID_SIZE),
@@ -267,34 +289,99 @@ def _removal_heatmap_display(x, y, removal, extent, bins):
     return grid_display, grid_smoothed
 
 
+def _mean_rate_heatmap_display(x, y, rate, extent, bins):
+    weights = np.asarray(rate, dtype=float)
+    grid_sum, _, _ = np.histogram2d(x, y, bins=bins, range=[extent[:2], extent[2:]], weights=weights)
+    grid_count, _, _ = np.histogram2d(x, y, bins=bins, range=[extent[:2], extent[2:]])
+
+    cell_size_x = (extent[1] - extent[0]) / max(bins, 1)
+    cell_size_y = (extent[3] - extent[2]) / max(bins, 1)
+    mean_cell_size = max(0.5 * (cell_size_x + cell_size_y), 1.0e-6)
+    smoothing_sigma_cells = max(
+        HEATMAP_MIN_SMOOTHING_SIGMA_CELLS,
+        HEATMAP_SMOOTHING_SIGMA_MM / mean_cell_size,
+    )
+    count_smoothed = gaussian_filter(
+        grid_count.T,
+        sigma=smoothing_sigma_cells * HEATMAP_DISPLAY_SMOOTHING_MULTIPLIER,
+    )
+    rate_sum_smoothed = gaussian_filter(
+        grid_sum.T,
+        sigma=smoothing_sigma_cells * HEATMAP_DISPLAY_SMOOTHING_MULTIPLIER,
+    )
+    grid_smoothed = np.divide(
+        rate_sum_smoothed,
+        count_smoothed,
+        out=np.zeros_like(rate_sum_smoothed, dtype=float),
+        where=count_smoothed > 1.0e-9,
+    )
+    count_positive = count_smoothed[np.isfinite(count_smoothed) & (count_smoothed > 0.0)]
+    if count_positive.size > 0:
+        path_scale = max(float(np.nanmax(count_positive)) * PRESTON_RATE_PATH_MASK_FRACTION, 1.0e-12)
+        path_mask = np.clip(count_smoothed / path_scale, 0.0, 1.0)
+        path_mask = np.power(path_mask, 0.38)
+        grid_smoothed = np.where(path_mask > 0.015, grid_smoothed, 0.0)
+    else:
+        path_mask = np.zeros_like(grid_smoothed)
+    rate_display, _, _ = _normalize_heatmap_for_display(grid_smoothed)
+    grid_display = rate_display * path_mask
+    return grid_display, grid_smoothed
+
+
+def _heatmap_display_with_range(grid, lower, upper):
+    values = np.asarray(grid, dtype=float)
+    if not np.isfinite(lower) or not np.isfinite(upper) or upper <= lower:
+        display, _, _ = _normalize_heatmap_for_display(values)
+        return display
+    display = np.clip((values - lower) / max(upper - lower, 1.0e-12), 0.0, 1.0)
+    display[display < HEATMAP_DISPLAY_NOISE_FLOOR_FRACTION] = 0.0
+    return np.power(display, HEATMAP_DISPLAY_GAMMA)
+
+
+def _comparison_heatmap_display_range(constant_grid, reward_grid):
+    reward_positive = np.asarray(reward_grid, dtype=float)
+    reward_positive = reward_positive[np.isfinite(reward_positive) & (reward_positive > 0.0)]
+    constant_positive = np.asarray(constant_grid, dtype=float)
+    constant_positive = constant_positive[np.isfinite(constant_positive) & (constant_positive > 0.0)]
+    if reward_positive.size == 0 or constant_positive.size == 0:
+        return None
+
+    center = _mean(reward_positive)
+    reward_std = _std(reward_positive)
+    constant_std = _std(constant_positive)
+    span = max(3.0 * reward_std, 1.35 * constant_std, abs(center) * 0.18, 1.0e-12)
+    return max(0.0, center - 0.75 * span), center + 0.25 * span
+
+
+def _set_contact_time_xlim(axes, t_plot):
+    if len(t_plot) == 0:
+        return
+    right = float(t_plot[-1])
+    if not np.isfinite(right) or right <= 0.0:
+        right = 1.0
+    if not isinstance(axes, (list, tuple, np.ndarray)):
+        axes = [axes]
+    for ax in axes:
+        ax.set_xlim(0.0, right)
+        ax.margins(x=0.0)
+
+
+def _paper_grid(ax):
+    ax.grid(True, color="0.75", linewidth=0.45, alpha=0.45)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.8)
+        spine.set_color("0.20")
+
+
+def _paper_info_box():
+    return {"facecolor": "white", "edgecolor": "0.20", "alpha": 0.86, "boxstyle": "round,pad=0.22"}
+
+
 def _positive_cv(values):
     positive_values = np.asarray(values, dtype=float)
     positive_values = positive_values[np.isfinite(positive_values) & (positive_values > 0.0)]
     mean_value = _mean(positive_values)
     return _cv(_std(positive_values), mean_value)
-
-
-def _emphasize_nonuniform_heatmap(display_grid, gamma=1.18, floor_cutoff=0.025):
-    display = np.clip(np.asarray(display_grid, dtype=float), 0.0, 1.0)
-    emphasized = np.power(display, gamma)
-    emphasized[display < floor_cutoff] = 0.0
-    max_value = float(np.nanmax(emphasized))
-    if max_value > 0.0:
-        emphasized /= max_value
-    return emphasized
-
-
-def _emphasize_uniform_heatmap(display_grid, blend=0.28, floor_cutoff=0.16):
-    display = np.clip(np.asarray(display_grid, dtype=float), 0.0, 1.0)
-    positive_mask = np.isfinite(display) & (display > floor_cutoff)
-    if not np.any(positive_mask):
-        return display
-    target_value = float(np.nanpercentile(display[positive_mask], 68.0))
-    if not np.isfinite(target_value) or target_value <= 0.0:
-        target_value = _mean(display[positive_mask])
-    emphasized = display.copy()
-    emphasized[positive_mask] = blend * target_value + (1.0 - blend) * display[positive_mask]
-    return np.clip(emphasized, 0.0, 1.0)
 
 
 def update_surface_grid(x, y, removal):
@@ -865,7 +952,6 @@ def _save_velocity_comparison_plots(
     variable_removal_rate_plot,
     extent,
     bins,
-    actual_heatmap_display=None,
 ):
     profiles = _velocity_comparison_profiles(
         t_plot,
@@ -877,30 +963,30 @@ def _save_velocity_comparison_plots(
         return
 
     mean_variable_speed = profiles["mean_variable_speed"]
-    constant_removal = profiles["constant_removal"]
-    actual_removal = profiles["actual_removal"]
+    constant_rate = profiles["constant_rate"]
+    reward_action_rate = profiles["reward_action_rate"]
 
-    constant_display, constant_grid = _removal_heatmap_display(x, y, constant_removal, extent, bins)
-    constant_display = _emphasize_nonuniform_heatmap(constant_display)
-    if actual_heatmap_display is None:
-        reward_display, _ = _removal_heatmap_display(x, y, actual_removal, extent, bins)
-    else:
-        reward_display = np.asarray(actual_heatmap_display, dtype=float)
-    reward_display = _emphasize_uniform_heatmap(reward_display)
+    constant_display, constant_grid = _mean_rate_heatmap_display(x, y, constant_rate, extent, bins)
+    reward_display, reward_grid = _mean_rate_heatmap_display(x, y, reward_action_rate, extent, bins)
+    display_range = _comparison_heatmap_display_range(constant_grid, reward_grid)
+    if display_range is not None:
+        display_lower, display_upper = display_range
+        constant_display = _heatmap_display_with_range(constant_grid, display_lower, display_upper)
+        reward_display = _heatmap_display_with_range(reward_grid, display_lower, display_upper)
 
-    constant_cell_cv = _positive_cv(constant_display)
-    reward_cell_cv = _positive_cv(reward_display)
+    constant_cell_cv = profiles["constant_rate_cv"]
+    reward_cell_cv = profiles["reward_rate_cv"]
     improvement_percent = 0.0
     if constant_cell_cv > 1.0e-12:
         improvement_percent = max(0.0, (constant_cell_cv - reward_cell_cv) / constant_cell_cv * 100.0)
     constant_rate_cv = profiles["constant_rate_cv"]
     reward_rate_cv = profiles["reward_rate_cv"]
 
-    fig_hm, axes_hm = plt.subplots(1, 2, figsize=(13.5, 6.1), facecolor="white", sharex=True, sharey=True)
+    fig_hm, axes_hm = plt.subplots(1, 2, figsize=(7.2, 3.45), facecolor="white", sharex=True, sharey=True)
     heatmap_items = [
         ("Constant velocity", constant_display, constant_cell_cv, mean_variable_speed),
         (
-            f"Reward/action velocity ({improvement_percent:.0f}% lower CV)",
+            f"Adaptive velocity ({improvement_percent:.0f}% lower CV)",
             reward_display,
             reward_cell_cv,
             _mean(variable_speed_plot[profiles["contact_mask"]]),
@@ -917,56 +1003,57 @@ def _save_velocity_comparison_plots(
             vmax=1.0,
             interpolation="bilinear",
         )
-        ax.set_title(title, fontsize=13, pad=10)
-        ax.set_xlabel("X [mm]", fontsize=10)
+        ax.set_title(title, pad=6)
+        ax.set_xlabel("X [mm]")
         ax.set_aspect("equal", adjustable="box")
-        ax.tick_params(labelsize=9)
+        ax.tick_params(direction="in", length=3.0, width=0.7)
         ax.grid(False)
         ax.text(
             0.018,
             0.982,
-            f"cell CV = {cell_cv:.3f}\nmean v = {speed_value * PLOT_MM_TO_M:.4f} m/s",
+            f"CV = {cell_cv:.3f}\n$\\bar{{v}}$ = {speed_value * PLOT_MM_TO_M:.4f} m/s",
             transform=ax.transAxes,
             va="top",
             ha="left",
-            fontsize=9.5,
+            fontsize=8,
             color="black",
-            bbox={"facecolor": "white", "edgecolor": "black", "alpha": 0.80, "boxstyle": "round,pad=0.25"},
+            bbox=_paper_info_box(),
         )
         for spine in ax.spines.values():
-            spine.set_linewidth(0.9)
-            spine.set_color("#333333")
-    axes_hm[0].set_ylabel("Y [mm]", fontsize=10)
+            spine.set_linewidth(0.8)
+            spine.set_color("0.20")
+    axes_hm[0].set_ylabel("Y [mm]")
     if im is not None:
         cbar = fig_hm.colorbar(im, ax=axes_hm.ravel().tolist(), fraction=0.035, pad=0.025)
-        cbar.set_label("Normalized cell removal [a.u.]", fontsize=10)
-        cbar.ax.tick_params(labelsize=9)
-    fig_hm.suptitle("Constant vs Reward/Action Velocity Heatmaps", fontsize=15)
-    fig_hm.savefig(out_dir / "05_velocity_comparison_heatmaps.png", dpi=200, bbox_inches="tight")
+        cbar.set_label("Normalized Preston rate [a.u.]")
+        cbar.ax.tick_params(direction="in", length=3.0, width=0.7)
+    fig_hm.suptitle("Spatial Projection of Preston Rate")
+    fig_hm.savefig(out_dir / "05_preston_rate_comparison.png", dpi=300, bbox_inches="tight")
     plt.close(fig_hm)
 
     constant_rate_m_s = profiles["constant_rate"] * PLOT_MM_TO_M
     reward_rate_m_s = profiles["reward_action_rate"] * PLOT_MM_TO_M
     target_rate_m_s = _mean(reward_rate_m_s[profiles["contact_mask"]])
 
-    fig_amt, ax_amt = plt.subplots(figsize=(10.5, 5.6), facecolor="white")
-    ax_amt.plot(t_plot, constant_rate_m_s, color="tab:red", linewidth=1.4, alpha=0.86, label=f"constant velocity, CV={constant_rate_cv:.3f}")
-    ax_amt.plot(t_plot, reward_rate_m_s, color="tab:blue", linewidth=2.4, alpha=0.96, label=f"reward/action velocity, CV={reward_rate_cv:.3f}")
+    fig_amt, ax_amt = plt.subplots(figsize=(6.8, 3.2), facecolor="white")
+    ax_amt.plot(t_plot, constant_rate_m_s, color=PAPER_CONSTANT_COLOR, linewidth=1.25, alpha=0.95, label=f"Constant velocity (CV={constant_rate_cv:.3f})")
+    ax_amt.plot(t_plot, reward_rate_m_s, color=PAPER_ADAPTIVE_COLOR, linewidth=1.6, alpha=0.98, label=f"Adaptive velocity (CV={reward_rate_cv:.3f})")
     if target_rate_m_s > 0.0:
-        ax_amt.axhline(target_rate_m_s, color="0.25", linestyle="--", linewidth=1.1, label="flat target")
-    ax_amt.set_title("Removal Amount Profile: Constant vs Reward/Action Velocity")
+        ax_amt.axhline(target_rate_m_s, color=PAPER_REFERENCE_COLOR, linestyle="--", linewidth=0.9, label="Mean adaptive rate")
+    ax_amt.set_title("Temporal Preston Rate Profile")
     ax_amt.set_xlabel("Time [s]")
-    ax_amt.set_ylabel("Normal Force x Sliding Velocity [N*m/s]")
+    ax_amt.set_ylabel("Preston rate [N m s$^{-1}$]")
     amount_limits = _wide_axis_limits_for_plot(
         np.concatenate([constant_rate_m_s, reward_rate_m_s]),
         center=target_rate_m_s if target_rate_m_s > 0.0 else None,
     )
     if amount_limits is not None:
         ax_amt.set_ylim(*amount_limits)
-    ax_amt.grid(True, alpha=0.3)
-    ax_amt.legend(loc="best")
+    _paper_grid(ax_amt)
+    ax_amt.legend(loc="best", frameon=True)
+    _set_contact_time_xlim(ax_amt, t_plot)
     fig_amt.tight_layout()
-    fig_amt.savefig(out_dir / "07_velocity_comparison_removal_amount.png", dpi=200)
+    fig_amt.savefig(out_dir / "07_preston_rate_profile_comparison.png", dpi=300)
     plt.close(fig_amt)
 
     return profiles
@@ -975,29 +1062,30 @@ def _save_velocity_comparison_plots(
 def _save_constant_velocity_signals_plot(out_dir, t_plot, normal_force_plot, constant_velocity_mm_s):
     constant_velocity_m_s = np.full_like(np.asarray(t_plot, dtype=float), constant_velocity_mm_s * PLOT_MM_TO_M)
 
-    fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
-    axes[0].plot(t_plot, normal_force_plot, color="tab:red", linewidth=1.5)
-    axes[0].set_title("Normal Force")
+    fig, axes = plt.subplots(2, 1, figsize=(6.8, 4.4), sharex=True, facecolor="white")
+    axes[0].plot(t_plot, normal_force_plot, color=PAPER_FORCE_COLOR, linewidth=1.15)
+    axes[0].set_title("Normal force")
     axes[0].set_ylabel("Force [N]")
     axes[0].margins(y=0.08)
-    axes[0].grid(True, alpha=0.3)
+    _paper_grid(axes[0])
 
     axes[1].plot(
         t_plot,
         constant_velocity_m_s,
-        color="tab:green",
-        linewidth=1.8,
+        color=PAPER_VELOCITY_COLOR,
+        linewidth=1.35,
         alpha=0.95,
-        label=f"constant velocity = {constant_velocity_mm_s * PLOT_MM_TO_M:.4f} m/s",
+        label=f"Constant velocity = {constant_velocity_mm_s * PLOT_MM_TO_M:.4f} m/s",
     )
-    axes[1].set_title("Constant Sliding Velocity")
+    axes[1].set_title("Constant sliding velocity")
     axes[1].set_xlabel("Time [s]")
     axes[1].set_ylabel("Velocity [m/s]")
     axes[1].margins(y=0.08)
-    axes[1].grid(True, alpha=0.3)
-    axes[1].legend(loc="best")
+    _paper_grid(axes[1])
+    axes[1].legend(loc="best", frameon=True)
+    _set_contact_time_xlim(axes, t_plot)
     fig.tight_layout()
-    fig.savefig(out_dir / "06_constant_velocity_signals_subplot.png", dpi=200)
+    fig.savefig(out_dir / "06_constant_force_velocity_signals.png", dpi=300)
     plt.close(fig)
 
 
@@ -1027,23 +1115,11 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
     
     extent = [np.min(x) - margin_x, np.max(x) + margin_x, np.min(y) - margin_y, np.max(y) + margin_y]
 
-    # --- 1. Local Removal Heatmap ---
+    # --- 1. Local Preston Rate Heatmap ---
     bins = min(220, max(96, int(np.sqrt(len(x)) * 4)))
-    cell_size_x = (extent[1] - extent[0]) / max(bins, 1)
-    cell_size_y = (extent[3] - extent[2]) / max(bins, 1)
-    mean_cell_size = max(0.5 * (cell_size_x + cell_size_y), 1.0e-6)
-    smoothing_sigma_cells = max(
-        HEATMAP_MIN_SMOOTHING_SIGMA_CELLS,
-        HEATMAP_SMOOTHING_SIGMA_MM / mean_cell_size,
-    )
-    grid_removal, _, _ = np.histogram2d(x, y, bins=bins, range=[extent[:2], extent[2:]], weights=dremoval_plot)
-    grid_removal_smoothed = gaussian_filter(
-        grid_removal.T,
-        sigma=smoothing_sigma_cells * HEATMAP_DISPLAY_SMOOTHING_MULTIPLIER,
-    )
-    grid_display, _, _ = _normalize_heatmap_for_display(grid_removal_smoothed)
+    grid_display, _ = _removal_heatmap_display(x, y, removal_rate_plot, extent, bins)
 
-    fig, ax = plt.subplots(figsize=(9, 7), facecolor="white")
+    fig, ax = plt.subplots(figsize=(5.4, 4.35), facecolor="white")
     im = ax.imshow(
         grid_display,
         origin="lower",
@@ -1054,13 +1130,13 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         interpolation="bilinear",
     )
     colorbar = fig.colorbar(im, ax=ax, fraction=0.048, pad=0.035)
-    colorbar.set_label("Cell removal [a.u.]", fontsize=11)
-    colorbar.ax.tick_params(labelsize=10)
-    ax.set_title("Removal Heatmap", fontsize=15, pad=12)
-    ax.set_xlabel("X [mm]", fontsize=11)
-    ax.set_ylabel("Y [mm]", fontsize=11)
+    colorbar.set_label("Normalized Preston rate [a.u.]")
+    colorbar.ax.tick_params(direction="in", length=3.0, width=0.7)
+    ax.set_title("Spatial Preston Rate")
+    ax.set_xlabel("X [mm]")
+    ax.set_ylabel("Y [mm]")
     ax.set_aspect("equal", adjustable="box")
-    ax.tick_params(labelsize=10)
+    ax.tick_params(direction="in", length=3.0, width=0.7)
     ax.grid(False)
     contact_samples = int(np.count_nonzero(dremoval_plot > 0.0))
     positive_display = grid_display[grid_display > 0.0]
@@ -1076,15 +1152,15 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         transform=ax.transAxes,
         va="top",
         ha="left",
-        fontsize=10.5,
+        fontsize=8,
         color="black",
-        bbox={"facecolor": "white", "edgecolor": "black", "alpha": 0.80, "boxstyle": "round,pad=0.25"},
+        bbox=_paper_info_box(),
     )
     for spine in ax.spines.values():
-        spine.set_linewidth(0.9)
-        spine.set_color("#333333")
+        spine.set_linewidth(0.8)
+        spine.set_color("0.20")
     fig.tight_layout()
-    fig.savefig(out_dir / "01_removal_heatmap.png", dpi=200)
+    fig.savefig(out_dir / "01_preston_rate_heatmap.png", dpi=300)
     plt.close(fig)
 
     normal_force = _normal_force_from_force3(force3)
@@ -1100,62 +1176,69 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         variable_removal_rate_plot=removal_rate_plot,
         extent=extent,
         bins=bins,
-        actual_heatmap_display=grid_display,
     )
 
     if comparison_profiles is not None:
         reward_action_rate_m_s = comparison_profiles["reward_action_rate"] * PLOT_MM_TO_M
         reward_action_contact_mask = comparison_profiles["contact_mask"]
         reward_action_rate_mean = _mean(reward_action_rate_m_s[reward_action_contact_mask])
-        fig2, ax2 = plt.subplots(figsize=(9, 5))
+        fig2, ax2 = plt.subplots(figsize=(6.8, 3.2), facecolor="white")
         ax2.plot(
             t_plot,
             reward_action_rate_m_s,
-            color="tab:blue",
-            linewidth=2.4,
+            color=PAPER_ADAPTIVE_COLOR,
+            linewidth=1.6,
             alpha=0.96,
-            label=f"reward/action variable velocity, CV={comparison_profiles['reward_rate_cv']:.3f}",
+            label=f"Adaptive velocity (CV={comparison_profiles['reward_rate_cv']:.3f})",
         )
         if reward_action_rate_mean > 0.0:
-            ax2.axhline(reward_action_rate_mean, color="0.25", linestyle="--", linewidth=1.1, label="flat target")
-        ax2.set_title(f"Episode {_episode_counter} Removal Amount Profile")
+            ax2.axhline(
+                reward_action_rate_mean,
+                color=PAPER_REFERENCE_COLOR,
+                linestyle="--",
+                linewidth=0.9,
+                label="Contact-window mean",
+            )
+        ax2.set_title("Adaptive Preston Rate Profile")
         ax2.set_xlabel("Time [s]")
-        ax2.set_ylabel("Normal Force x Sliding Velocity [N*m/s]")
+        ax2.set_ylabel("Preston rate [N m s$^{-1}$]")
         rate_limits = _wide_axis_limits_for_plot(
             reward_action_rate_m_s,
             center=reward_action_rate_mean if reward_action_rate_mean > 0.0 else None,
         )
         if rate_limits is not None:
             ax2.set_ylim(*rate_limits)
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
+        ax2.legend(loc="best", frameon=True)
+        _paper_grid(ax2)
+        _set_contact_time_xlim(ax2, t_plot)
         fig2.tight_layout()
-        fig2.savefig(out_dir / "02_heatmap_value_vs_time.png", dpi=300)
+        fig2.savefig(out_dir / "02_adaptive_preston_rate_profile.png", dpi=300)
         plt.close(fig2)
 
-    fig3, axes3 = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
-    axes3[0].plot(t_plot, normal_force_plot, color="tab:red", linewidth=1.5)
-    axes3[0].set_title("Normal Force")
+    fig3, axes3 = plt.subplots(2, 1, figsize=(6.8, 4.4), sharex=True, facecolor="white")
+    axes3[0].plot(t_plot, normal_force_plot, color=PAPER_FORCE_COLOR, linewidth=1.15)
+    axes3[0].set_title("Normal force")
     axes3[0].set_ylabel("Force [N]")
     axes3[0].margins(y=0.08)
-    axes3[0].grid(True, alpha=0.3)
+    _paper_grid(axes3[0])
     sliding_velocity_m_s = sliding_velocity_plot * PLOT_MM_TO_M
     axes3[1].plot(
         t_plot,
         sliding_velocity_m_s,
-        color="tab:green",
-        linewidth=1.4,
+        color=PAPER_VELOCITY_COLOR,
+        linewidth=1.25,
         alpha=0.92,
-        label="reward/action variable velocity",
+        label="Adaptive velocity",
     )
-    axes3[1].set_title("Reward/Action Variable Sliding Velocity")
+    axes3[1].set_title("Adaptive sliding velocity")
     axes3[1].set_xlabel("Time [s]")
     axes3[1].set_ylabel("Velocity [m/s]")
     axes3[1].margins(y=0.08)
-    axes3[1].grid(True, alpha=0.3)
-    axes3[1].legend(loc="best")
+    _paper_grid(axes3[1])
+    axes3[1].legend(loc="best", frameon=True)
+    _set_contact_time_xlim(axes3, t_plot)
     fig3.tight_layout()
-    fig3.savefig(out_dir / "03_signals_subplot.png", dpi=200)
+    fig3.savefig(out_dir / "03_adaptive_force_velocity_signals.png", dpi=300)
     plt.close(fig3)
 
     if comparison_profiles is not None:
@@ -1166,7 +1249,7 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
             constant_velocity_mm_s=comparison_profiles["mean_variable_speed"],
         )
 
-    fig4 = plt.figure(figsize=(9.5, 8))
+    fig4 = plt.figure(figsize=(6.2, 5.2), facecolor="white")
     ax4 = fig4.add_subplot(111, projection="3d")
 
     path_values = removal_rate_plot if len(removal_rate_plot) == len(xyz_plot) else sliding_velocity_plot
@@ -1174,13 +1257,14 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
     if len(path_values) == len(xyz_plot) and np.nanmax(path_values) > np.nanmin(path_values):
         segments = np.stack([xyz_plot[:-1], xyz_plot[1:]], axis=1)
         segment_values = 0.5 * (path_values[:-1] + path_values[1:])
-        line_collection = Line3DCollection(segments, cmap="viridis", linewidth=2.2, alpha=0.95)
+        line_collection = Line3DCollection(segments, cmap="viridis", linewidth=1.75, alpha=0.95)
         line_collection.set_array(segment_values)
         ax4.add_collection3d(line_collection)
-        cbar4 = fig4.colorbar(line_collection, ax=ax4, pad=0.08, shrink=0.72)
-        cbar4.set_label("Removal rate [a.u.]")
+        cbar4 = fig4.colorbar(line_collection, ax=ax4, pad=0.08, shrink=0.68)
+        cbar4.set_label("Preston rate [a.u.]")
+        cbar4.ax.tick_params(direction="in", length=3.0, width=0.7)
     else:
-        ax4.plot(xyz_plot[:, 0], xyz_plot[:, 1], xyz_plot[:, 2], color="#1f77b4", linewidth=2.0, label="EE path")
+        ax4.plot(xyz_plot[:, 0], xyz_plot[:, 1], xyz_plot[:, 2], color=PAPER_ADAPTIVE_COLOR, linewidth=1.6, label="End-effector path")
 
     hdf5_xyz = _get_hdf5_position_np()
     if hdf5_xyz is not None:
@@ -1190,9 +1274,9 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
             hdf5_xyz[:, 2],
             color="black",
             linestyle="-",
-            linewidth=1.2,
-            alpha=0.45,
-            label="HDF5 target",
+            linewidth=1.0,
+            alpha=0.50,
+            label="Reference path",
         )
 
     z_floor = float(np.nanmin(xyz_plot[:, 2]))
@@ -1202,7 +1286,7 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         np.full_like(xyz_plot[:, 2], z_floor),
         color="0.35",
         linestyle="--",
-        linewidth=1.0,
+        linewidth=0.9,
         alpha=0.45,
         label="XY projection",
     )
@@ -1220,27 +1304,28 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
             q_normals[:, 0],
             q_normals[:, 1],
             q_normals[:, 2],
-            color="#d62728",
+            color=PAPER_FORCE_COLOR,
             linewidth=0.8,
             arrow_length_ratio=0.25,
             alpha=0.85,
             normalize=False,
         )
-        ax4.plot([], [], [], color="#d62728", linewidth=1.6, label="TCP normal")
+        ax4.plot([], [], [], color=PAPER_FORCE_COLOR, linewidth=1.2, label="TCP normal")
 
-    ax4.scatter(xyz_plot[0, 0], xyz_plot[0, 1], xyz_plot[0, 2], color="#2ca02c", s=55, depthshade=True, label="contact start")
-    ax4.scatter(xyz_plot[-1, 0], xyz_plot[-1, 1], xyz_plot[-1, 2], color="#d62728", s=55, depthshade=True, label="end")
-    ax4.set_title(f"Episode {_episode_counter} Contact-Window EE Path")
+    ax4.scatter(xyz_plot[0, 0], xyz_plot[0, 1], xyz_plot[0, 2], color=PAPER_VELOCITY_COLOR, s=28, depthshade=True, label="Contact start")
+    ax4.scatter(xyz_plot[-1, 0], xyz_plot[-1, 1], xyz_plot[-1, 2], color=PAPER_FORCE_COLOR, s=28, depthshade=True, label="End")
+    ax4.set_title("Contact-Window End-Effector Path")
     ax4.set_xlabel("X [mm]")
     ax4.set_ylabel("Y [mm]")
     ax4.set_zlabel("Z [mm]")
     axes_xyz = xyz_plot if hdf5_xyz is None else np.vstack([xyz_plot, hdf5_xyz])
     _set_axes_equal_3d(ax4, axes_xyz)
     ax4.view_init(elev=28, azim=-58)
-    ax4.grid(True, alpha=0.25)
-    ax4.legend(loc="upper left")
+    ax4.grid(True, color="0.78", linewidth=0.45, alpha=0.55)
+    ax4.tick_params(labelsize=8, pad=1.0)
+    ax4.legend(loc="upper left", frameon=True)
     fig4.tight_layout()
-    fig4.savefig(out_dir / "04_3d_path_w.png", dpi=200)
+    fig4.savefig(out_dir / "04_contact_path_3d.png", dpi=300)
     plt.close(fig4)
 
 # ============================================================
