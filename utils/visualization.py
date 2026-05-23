@@ -274,7 +274,7 @@ def _positive_cv(values):
     return _cv(_std(positive_values), mean_value)
 
 
-def _emphasize_nonuniform_heatmap(display_grid, gamma=1.65, floor_cutoff=0.08):
+def _emphasize_nonuniform_heatmap(display_grid, gamma=1.18, floor_cutoff=0.025):
     display = np.clip(np.asarray(display_grid, dtype=float), 0.0, 1.0)
     emphasized = np.power(display, gamma)
     emphasized[display < floor_cutoff] = 0.0
@@ -284,9 +284,9 @@ def _emphasize_nonuniform_heatmap(display_grid, gamma=1.65, floor_cutoff=0.08):
     return emphasized
 
 
-def _emphasize_uniform_heatmap(display_grid, blend=0.78):
+def _emphasize_uniform_heatmap(display_grid, blend=0.28, floor_cutoff=0.16):
     display = np.clip(np.asarray(display_grid, dtype=float), 0.0, 1.0)
-    positive_mask = np.isfinite(display) & (display > HEATMAP_DISPLAY_NOISE_FLOOR_FRACTION)
+    positive_mask = np.isfinite(display) & (display > floor_cutoff)
     if not np.any(positive_mask):
         return display
     target_value = float(np.nanpercentile(display[positive_mask], 68.0))
@@ -294,11 +294,7 @@ def _emphasize_uniform_heatmap(display_grid, blend=0.78):
         target_value = _mean(display[positive_mask])
     emphasized = display.copy()
     emphasized[positive_mask] = blend * target_value + (1.0 - blend) * display[positive_mask]
-    emphasized = np.clip(emphasized, 0.0, 1.0)
-    max_value = float(np.nanmax(emphasized))
-    if max_value > 0.0:
-        emphasized /= max_value
-    return emphasized
+    return np.clip(emphasized, 0.0, 1.0)
 
 
 def update_surface_grid(x, y, removal):
@@ -902,18 +898,16 @@ def _save_velocity_comparison_plots(
 
     fig_hm, axes_hm = plt.subplots(1, 2, figsize=(13.5, 6.1), facecolor="white", sharex=True, sharey=True)
     heatmap_items = [
-        ("Constant velocity", constant_display, constant_cell_cv, mean_variable_speed, "less uniform", "tab:red"),
+        ("Constant velocity", constant_display, constant_cell_cv, mean_variable_speed),
         (
             f"Reward/action velocity ({improvement_percent:.0f}% lower CV)",
             reward_display,
             reward_cell_cv,
             _mean(variable_speed_plot[profiles["contact_mask"]]),
-            "more uniform",
-            "tab:green",
         ),
     ]
     im = None
-    for ax, (title, display_grid, cell_cv, speed_value, verdict, verdict_color) in zip(axes_hm, heatmap_items):
+    for ax, (title, display_grid, cell_cv, speed_value) in zip(axes_hm, heatmap_items):
         im = ax.imshow(
             display_grid,
             origin="lower",
@@ -938,18 +932,6 @@ def _save_velocity_comparison_plots(
             fontsize=9.5,
             color="black",
             bbox={"facecolor": "white", "edgecolor": "black", "alpha": 0.80, "boxstyle": "round,pad=0.25"},
-        )
-        ax.text(
-            0.982,
-            0.982,
-            verdict,
-            transform=ax.transAxes,
-            va="top",
-            ha="right",
-            fontsize=10.5,
-            color=verdict_color,
-            fontweight="bold",
-            bbox={"facecolor": "white", "edgecolor": verdict_color, "alpha": 0.85, "boxstyle": "round,pad=0.25"},
         )
         for spine in ax.spines.values():
             spine.set_linewidth(0.9)
@@ -990,27 +972,24 @@ def _save_velocity_comparison_plots(
     return profiles
 
 
-def _save_constant_velocity_signals_plot(out_dir, t, normal_force, constant_velocity_mm_s, plot_start):
-    constant_velocity_m_s = np.full_like(np.asarray(t, dtype=float), constant_velocity_mm_s * PLOT_MM_TO_M)
+def _save_constant_velocity_signals_plot(out_dir, t_plot, normal_force_plot, constant_velocity_mm_s):
+    constant_velocity_m_s = np.full_like(np.asarray(t_plot, dtype=float), constant_velocity_mm_s * PLOT_MM_TO_M)
 
     fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
-    axes[0].plot(t, normal_force, color="tab:red", linewidth=1.5)
-    axes[0].axvline(t[plot_start], color="0.25", linestyle="--", linewidth=1.0, label="contact start")
-    axes[0].legend()
+    axes[0].plot(t_plot, normal_force_plot, color="tab:red", linewidth=1.5)
     axes[0].set_title("Normal Force")
     axes[0].set_ylabel("Force [N]")
     axes[0].margins(y=0.08)
     axes[0].grid(True, alpha=0.3)
 
     axes[1].plot(
-        t,
+        t_plot,
         constant_velocity_m_s,
-        color="tab:orange",
+        color="tab:green",
         linewidth=1.8,
         alpha=0.95,
         label=f"constant velocity = {constant_velocity_mm_s * PLOT_MM_TO_M:.4f} m/s",
     )
-    axes[1].axvline(t[plot_start], color="0.25", linestyle="--", linewidth=1.0)
     axes[1].set_title("Constant Sliding Velocity")
     axes[1].set_xlabel("Time [s]")
     axes[1].set_ylabel("Velocity [m/s]")
@@ -1155,25 +1134,20 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         plt.close(fig2)
 
     fig3, axes3 = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
-    axes3[0].plot(t, normal_force, color="tab:red", linewidth=1.5)
-    if contact_start_idx is not None:
-        axes3[0].axvline(t[plot_start], color="0.25", linestyle="--", linewidth=1.0, label="contact start")
-        axes3[0].legend()
+    axes3[0].plot(t_plot, normal_force_plot, color="tab:red", linewidth=1.5)
     axes3[0].set_title("Normal Force")
     axes3[0].set_ylabel("Force [N]")
     axes3[0].margins(y=0.08)
     axes3[0].grid(True, alpha=0.3)
-    sliding_velocity_m_s = sliding_velocity * PLOT_MM_TO_M
+    sliding_velocity_m_s = sliding_velocity_plot * PLOT_MM_TO_M
     axes3[1].plot(
-        t,
+        t_plot,
         sliding_velocity_m_s,
         color="tab:green",
         linewidth=1.4,
         alpha=0.92,
         label="reward/action variable velocity",
     )
-    if contact_start_idx is not None:
-        axes3[1].axvline(t[plot_start], color="0.25", linestyle="--", linewidth=1.0)
     axes3[1].set_title("Reward/Action Variable Sliding Velocity")
     axes3[1].set_xlabel("Time [s]")
     axes3[1].set_ylabel("Velocity [m/s]")
@@ -1187,10 +1161,9 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
     if comparison_profiles is not None:
         _save_constant_velocity_signals_plot(
             out_dir=out_dir,
-            t=t,
-            normal_force=normal_force,
+            t_plot=t_plot,
+            normal_force_plot=normal_force_plot,
             constant_velocity_mm_s=comparison_profiles["mean_variable_speed"],
-            plot_start=plot_start,
         )
 
     fig4 = plt.figure(figsize=(9.5, 8))
