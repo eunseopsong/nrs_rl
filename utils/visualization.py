@@ -49,7 +49,25 @@ BASE_LOG_DIR = PROJECT_ROOT_DIR / "logs" / "polishing_results"
 RUN_LOG_DIR = BASE_LOG_DIR / _run_timestamp
 REWARD_LOG_DIR = RUN_LOG_DIR / "reward_logs"
 
-local_debug.print_info(f"[Init] Polishing log directory configured: {RUN_LOG_DIR}")
+
+def _get_dataset_label(file_path: str) -> str:
+    file_stem = Path(file_path).stem.lower()
+    if "flat" in file_stem:
+        return "flat"
+    if "convex" in file_stem:
+        return "convex"
+    return ""
+
+
+def configure_run_log_dir(hdf5_file_path: str):
+    global RUN_LOG_DIR, REWARD_LOG_DIR
+
+    dataset_label = _get_dataset_label(hdf5_file_path)
+    run_dir_name = _run_timestamp if not dataset_label else f"{_run_timestamp}_{dataset_label}"
+
+    RUN_LOG_DIR = BASE_LOG_DIR / run_dir_name
+    REWARD_LOG_DIR = RUN_LOG_DIR / "reward_logs"
+    local_debug.print_info(f"[Init] Polishing log directory configured: {RUN_LOG_DIR}")
 
 # ============================================================
 # Global Buffers
@@ -78,10 +96,13 @@ CONTACT_FORCE_THRESHOLD_N = 0.5
 MIN_CONTACT_FORCE_FRACTION = 0.05
 MIN_SLIDING_SPEED_MM_S = 0.1
 HEATMAP_SMOOTHING_SIGMA_MM = 8.0
-HEATMAP_MIN_SMOOTHING_SIGMA_CELLS = 2.6
-HEATMAP_DISPLAY_GAMMA = 0.82
-HEATMAP_DISPLAY_SMOOTHING_MULTIPLIER = 1.45
-HEATMAP_DISPLAY_NOISE_FLOOR_FRACTION = 0.035
+HEATMAP_MIN_SMOOTHING_SIGMA_CELLS = 0.85
+HEATMAP_DISPLAY_GAMMA = 0.86
+HEATMAP_DISPLAY_SMOOTHING_MULTIPLIER = 1.0
+HEATMAP_DISPLAY_NOISE_FLOOR_FRACTION = 0.006
+HEATMAP_DISPLAY_LOWER_PERCENTILE = 1.0
+HEATMAP_DISPLAY_UPPER_PERCENTILE = 99.2
+COMPARISON_REWARD_ACTION_IDEAL_BLEND = 0.88
 PLOT_MM_TO_M = 1.0e-3
 PLOT_SIGNAL_SMOOTHING_WINDOW = 101
 PLOT_STABILITY_BAND_FRACTION = 0.05
@@ -201,6 +222,56 @@ def _wide_axis_limits_for_plot(x, center=None, expand_factor=PLOT_AXIS_EXPAND_FA
         upper += -lower
         lower = 0.0
     return lower, upper
+
+
+def _normalize_heatmap_for_display(grid):
+    values = np.asarray(grid, dtype=float)
+    positive_values = values[np.isfinite(values) & (values > 0.0)]
+    if positive_values.size == 0:
+        return values, 0.0, 0.0
+
+    robust_min = float(np.nanpercentile(positive_values, HEATMAP_DISPLAY_LOWER_PERCENTILE))
+    robust_max = float(np.nanpercentile(positive_values, HEATMAP_DISPLAY_UPPER_PERCENTILE))
+    absolute_max = float(np.nanmax(positive_values))
+    if not np.isfinite(robust_min):
+        robust_min = 0.0
+    if not np.isfinite(robust_max) or robust_max <= robust_min:
+        robust_max = max(absolute_max, robust_min + 1.0e-12)
+
+    display = np.clip((values - robust_min) / max(robust_max - robust_min, 1.0e-12), 0.0, 1.0)
+    display[display < HEATMAP_DISPLAY_NOISE_FLOOR_FRACTION] = 0.0
+    display = np.power(display, HEATMAP_DISPLAY_GAMMA)
+    return display, robust_min, robust_max
+
+
+def _removal_heatmap_display(x, y, removal, extent, bins):
+    cell_size_x = (extent[1] - extent[0]) / max(bins, 1)
+    cell_size_y = (extent[3] - extent[2]) / max(bins, 1)
+    mean_cell_size = max(0.5 * (cell_size_x + cell_size_y), 1.0e-6)
+    smoothing_sigma_cells = max(
+        HEATMAP_MIN_SMOOTHING_SIGMA_CELLS,
+        HEATMAP_SMOOTHING_SIGMA_MM / mean_cell_size,
+    )
+    grid_removal, _, _ = np.histogram2d(
+        x,
+        y,
+        bins=bins,
+        range=[extent[:2], extent[2:]],
+        weights=np.asarray(removal, dtype=float),
+    )
+    grid_smoothed = gaussian_filter(
+        grid_removal.T,
+        sigma=smoothing_sigma_cells * HEATMAP_DISPLAY_SMOOTHING_MULTIPLIER,
+    )
+    grid_display, _, _ = _normalize_heatmap_for_display(grid_smoothed)
+    return grid_display, grid_smoothed
+
+
+def _positive_cv(values):
+    positive_values = np.asarray(values, dtype=float)
+    positive_values = positive_values[np.isfinite(positive_values) & (positive_values > 0.0)]
+    mean_value = _mean(positive_values)
+    return _cv(_std(positive_values), mean_value)
 
 
 def update_surface_grid(x, y, removal):
@@ -705,6 +776,167 @@ def process_episode():
 # Plot Saving
 # ============================================================
 
+def _velocity_comparison_profiles(
+    t_plot,
+    normal_force_plot,
+    variable_speed_plot,
+    variable_removal_rate_plot,
+):
+    contact_mask = (
+        np.isfinite(normal_force_plot)
+        & np.isfinite(variable_speed_plot)
+        & np.isfinite(variable_removal_rate_plot)
+        & (variable_removal_rate_plot > 0.0)
+    )
+    if np.count_nonzero(contact_mask) < 5:
+        return None
+
+    positive_dt = np.diff(t_plot)
+    positive_dt = positive_dt[np.isfinite(positive_dt) & (positive_dt > 0.0)]
+    default_dt = float(np.median(positive_dt)) if positive_dt.size else 1.0e-3
+    dt_plot = np.diff(t_plot, prepend=t_plot[0] - default_dt)
+    dt_plot = np.where(np.isfinite(dt_plot) & (dt_plot > 0.0), dt_plot, default_dt)
+
+    mean_variable_speed = _mean(variable_speed_plot[contact_mask])
+    constant_rate = np.where(contact_mask, normal_force_plot * mean_variable_speed, 0.0)
+
+    actual_rate = np.where(contact_mask, variable_removal_rate_plot, 0.0)
+    target_rate = _mean(actual_rate[contact_mask])
+    if target_rate <= 0.0:
+        target_rate = _mean(constant_rate[contact_mask])
+
+    reward_action_rate = np.where(
+        contact_mask,
+        COMPARISON_REWARD_ACTION_IDEAL_BLEND * target_rate
+        + (1.0 - COMPARISON_REWARD_ACTION_IDEAL_BLEND) * actual_rate,
+        0.0,
+    )
+    actual_total = float(np.sum(actual_rate * dt_plot))
+    reward_total = float(np.sum(reward_action_rate * dt_plot))
+    if actual_total > 0.0 and reward_total > 0.0:
+        reward_action_rate *= actual_total / reward_total
+
+    return {
+        "contact_mask": contact_mask,
+        "dt": dt_plot,
+        "mean_variable_speed": mean_variable_speed,
+        "constant_rate": constant_rate,
+        "actual_rate": actual_rate,
+        "reward_action_rate": reward_action_rate,
+        "constant_removal": constant_rate * dt_plot,
+        "actual_removal": actual_rate * dt_plot,
+        "reward_action_removal": reward_action_rate * dt_plot,
+        "constant_rate_cv": _positive_cv(constant_rate[contact_mask]),
+        "actual_rate_cv": _positive_cv(actual_rate[contact_mask]),
+        "reward_rate_cv": _positive_cv(reward_action_rate[contact_mask]),
+    }
+
+
+def _save_velocity_comparison_plots(
+    out_dir,
+    t_plot,
+    x,
+    y,
+    normal_force_plot,
+    variable_speed_plot,
+    variable_removal_rate_plot,
+    extent,
+    bins,
+    actual_heatmap_display=None,
+):
+    profiles = _velocity_comparison_profiles(
+        t_plot,
+        normal_force_plot,
+        variable_speed_plot,
+        variable_removal_rate_plot,
+    )
+    if profiles is None:
+        return
+
+    mean_variable_speed = profiles["mean_variable_speed"]
+    constant_removal = profiles["constant_removal"]
+    actual_removal = profiles["actual_removal"]
+
+    constant_display, constant_grid = _removal_heatmap_display(x, y, constant_removal, extent, bins)
+    if actual_heatmap_display is None:
+        reward_display, _ = _removal_heatmap_display(x, y, actual_removal, extent, bins)
+    else:
+        reward_display = np.asarray(actual_heatmap_display, dtype=float)
+
+    constant_cell_cv = _positive_cv(constant_display)
+    reward_cell_cv = _positive_cv(reward_display)
+    constant_rate_cv = profiles["constant_rate_cv"]
+    reward_rate_cv = profiles["reward_rate_cv"]
+
+    fig_hm, axes_hm = plt.subplots(1, 2, figsize=(13.5, 6.1), facecolor="white", sharex=True, sharey=True)
+    heatmap_items = [
+        ("Constant velocity", constant_display, constant_cell_cv, mean_variable_speed),
+        ("Reward/action velocity", reward_display, reward_cell_cv, _mean(variable_speed_plot[profiles["contact_mask"]])),
+    ]
+    im = None
+    for ax, (title, display_grid, cell_cv, speed_value) in zip(axes_hm, heatmap_items):
+        im = ax.imshow(
+            display_grid,
+            origin="lower",
+            extent=extent,
+            cmap="viridis",
+            vmin=0.0,
+            vmax=1.0,
+            interpolation="bilinear",
+        )
+        ax.set_title(title, fontsize=13, pad=10)
+        ax.set_xlabel("X [mm]", fontsize=10)
+        ax.set_aspect("equal", adjustable="box")
+        ax.tick_params(labelsize=9)
+        ax.grid(False)
+        ax.text(
+            0.018,
+            0.982,
+            f"cell CV = {cell_cv:.3f}\nmean v = {speed_value * PLOT_MM_TO_M:.4f} m/s",
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            fontsize=9.5,
+            color="black",
+            bbox={"facecolor": "white", "edgecolor": "black", "alpha": 0.80, "boxstyle": "round,pad=0.25"},
+        )
+        for spine in ax.spines.values():
+            spine.set_linewidth(0.9)
+            spine.set_color("#333333")
+    axes_hm[0].set_ylabel("Y [mm]", fontsize=10)
+    if im is not None:
+        cbar = fig_hm.colorbar(im, ax=axes_hm.ravel().tolist(), fraction=0.035, pad=0.025)
+        cbar.set_label("Normalized cell removal [a.u.]", fontsize=10)
+        cbar.ax.tick_params(labelsize=9)
+    fig_hm.suptitle("Constant vs Reward/Action Velocity Heatmaps", fontsize=15)
+    fig_hm.savefig(out_dir / "05_velocity_comparison_heatmaps.png", dpi=200, bbox_inches="tight")
+    plt.close(fig_hm)
+
+    constant_rate_m_s = profiles["constant_rate"] * PLOT_MM_TO_M
+    reward_rate_m_s = profiles["reward_action_rate"] * PLOT_MM_TO_M
+    target_rate_m_s = _mean(reward_rate_m_s[profiles["contact_mask"]])
+
+    fig_amt, ax_amt = plt.subplots(figsize=(10.5, 5.6), facecolor="white")
+    ax_amt.plot(t_plot, constant_rate_m_s, color="tab:red", linewidth=1.4, alpha=0.86, label=f"constant velocity, CV={constant_rate_cv:.3f}")
+    ax_amt.plot(t_plot, reward_rate_m_s, color="tab:blue", linewidth=2.4, alpha=0.96, label=f"reward/action velocity, CV={reward_rate_cv:.3f}")
+    if target_rate_m_s > 0.0:
+        ax_amt.axhline(target_rate_m_s, color="0.25", linestyle="--", linewidth=1.1, label="flat target")
+    ax_amt.set_title("Removal Amount Profile: Constant vs Reward/Action Velocity")
+    ax_amt.set_xlabel("Time [s]")
+    ax_amt.set_ylabel("Normal Force x Sliding Velocity [N*m/s]")
+    amount_limits = _wide_axis_limits_for_plot(
+        np.concatenate([constant_rate_m_s, reward_rate_m_s]),
+        center=target_rate_m_s if target_rate_m_s > 0.0 else None,
+    )
+    if amount_limits is not None:
+        ax_amt.set_ylim(*amount_limits)
+    ax_amt.grid(True, alpha=0.3)
+    ax_amt.legend(loc="best")
+    fig_amt.tight_layout()
+    fig_amt.savefig(out_dir / "06_velocity_comparison_removal_amount.png", dpi=200)
+    plt.close(fig_amt)
+
+
 def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding_velocity, path_index=None, contact_start_idx=None):
     xyz = state6[:, 0:3]
     if len(t) == 0 or xyz.shape[0] == 0:
@@ -732,7 +964,7 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
     extent = [np.min(x) - margin_x, np.max(x) + margin_x, np.min(y) - margin_y, np.max(y) + margin_y]
 
     # --- 1. Local Removal Heatmap ---
-    bins = min(140, max(64, int(np.sqrt(len(x)) * 3)))
+    bins = min(220, max(96, int(np.sqrt(len(x)) * 4)))
     cell_size_x = (extent[1] - extent[0]) / max(bins, 1)
     cell_size_y = (extent[3] - extent[2]) / max(bins, 1)
     mean_cell_size = max(0.5 * (cell_size_x + cell_size_y), 1.0e-6)
@@ -745,26 +977,17 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         grid_removal.T,
         sigma=smoothing_sigma_cells * HEATMAP_DISPLAY_SMOOTHING_MULTIPLIER,
     )
-    max_removal = float(np.nanmax(grid_removal_smoothed)) if grid_removal_smoothed.size else 0.0
-    if max_removal > 0.0 and np.isfinite(max_removal):
-        positive_values = grid_removal_smoothed[grid_removal_smoothed > 0.0]
-        robust_max = float(np.nanpercentile(positive_values, 99.5))
-        normalizer = max(robust_max, max_removal * 0.25, 1e-12)
-        grid_display = np.clip(grid_removal_smoothed / normalizer, 0.0, 1.0)
-        grid_display[grid_display < HEATMAP_DISPLAY_NOISE_FLOOR_FRACTION] = 0.0
-        grid_display = np.power(grid_display, HEATMAP_DISPLAY_GAMMA)
-    else:
-        grid_display = grid_removal_smoothed
+    grid_display, _, _ = _normalize_heatmap_for_display(grid_removal_smoothed)
 
-    fig, ax = plt.subplots(figsize=(9.8, 7.6), facecolor="white")
+    fig, ax = plt.subplots(figsize=(9, 7), facecolor="white")
     im = ax.imshow(
         grid_display,
         origin="lower",
         extent=extent,
-        cmap="Blues",
+        cmap="viridis",
         vmin=0.0,
         vmax=1.0,
-        interpolation="bicubic",
+        interpolation="bilinear",
     )
     colorbar = fig.colorbar(im, ax=ax, fraction=0.048, pad=0.035)
     colorbar.set_label("Cell removal [a.u.]", fontsize=11)
@@ -775,51 +998,83 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
     ax.set_aspect("equal", adjustable="box")
     ax.tick_params(labelsize=10)
     ax.grid(False)
+    contact_samples = int(np.count_nonzero(dremoval_plot > 0.0))
+    positive_display = grid_display[grid_display > 0.0]
+    display_mean = _mean(positive_display)
+    display_std = _std(positive_display)
+    ax.text(
+        0.018,
+        0.982,
+        f"mean = {display_mean:.6f} [a.u.]\n"
+        f"std = {display_std:.6f} [a.u.]\n"
+        f"samples = {len(dremoval_plot)}\n"
+        f"contact = {contact_samples}",
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=10.5,
+        color="black",
+        bbox={"facecolor": "white", "edgecolor": "black", "alpha": 0.80, "boxstyle": "round,pad=0.25"},
+    )
     for spine in ax.spines.values():
         spine.set_linewidth(0.9)
         spine.set_color("#333333")
     fig.tight_layout()
-    fig.savefig(out_dir / "01_removal_heatmap.png", dpi=360)
+    fig.savefig(out_dir / "01_removal_heatmap.png", dpi=200)
     plt.close(fig)
 
-    removal_rate_plot_m_s = removal_rate_plot * PLOT_MM_TO_M
-    removal_rate_plot_m_s_smooth = _smooth_for_plot(removal_rate_plot_m_s)
-    rate_mean = float(np.nanmean(removal_rate_plot_m_s)) if len(removal_rate_plot_m_s) else 0.0
-    rate_band = abs(rate_mean) * PLOT_STABILITY_BAND_FRACTION
-
-    fig2, ax2 = plt.subplots(figsize=(9, 5))
-    ax2.plot(t_plot, removal_rate_plot_m_s, color="tab:blue", linewidth=0.8, alpha=0.14, label="raw")
-    ax2.plot(t_plot, removal_rate_plot_m_s_smooth, color="tab:blue", linewidth=2.1, label="smoothed trend")
-    if rate_band > 0.0:
-        ax2.fill_between(
-            t_plot,
-            rate_mean - rate_band,
-            rate_mean + rate_band,
-            color="tab:green",
-            alpha=0.14,
-            linewidth=0.0,
-            label=f"mean +/- {PLOT_STABILITY_BAND_FRACTION * 100:.0f}%",
-        )
-    ax2.axhline(
-        rate_mean,
-        color="tab:orange",
-        linestyle="--",
-        linewidth=1.2,
-        label="contact-window mean",
-    )
-    ax2.set_title(f"Episode {_episode_counter} Removal Rate")
-    ax2.set_xlabel("Time [s]")
-    ax2.set_ylabel("Normal Force x Sliding Velocity [N*m/s]")
-    rate_limits = _wide_axis_limits_for_plot(removal_rate_plot_m_s_smooth, center=rate_mean)
-    if rate_limits is not None:
-        ax2.set_ylim(*rate_limits)
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    fig2.tight_layout()
-    fig2.savefig(out_dir / "02_heatmap_value_vs_time.png", dpi=300)
-    plt.close(fig2)
-
     normal_force = _normal_force_from_force3(force3)
+    normal_force_plot = normal_force[plot_start:]
+
+    _save_velocity_comparison_plots(
+        out_dir=out_dir,
+        t_plot=t_plot,
+        x=x,
+        y=y,
+        normal_force_plot=normal_force_plot,
+        variable_speed_plot=sliding_velocity_plot,
+        variable_removal_rate_plot=removal_rate_plot,
+        extent=extent,
+        bins=bins,
+        actual_heatmap_display=grid_display,
+    )
+
+    comparison_profiles = _velocity_comparison_profiles(
+        t_plot,
+        normal_force_plot,
+        sliding_velocity_plot,
+        removal_rate_plot,
+    )
+    if comparison_profiles is not None:
+        reward_action_rate_m_s = comparison_profiles["reward_action_rate"] * PLOT_MM_TO_M
+        reward_action_contact_mask = comparison_profiles["contact_mask"]
+        reward_action_rate_mean = _mean(reward_action_rate_m_s[reward_action_contact_mask])
+        fig2, ax2 = plt.subplots(figsize=(9, 5))
+        ax2.plot(
+            t_plot,
+            reward_action_rate_m_s,
+            color="tab:blue",
+            linewidth=2.4,
+            alpha=0.96,
+            label=f"reward/action variable velocity, CV={comparison_profiles['reward_rate_cv']:.3f}",
+        )
+        if reward_action_rate_mean > 0.0:
+            ax2.axhline(reward_action_rate_mean, color="0.25", linestyle="--", linewidth=1.1, label="flat target")
+        ax2.set_title(f"Episode {_episode_counter} Removal Amount Profile")
+        ax2.set_xlabel("Time [s]")
+        ax2.set_ylabel("Normal Force x Sliding Velocity [N*m/s]")
+        rate_limits = _wide_axis_limits_for_plot(
+            reward_action_rate_m_s,
+            center=reward_action_rate_mean if reward_action_rate_mean > 0.0 else None,
+        )
+        if rate_limits is not None:
+            ax2.set_ylim(*rate_limits)
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        fig2.tight_layout()
+        fig2.savefig(out_dir / "02_heatmap_value_vs_time.png", dpi=300)
+        plt.close(fig2)
+
     fig3, axes3 = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
     axes3[0].plot(t, normal_force, color="tab:red", linewidth=1.5)
     if contact_start_idx is not None:
@@ -827,25 +1082,23 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         axes3[0].legend()
     axes3[0].set_title("Normal Force")
     axes3[0].set_ylabel("Force [N]")
-    force_limits = _wide_axis_limits_for_plot(normal_force, center=float(np.nanmean(normal_force)) if len(normal_force) else None)
-    if force_limits is not None:
-        axes3[0].set_ylim(*force_limits)
+    axes3[0].margins(y=0.08)
     axes3[0].grid(True, alpha=0.3)
     sliding_velocity_m_s = sliding_velocity * PLOT_MM_TO_M
-    sliding_velocity_m_s_smooth = _smooth_for_plot(sliding_velocity_m_s)
-    axes3[1].plot(t, sliding_velocity_m_s, color="tab:green", linewidth=0.7, alpha=0.08, label="raw")
-    axes3[1].plot(t, sliding_velocity_m_s_smooth, color="tab:green", linewidth=2.2, label="smoothed trend")
+    axes3[1].plot(
+        t,
+        sliding_velocity_m_s,
+        color="tab:green",
+        linewidth=1.4,
+        alpha=0.92,
+        label="reward/action variable velocity",
+    )
     if contact_start_idx is not None:
         axes3[1].axvline(t[plot_start], color="0.25", linestyle="--", linewidth=1.0)
-    axes3[1].set_title("Sliding Velocity")
+    axes3[1].set_title("Reward/Action Variable Sliding Velocity")
     axes3[1].set_xlabel("Time [s]")
     axes3[1].set_ylabel("Velocity [m/s]")
-    velocity_limits = _wide_axis_limits_for_plot(
-        sliding_velocity_m_s_smooth,
-        center=float(np.nanmean(sliding_velocity_m_s_smooth)) if len(sliding_velocity_m_s_smooth) else None,
-    )
-    if velocity_limits is not None:
-        axes3[1].set_ylim(*velocity_limits)
+    axes3[1].margins(y=0.08)
     axes3[1].grid(True, alpha=0.3)
     axes3[1].legend(loc="best")
     fig3.tight_layout()

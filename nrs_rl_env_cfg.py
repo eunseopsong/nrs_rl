@@ -46,8 +46,9 @@ from nrs_rl.tasks.manager_based.nrs_rl.assets.assets.robots.ur10e_w_spindle impo
     UR10E_W_SPINDLE_HIGH_PD_CFG,
 )
 
-# HDF5_TRAJ_PATH = "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/cmd_continue9D_flat.h5"
-HDF5_TRAJ_PATH = "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/cmd_continue9D_convex_2.h5"
+HDF5_TRAJ_PATH = "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/cmd_continue9D_flat.h5"
+# HDF5_TRAJ_PATH = "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/cmd_continue9D_convex_2.h5"
+local_vis.configure_run_log_dir(HDF5_TRAJ_PATH)
 
 
 @configclass
