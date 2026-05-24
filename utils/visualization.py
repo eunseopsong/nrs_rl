@@ -123,8 +123,8 @@ COMPARISON_REWARD_ACTION_IDEAL_BLEND = 0.88
 PLOT_MM_TO_M = 1.0e-3
 PLOT_SIGNAL_SMOOTHING_WINDOW = 101
 PLOT_STABILITY_BAND_FRACTION = 0.05
-PLOT_AXIS_EXPAND_FACTOR = 4.0
-PLOT_MIN_RELATIVE_AXIS_SPAN = 0.85
+PLOT_AXIS_EXPAND_FACTOR = 1.35
+PLOT_MIN_RELATIVE_AXIS_SPAN = 0.12
 PAPER_FORCE_COLOR = "#B2182B"
 PAPER_ADAPTIVE_COLOR = "#2166AC"
 PAPER_CONSTANT_COLOR = "#D6604D"
@@ -244,6 +244,20 @@ def _wide_axis_limits_for_plot(x, center=None, expand_factor=PLOT_AXIS_EXPAND_FA
         upper += -lower
         lower = 0.0
     return lower, upper
+
+
+def _contact_rate_axis_limits(*arrays, contact_mask=None, center=None):
+    values = []
+    for array in arrays:
+        array = np.asarray(array, dtype=float)
+        if contact_mask is not None and len(contact_mask) == len(array):
+            array = array[np.asarray(contact_mask, dtype=bool)]
+        array = array[np.isfinite(array) & (array > 0.0)]
+        if array.size:
+            values.append(array)
+    if not values:
+        return None
+    return _wide_axis_limits_for_plot(np.concatenate(values), center=center)
 
 
 def _normalize_heatmap_for_display(grid):
@@ -486,6 +500,21 @@ def _get_hdf5_position_np():
     except Exception:
         return None
     return None
+
+
+def _slice_hdf5_reference_path(hdf5_xyz, path_index_plot):
+    if hdf5_xyz is None or path_index_plot is None:
+        return hdf5_xyz
+    path_index_plot = np.asarray(path_index_plot, dtype=float)
+    finite_index = path_index_plot[np.isfinite(path_index_plot)]
+    if finite_index.size == 0:
+        return hdf5_xyz
+
+    start_idx = int(np.floor(np.min(finite_index)))
+    end_idx = int(np.ceil(np.max(finite_index))) + 1
+    start_idx = max(0, min(start_idx, len(hdf5_xyz) - 1))
+    end_idx = max(start_idx + 1, min(end_idx, len(hdf5_xyz)))
+    return hdf5_xyz[start_idx:end_idx]
 
 
 def _first_contact_index(normal_force, sliding_velocity):
@@ -840,10 +869,12 @@ def process_episode():
     )
     dremoval = removal_rate * dt
 
-    _global_removal_history["x"].extend(xyz[:, 0].tolist())
-    _global_removal_history["y"].extend(xyz[:, 1].tolist())
-    _global_removal_history["removal"].extend(dremoval.tolist())
-    for i in range(len(dremoval)):
+    contact_window_start = int(contact_start_idx) if contact_start_idx is not None else 0
+    contact_window_start = max(0, min(contact_window_start, len(dremoval) - 1))
+    _global_removal_history["x"].extend(xyz[contact_window_start:, 0].tolist())
+    _global_removal_history["y"].extend(xyz[contact_window_start:, 1].tolist())
+    _global_removal_history["removal"].extend(dremoval[contact_window_start:].tolist())
+    for i in range(contact_window_start, len(dremoval)):
         update_surface_grid(xyz[i, 0], xyz[i, 1], dremoval[i])
 
     ep_dir = RUN_LOG_DIR / f"ep{_episode_counter}"
@@ -1038,8 +1069,10 @@ def _save_velocity_comparison_plots(
     ax_amt.set_title("Temporal Preston Rate Profile")
     ax_amt.set_xlabel("Time [s]")
     ax_amt.set_ylabel("Preston rate [N m s$^{-1}$]")
-    amount_limits = _wide_axis_limits_for_plot(
-        np.concatenate([constant_rate_m_s, reward_rate_m_s]),
+    amount_limits = _contact_rate_axis_limits(
+        constant_rate_m_s,
+        reward_rate_m_s,
+        contact_mask=profiles["contact_mask"],
         center=target_rate_m_s if target_rate_m_s > 0.0 else None,
     )
     if amount_limits is not None:
@@ -1100,6 +1133,9 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
     removal_rate_plot = removal_rate[plot_start:]
     sliding_velocity_plot = sliding_velocity[plot_start:]
     state6_plot = state6[plot_start:]
+    path_index_plot = None
+    if path_index is not None and len(path_index) == len(t):
+        path_index_plot = np.asarray(path_index, dtype=float)[plot_start:]
 
     x, y = xyz_plot[:, 0], xyz_plot[:, 1]
     
@@ -1197,8 +1233,9 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         ax2.set_title("Adaptive Preston Rate Profile")
         ax2.set_xlabel("Time [s]")
         ax2.set_ylabel("Preston rate [N m s$^{-1}$]")
-        rate_limits = _wide_axis_limits_for_plot(
+        rate_limits = _contact_rate_axis_limits(
             reward_action_rate_m_s,
+            contact_mask=reward_action_contact_mask,
             center=reward_action_rate_mean if reward_action_rate_mean > 0.0 else None,
         )
         if rate_limits is not None:
@@ -1262,6 +1299,7 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         ax4.plot(xyz_plot[:, 0], xyz_plot[:, 1], xyz_plot[:, 2], color=PAPER_ADAPTIVE_COLOR, linewidth=1.6, label="End-effector path")
 
     hdf5_xyz = _get_hdf5_position_np()
+    hdf5_xyz = _slice_hdf5_reference_path(hdf5_xyz, path_index_plot)
     if hdf5_xyz is not None:
         ax4.plot(
             hdf5_xyz[:, 0],
