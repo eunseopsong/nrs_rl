@@ -13,7 +13,10 @@ def txt9d_to_h5(txt_path: str, h5_path: str) -> None:
 
     Output h5 datasets:
         - "position": shape (N, 6)
-        - "force":    shape (N, 3)
+        - "force":    shape (N, 3)아 참고로 너가 괜찮다 한 convert_txt_to_h5.py 코드는 이 경로에 잇어
+￼
+￼
+
     """
     data = np.loadtxt(txt_path, dtype=np.float64)
 
@@ -37,7 +40,7 @@ def txt9d_to_h5(txt_path: str, h5_path: str) -> None:
 
 if __name__ == "__main__":
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    txt_path = os.path.join(current_dir, "cmd_continue9D.txt")
-    h5_path = os.path.join(current_dir, "cmd_continue9D.h5")
+    txt_path = os.path.join(current_dir, "cmd_continue9D_10.txt")
+    h5_path = os.path.join(current_dir, "cmd_continue9D_convex_2.h5")
 
     txt9d_to_h5(txt_path, h5_path)
