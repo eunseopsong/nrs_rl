@@ -280,6 +280,7 @@ class ActionIntegrationCfg:
     force_band_min_n: float = 8.0
     force_band_max_n: float = 12.0
     force_band_index_rate_limit: float = 0.05
+    force_under_band_index_rate_limit: float = 4.0
     force_band_saturated_min_n: float = 7.5
     force_band_low_speed_scale: float = 0.65
     force_band_high_speed_scale: float = 0.45

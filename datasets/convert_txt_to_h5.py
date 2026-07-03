@@ -40,7 +40,7 @@ def txt9d_to_h5(txt_path: str, h5_path: str) -> None:
 
 if __name__ == "__main__":
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    txt_path = os.path.join(current_dir, "cmd_continue9D_10.txt")
+    txt_path = os.path.join(current_dir, "cmd_continue9D.txt")
     h5_path = os.path.join(current_dir, "cmd_continue9D_convex_2.h5")
 
     txt9d_to_h5(txt_path, h5_path)
