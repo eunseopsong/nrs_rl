@@ -17,24 +17,17 @@ from ....utils import debug as local_debug
 # ============================================================
 # FT preprocessing config
 # ============================================================
-# If your contact should be positive but raw sensor reports negative,
-# keep this as -1.0. If the opposite happens, change to +1.0.
-FT_FZ_SIGN = -1.0
-FT_FX_SIGN = 1.0
-FT_FY_SIGN = 1.0
-FT_TX_SIGN = 1.0
-FT_TY_SIGN = 1.0
-FT_TZ_SIGN = 1.0
+# The PhysX child-frame reaction has a defined sign; hardware FT axis flips
+# must not be applied here. Tool mass/COM are read from the physics asset.
 FT_FORCE_SCALE = 1.0
 FT_TORQUE_SCALE = 1.0
 
 FT_MOV_SIZE = 2
 
-# Number of initial samples used to estimate static bias.
-FT_BIAS_INIT_SAMPLES = 50
+# Match joint_command_bridge: discard startup impulses, then average at rest.
+FT_BIAS_WARMUP_SAMPLES = 50
+FT_BIAS_INIT_SAMPLES = 200
 FT_USE_BIAS = True
-FT_TOOL_MASS_KG = 1.6
-FT_TOOL_COG_M = (0.0, 0.0, -0.149303)
 
 # EMA for Fz only (main signal used by force control).
 FT_USE_FZ_EMA = True
@@ -206,11 +199,10 @@ def _maybe_reset_filter_state(env: "ManagerBasedRLEnv", cache_key, num_envs: int
             "mov_buffer": torch.zeros((num_envs, FT_MOV_SIZE, 6), device=device, dtype=torch.float32),
             "mov_count": torch.zeros((num_envs,), device=device, dtype=torch.long),
             "mov_cursor": torch.zeros((num_envs,), device=device, dtype=torch.long),
-            "g_init": torch.zeros((num_envs, 3), device=device, dtype=torch.float32),
-            "g_init_ready": torch.zeros((num_envs,), device=device, dtype=torch.bool),
-            "bias_accum": torch.zeros((num_envs,), device=device, dtype=torch.float32),
+            "bias_warmup_count": torch.zeros((num_envs,), device=device, dtype=torch.long),
+            "bias_accum": torch.zeros((num_envs, 6), device=device, dtype=torch.float32),
             "bias_count": torch.zeros((num_envs,), device=device, dtype=torch.long),
-            "bias": torch.zeros((num_envs,), device=device, dtype=torch.float32),
+            "bias": torch.zeros((num_envs, 6), device=device, dtype=torch.float32),
             "bias_ready": torch.zeros((num_envs,), device=device, dtype=torch.bool),
             "fz_ema": torch.zeros((num_envs,), device=device, dtype=torch.float32),
             "fz_ema_ready": torch.zeros((num_envs,), device=device, dtype=torch.bool),
@@ -226,8 +218,7 @@ def _maybe_reset_filter_state(env: "ManagerBasedRLEnv", cache_key, num_envs: int
             state["mov_buffer"][reset_mask] = 0.0
             state["mov_count"][reset_mask] = 0
             state["mov_cursor"][reset_mask] = 0
-            state["g_init"][reset_mask] = 0.0
-            state["g_init_ready"][reset_mask] = False
+            state["bias_warmup_count"][reset_mask] = 0
             state["bias_accum"][reset_mask] = 0.0
             state["bias_count"][reset_mask] = 0
             state["bias"][reset_mask] = 0.0
@@ -278,81 +269,58 @@ def _preprocess_wrench(env: "ManagerBasedRLEnv", cache, cache_key, wrench: torch
     Preprocess fixed-joint FT wrench.
 
     Applied operations:
-    1) static bias initialization/removal
-    2) Fz sign convention
-    3) Fz EMA
-    4) deadband
+    1) child-frame reaction to external base-frame wrench, with tool gravity removal
+    2) moving average and static six-axis zeroing
+    3) base Fz EMA and deadband
     """
     state = _maybe_reset_filter_state(env, cache_key, wrench.shape[0], wrench.device)
 
+    # PhysX reports the joint reaction ON the child, in the child's frame.
+    # It is not the raw hardware FT frame. At rest: joint + gravity + contact
+    # = 0. Negate the reaction, remove physical tool gravity, then rotate into
+    # the Y2 base axes (the robot asset aligns these with environment/world).
     out = wrench.clone()
-    sign_scale = torch.tensor(
-        [
-            FT_FX_SIGN * FT_FORCE_SCALE,
-            FT_FY_SIGN * FT_FORCE_SCALE,
-            FT_FZ_SIGN * FT_FORCE_SCALE,
-            FT_TX_SIGN * FT_TORQUE_SCALE,
-            FT_TY_SIGN * FT_TORQUE_SCALE,
-            FT_TZ_SIGN * FT_TORQUE_SCALE,
-        ],
-        device=out.device,
-        dtype=out.dtype,
-    )
-    out = out * sign_scale
-
-    out = _bridge_moving_average(state, out)
-
-    sensor_to_tcp = torch.tensor(
-        [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
-        device=out.device,
-        dtype=out.dtype,
-    )
-    sensor_force = out[:, 0:3]
-    sensor_moment = out[:, 3:6]
-    tcp_force = torch.matmul(sensor_force, sensor_to_tcp.T)
-    tcp_moment = torch.matmul(sensor_moment, sensor_to_tcp.T)
-
     robot = cache["robot"]
     child_link_index = int(cache["child_link_index"])
     quat_w = robot.data.body_quat_w[:, child_link_index, :].to(device=out.device, dtype=out.dtype)
-    rot_base_to_tcp = _quat_wxyz_to_rotmat(quat_w)
-
-    if FT_USE_BIAS and FT_TOOL_MASS_KG > 0.0:
-        g_base = torch.tensor([0.0, 0.0, -9.81], device=out.device, dtype=out.dtype).expand(out.shape[0], 3)
-        g_tcp = torch.bmm(rot_base_to_tcp.transpose(1, 2), g_base.unsqueeze(-1)).squeeze(-1)
-
-        init_mask = ~state["g_init_ready"]
-        if torch.any(init_mask):
-            state["g_init"][init_mask] = g_tcp[init_mask]
-            state["g_init_ready"][init_mask] = True
-
-        gravity_force = (g_tcp - state["g_init"]) * float(FT_TOOL_MASS_KG)
-        tool_cog = torch.tensor(FT_TOOL_COG_M, device=out.device, dtype=out.dtype).expand_as(gravity_force)
-        gravity_moment = torch.cross(tool_cog, gravity_force, dim=1)
-        tcp_force = tcp_force - gravity_force
-        tcp_moment = tcp_moment - gravity_moment
-
-    base_force = torch.bmm(rot_base_to_tcp, tcp_force.unsqueeze(-1)).squeeze(-1)
-    base_moment = torch.bmm(rot_base_to_tcp, tcp_moment.unsqueeze(-1)).squeeze(-1)
+    rotation = _quat_wxyz_to_rotmat(quat_w)
+    gravity = torch.tensor(env.cfg.sim.gravity, device=out.device, dtype=out.dtype).expand(out.shape[0], 3)
+    gravity_child = torch.bmm(rotation.transpose(1, 2), gravity.unsqueeze(-1)).squeeze(-1)
+    masses = robot.root_physx_view.get_masses()[:, child_link_index].to(out)
+    com = robot.root_physx_view.get_coms()[:, child_link_index, :3].to(out)
+    gravity_force = gravity_child * masses[:, None]
+    child_force = -out[:, :3] - gravity_force
+    child_moment = -out[:, 3:6] - torch.cross(com, gravity_force, dim=1)
+    base_force = torch.bmm(rotation, child_force.unsqueeze(-1)).squeeze(-1) * FT_FORCE_SCALE
+    base_moment = torch.bmm(rotation, child_moment.unsqueeze(-1)).squeeze(-1) * FT_TORQUE_SCALE
     out = torch.cat([base_force, base_moment], dim=1)
+    out = _bridge_moving_average(state, out)
 
     if FT_USE_BIAS:
         not_ready = ~state["bias_ready"]
+        # Copy before updating readiness: the final calibration sample must
+        # still produce strict zero, just as the ROS bridge does.
+        already_ready = state["bias_ready"].clone()
         if torch.any(not_ready):
-            state["bias_accum"][not_ready] += out[not_ready, 2]
-            state["bias_count"][not_ready] += 1
+            warmup = not_ready & (state["bias_warmup_count"] < FT_BIAS_WARMUP_SAMPLES)
+            sampling = not_ready & ~warmup
+            state["bias_warmup_count"][warmup] += 1
+            state["bias_accum"][sampling] += out[sampling]
+            state["bias_count"][sampling] += 1
             enough = state["bias_count"] >= FT_BIAS_INIT_SAMPLES
             newly_ready = enough & (~state["bias_ready"])
             if torch.any(newly_ready):
                 counts = state["bias_count"][newly_ready].to(dtype=torch.float32)
-                state["bias"][newly_ready] = state["bias_accum"][newly_ready] / counts
+                state["bias"][newly_ready] = state["bias_accum"][newly_ready] / counts[:, None]
                 state["bias_ready"][newly_ready] = True
                 state["fz_ema_ready"][newly_ready] = False
-            out[not_ready, 2] = 0.0
+            out[not_ready] = 0.0
 
-        ready_mask = state["bias_ready"]
-        if torch.any(ready_mask):
-            out[ready_mask, 2] = out[ready_mask, 2] - state["bias"][ready_mask]
+        if torch.any(already_ready):
+            if FT_USE_FULL_WRENCH_BIAS:
+                out[already_ready] -= state["bias"][already_ready]
+            else:
+                out[already_ready, 2] -= state["bias"][already_ready, 2]
 
     if FT_USE_FZ_EMA:
         fz = out[:, 2].clone()
@@ -415,7 +383,7 @@ def _print_ft_runtime_debug(env: "ManagerBasedRLEnv", cache, cache_key, raw_wren
     state = getattr(env, "_ft6_filter_state", {}).get(cache_key, {})
     bias_count = int(state.get("bias_count", torch.zeros(1, device=wrench.device, dtype=torch.long))[0].item())
     bias_ready = bool(state.get("bias_ready", torch.zeros(1, device=wrench.device, dtype=torch.bool))[0].item())
-    bias = float(state.get("bias", torch.zeros(1, device=wrench.device, dtype=torch.float32))[0].item())
+    bias = float(state.get("bias", torch.zeros((1, 6), device=wrench.device))[0, 2].item())
 
     local_debug.print_info(
         "\n[FT Runtime] "
@@ -438,11 +406,9 @@ def get_6axis_ft_fixed_joint(
     Physically this is the reaction wrench transmitted by `fixed_joint_name`
     onto the child link (body1 side).
 
-    Returned wrench is preprocessed with:
-    - bias removal
-    - Fz sign convention
-    - Fz EMA
-    - deadband
+    Returns an external wrench in the Y2 base axes after gravity removal,
+    static zeroing, moving average, Fz EMA and deadband. Sensor failures raise
+    instead of silently training a policy on a fabricated zero-force signal.
     """
     try:
         cache_key = (asset_name, fixed_joint_name, joint_prim_relpath)
@@ -472,7 +438,7 @@ def get_6axis_ft_fixed_joint(
 
         forces = physx_view.get_link_incoming_joint_force()
         if forces is None:
-            return torch.zeros((env.num_envs, 6), device=env.device, dtype=torch.float32)
+            raise RuntimeError("[FT] PhysX returned no joint reaction forces")
 
         if not isinstance(forces, torch.Tensor):
             forces = torch.tensor(forces, device=env.device, dtype=torch.float32)
@@ -488,15 +454,18 @@ def get_6axis_ft_fixed_joint(
 
         if wrench.shape[-1] != 6:
             raise RuntimeError(f"[FT] Expected last dim=6, got {tuple(wrench.shape)}")
+        if not torch.isfinite(wrench).all():
+            raise RuntimeError("[FT] Non-finite joint reaction forces")
 
         raw_wrench = wrench.clone()
         wrench = _preprocess_wrench(env, cache, cache_key, wrench)
         _set_step_cached_wrench(env, cache_key, wrench)
-        _print_ft_runtime_debug(env, cache, cache_key, raw_wrench, wrench)
+        if verbose:
+            _print_ft_runtime_debug(env, cache, cache_key, raw_wrench, wrench)
 
         local_debug.print_ft_sensor_debug(int(env.common_step_counter), wrench[0])
         return wrench
 
     except Exception as e:
         local_debug.print_fixed_joint_ft_failed(e)
-        return torch.zeros((env.num_envs, 6), device=env.device, dtype=torch.float32)
+        raise RuntimeError("Fixed-joint FT preprocessing failed") from e

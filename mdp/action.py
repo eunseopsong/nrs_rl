@@ -1,46 +1,26 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers
 # SPDX-License-Identifier: BSD-3-Clause
+"""Production-parity force control with a deliberately narrow RL interface.
+
+The policy controls only a bounded residual on path speed.  Cartesian force
+control and inverse kinematics are compiled from the same C++ sources used by
+Y2RobMotion.  Removal is measured from realized TCP motion, never from the
+scheduled command velocity.
+"""
 
 from __future__ import annotations
 
-"""
-================================================================================
-Force-aware Variable Path-Speed Action
-================================================================================
-
-[Goal]
-- Keep behavior identical to the current baseline.
-- Reduce runtime overhead / memory pressure where possible.
-- Keep:
-    * original ForceCon parameters
-    * variable index-speed scheduler
-    * debug capability
-
-[Optimizations in this version]
-- Pre-create joint limit tensors once in __init__
-- Avoid repeated tensor allocations where possible
-- Wrap reset/process/apply with torch.no_grad()
-- Do not build expensive debug payloads unless debug print is actually needed
-- Remove q_now/q_cmd debug payload generation path
-
-Units:
-- position: mm
-- orientation: rad
-- force: N
-================================================================================
-"""
-
+import importlib
 import math
 import os
+
 import h5py
 import torch
-import importlib
-
-from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.envs import ManagerBasedRLEnv
+from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
 
-from ..utils import debug as local_debug
+from ..utils import debug as local_debug, visualization as local_vis
+from ..utils.adaptive_velocity_debug import EpisodeDebugPrinter, arc_to_index, format_polishing_live
 
 y2_cfg = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.y2_control_pybind.y2_control_py.config"
@@ -48,180 +28,57 @@ y2_cfg = importlib.import_module(
 y2_pb = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.y2_control_pybind.y2_control_py._y2_control_pybind"
 )
+if not hasattr(y2_pb, "Mode3ForceController") or not hasattr(y2_pb, "RobotKinematics"):
+    raise RuntimeError(
+        "The y2_control_pybind extension is stale. Rebuild it with "
+        "python setup.py build_ext --inplace in y2_control_pybind."
+    )
 local_ft_sensor = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.assets.assets.sensors.six_axis_ft_sensor"
 )
 
 
-def normalize_quat(q: torch.Tensor) -> torch.Tensor:
-    return q / torch.clamp(torch.linalg.norm(q, dim=-1, keepdim=True), min=1e-8)
-
-
-def rotmat_to_quat(R: torch.Tensor) -> torch.Tensor:
-    n = R.shape[0]
-    q = torch.zeros((n, 4), device=R.device, dtype=R.dtype)
-
-    trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]
-
-    mask = trace > 0.0
-    if torch.any(mask):
-        s = torch.sqrt(trace[mask] + 1.0) * 2.0
-        q[mask, 0] = 0.25 * s
-        q[mask, 1] = (R[mask, 2, 1] - R[mask, 1, 2]) / s
-        q[mask, 2] = (R[mask, 0, 2] - R[mask, 2, 0]) / s
-        q[mask, 3] = (R[mask, 1, 0] - R[mask, 0, 1]) / s
-
-    mask1 = (~mask) & (R[:, 0, 0] > R[:, 1, 1]) & (R[:, 0, 0] > R[:, 2, 2])
-    if torch.any(mask1):
-        s = torch.sqrt(1.0 + R[mask1, 0, 0] - R[mask1, 1, 1] - R[mask1, 2, 2]) * 2.0
-        q[mask1, 0] = (R[mask1, 2, 1] - R[mask1, 1, 2]) / s
-        q[mask1, 1] = 0.25 * s
-        q[mask1, 2] = (R[mask1, 0, 1] + R[mask1, 1, 0]) / s
-        q[mask1, 3] = (R[mask1, 0, 2] + R[mask1, 2, 0]) / s
-
-    mask2 = (~mask) & (~mask1) & (R[:, 1, 1] > R[:, 2, 2])
-    if torch.any(mask2):
-        s = torch.sqrt(1.0 + R[mask2, 1, 1] - R[mask2, 0, 0] - R[mask2, 2, 2]) * 2.0
-        q[mask2, 0] = (R[mask2, 0, 2] - R[mask2, 2, 0]) / s
-        q[mask2, 1] = (R[mask2, 0, 1] + R[mask2, 1, 0]) / s
-        q[mask2, 2] = 0.25 * s
-        q[mask2, 3] = (R[mask2, 1, 2] + R[mask2, 2, 1]) / s
-
-    mask3 = (~mask) & (~mask1) & (~mask2)
-    if torch.any(mask3):
-        s = torch.sqrt(1.0 + R[mask3, 2, 2] - R[mask3, 0, 0] - R[mask3, 1, 1]) * 2.0
-        q[mask3, 0] = (R[mask3, 1, 0] - R[mask3, 0, 1]) / s
-        q[mask3, 1] = (R[mask3, 0, 2] + R[mask3, 2, 0]) / s
-        q[mask3, 2] = (R[mask3, 1, 2] + R[mask3, 2, 1]) / s
-        q[mask3, 3] = 0.25 * s
-
-    return normalize_quat(q)
-
-
 def spatial_to_rotmat(spatial: torch.Tensor) -> torch.Tensor:
-    device = spatial.device
-    dtype = spatial.dtype
-    n = spatial.shape[0]
-
-    angle = torch.norm(spatial, dim=-1, keepdim=True)
-    eps = 1e-10
-
-    axis = torch.where(angle > eps, spatial / angle, torch.zeros_like(spatial))
-    ax = axis[:, 0]
-    ay = axis[:, 1]
-    az = axis[:, 2]
-    th = angle[:, 0]
-
-    c = torch.cos(th)
-    s = torch.sin(th)
-    one_c = 1.0 - c
-
-    R = torch.zeros((n, 3, 3), device=device, dtype=dtype)
-
-    R[:, 0, 0] = c + ax * ax * one_c
-    R[:, 0, 1] = ax * ay * one_c - az * s
-    R[:, 0, 2] = ax * az * one_c + ay * s
-
-    R[:, 1, 0] = ay * ax * one_c + az * s
-    R[:, 1, 1] = c + ay * ay * one_c
-    R[:, 1, 2] = ay * az * one_c - ax * s
-
-    R[:, 2, 0] = az * ax * one_c - ay * s
-    R[:, 2, 1] = az * ay * one_c + ax * s
-    R[:, 2, 2] = c + az * az * one_c
-
-    zero_mask = angle[:, 0] <= eps
-    if torch.any(zero_mask):
-        R[zero_mask] = torch.eye(3, device=device, dtype=dtype)
-
-    return R
+    angle = torch.linalg.norm(spatial, dim=-1, keepdim=True)
+    axis = spatial / torch.clamp(angle, min=1.0e-10)
+    x, y, z = axis.unbind(-1)
+    theta = angle.squeeze(-1)
+    c, s, one_c = torch.cos(theta), torch.sin(theta), 1.0 - torch.cos(theta)
+    result = torch.empty((*spatial.shape[:-1], 3, 3), device=spatial.device, dtype=spatial.dtype)
+    result[..., 0, 0] = c + x * x * one_c
+    result[..., 0, 1] = x * y * one_c - z * s
+    result[..., 0, 2] = x * z * one_c + y * s
+    result[..., 1, 0] = y * x * one_c + z * s
+    result[..., 1, 1] = c + y * y * one_c
+    result[..., 1, 2] = y * z * one_c - x * s
+    result[..., 2, 0] = z * x * one_c - y * s
+    result[..., 2, 1] = z * y * one_c + x * s
+    result[..., 2, 2] = c + z * z * one_c
+    small = angle.squeeze(-1) < 1.0e-10
+    if torch.any(small):
+        result[small] = torch.eye(3, device=spatial.device, dtype=spatial.dtype)
+    return result
 
 
-def rotmat_to_spatial(R: torch.Tensor) -> torch.Tensor:
-    trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]
-    cos_angle = (trace - 1.0) / 2.0
-    cos_angle = torch.clamp(cos_angle, -1.0, 1.0)
+def rotmat_to_spatial(rotation: torch.Tensor) -> torch.Tensor:
+    cos_angle = torch.clamp(
+        (rotation[..., 0, 0] + rotation[..., 1, 1] + rotation[..., 2, 2] - 1.0) * 0.5,
+        -1.0,
+        1.0,
+    )
     angle = torch.acos(cos_angle)
-
-    eps = 1e-6
-    pi = torch.tensor(math.pi, device=R.device, dtype=R.dtype)
-
-    out = torch.zeros((R.shape[0], 3), device=R.device, dtype=R.dtype)
-
-    small_mask = torch.abs(angle) < eps
-    if torch.any(small_mask):
-        out[small_mask] = 0.0
-
-    pi_mask = torch.abs(angle - pi) < eps
-    if torch.any(pi_mask):
-        R_pi = R[pi_mask]
-        angle_pi = angle[pi_mask]
-        spatial_list = []
-
-        for i in range(R_pi.shape[0]):
-            Ri = R_pi[i]
-            ai = angle_pi[i]
-
-            if Ri[0, 0] >= Ri[1, 1] and Ri[0, 0] >= Ri[2, 2]:
-                axis_x = torch.sqrt(torch.clamp((Ri[0, 0] + 1.0) / 2.0, min=0.0))
-                denom = 2.0 * torch.clamp(axis_x, min=1e-8)
-                axis_y = Ri[0, 1] / denom
-                axis_z = Ri[0, 2] / denom
-            elif Ri[1, 1] >= Ri[2, 2]:
-                axis_y = torch.sqrt(torch.clamp((Ri[1, 1] + 1.0) / 2.0, min=0.0))
-                denom = 2.0 * torch.clamp(axis_y, min=1e-8)
-                axis_x = Ri[0, 1] / denom
-                axis_z = Ri[1, 2] / denom
-            else:
-                axis_z = torch.sqrt(torch.clamp((Ri[2, 2] + 1.0) / 2.0, min=0.0))
-                denom = 2.0 * torch.clamp(axis_z, min=1e-8)
-                axis_x = Ri[0, 2] / denom
-                axis_y = Ri[1, 2] / denom
-
-            spatial_list.append(torch.stack([axis_x * ai, axis_y * ai, axis_z * ai]))
-
-        out[pi_mask] = torch.stack(spatial_list, dim=0)
-
-    normal_mask = ~(small_mask | pi_mask)
-    if torch.any(normal_mask):
-        Rn = R[normal_mask]
-        ang = angle[normal_mask]
-        sin_ang = torch.sin(ang)
-
-        axis_x = (Rn[:, 2, 1] - Rn[:, 1, 2]) / (2.0 * sin_ang)
-        axis_y = (Rn[:, 0, 2] - Rn[:, 2, 0]) / (2.0 * sin_ang)
-        axis_z = (Rn[:, 1, 0] - Rn[:, 0, 1]) / (2.0 * sin_ang)
-
-        out[normal_mask, 0] = axis_x * ang
-        out[normal_mask, 1] = axis_y * ang
-        out[normal_mask, 2] = axis_z * ang
-
-    return out
-
-
-_HOME_Q = torch.tensor(
-    [0.5585, -2.0949, -1.5711, -1.0472, 1.5708, 0.5585],
-    dtype=torch.float32,
-)
-
-
-@configclass
-class OriginalControllerForceConCfg:
-    force_md_ratio: float = 1000.0
-    force_fc_fext: float = 50.0
-    force_free_mass: float = 2.0
-    force_free_damping: float = 6000.0
-    force_free_stiffness: float = 2000.0
-    force_contact_stiffness: float = 0.0
-    force_recovery_tau: float = 3.0
-    force_action_low: tuple = (-0.25, -0.25)
-    force_action_high: tuple = (0.25, 0.25)
-    force_mass_min: float = 0.5
-    force_mass_max: float = 5.0
-    force_alpha_min: float = 0.5
-    force_alpha_max: float = 3.0
-    force_alpha_rate_up: float = 4.0
-    force_alpha_rate_down: float = 4.0
+    vector = torch.stack(
+        (
+            rotation[..., 2, 1] - rotation[..., 1, 2],
+            rotation[..., 0, 2] - rotation[..., 2, 0],
+            rotation[..., 1, 0] - rotation[..., 0, 1],
+        ),
+        dim=-1,
+    )
+    scale = angle / torch.clamp(2.0 * torch.sin(angle), min=1.0e-7)
+    output = vector * scale.unsqueeze(-1)
+    output[angle < 1.0e-6] = 0.0
+    return output
 
 
 @configclass
@@ -229,284 +86,161 @@ class ActionIntegrationCfg:
     body_name: str = "spindle_link"
     fixed_joint_name: str = "tool0_to_spindle"
     joint_prim_relpath: str = "joints"
-
     hdf5_file_path: str = ""
     position_dataset_key: str = "position"
     force_dataset_key: str = "force"
-
     action_dim: int = 1
 
-    target_mrr_n_mm_s: float = 500.0
-    speed_action_scale: float = 0.35
-    base_index_rate: float = 48.0
-    min_index_rate: float = 1.0
-    max_index_rate: float = 96.0
-    progress_rate_ema_beta: float = 0.55
-    command_rate_ema_beta: float = 0.20
-    command_rate_max_delta_up: float = 4.0
-    command_rate_max_delta_down: float = 12.0
-    command_velocity_ema_beta: float = 0.15
-    command_velocity_max_delta_up_mm_s: float = 12.0
-    command_velocity_max_delta_down_mm_s: float = 36.0
-    command_velocity_spike_delta_mm_s: float = 8.0
-    command_velocity_spike_return_ratio: float = 0.20
-    command_velocity_hard_stop_decay: float = 0.85
-    command_velocity_max_mm_s: float = 45.0
-    force_filter_beta: float = 0.20
-    force_spike_delta_n: float = 1.20
-    force_spike_hold_steps: int = 8
-    force_spike_velocity_decay: float = 0.92
-    force_velocity_compensation: float = 0.25
-    command_mrr_ema_beta: float = 0.12
-    command_mrr_max_delta_up_n_mm_s: float = 35.0
-    command_mrr_max_delta_down_n_mm_s: float = 70.0
-    command_mrr_min_ratio: float = 0.55
-    command_mrr_max_ratio: float = 1.25
-    force_eps_n: float = 1.0
-    force_tracking_ready_ratio: float = 0.8
-    min_force_rate_scale: float = 0.25
-    force_error_slowdown_ratio: float = 0.35
-    min_force_error_rate_scale: float = 0.35
-    force_normal_push_sign: float = -1.0
-    force_normal_kp_mm_per_n: float = 0.26
-    force_normal_ki_mm_per_n_s: float = 4.00
-    force_normal_release_kp_mm_per_n: float = 0.35
-    force_normal_max_step_mm: float = 2.00
-    force_normal_retract_max_step_mm: float = 6.00
-    force_normal_offset_limit_mm: float = 28.0
-    force_admittance_delta_limit_mm: float = 1.5
-    force_total_normal_delta_limit_mm: float = 30.0
-    force_normal_deadband_n: float = 0.35
-    force_band_min_n: float = 8.0
-    force_band_max_n: float = 12.0
-    force_band_index_rate_limit: float = 0.05
-    force_under_band_index_rate_limit: float = 4.0
-    force_band_saturated_min_n: float = 7.5
-    force_band_low_speed_scale: float = 0.65
-    force_band_high_speed_scale: float = 0.45
-    force_band_hold_progress: bool = True
-    force_severe_underforce_n: float = 7.0
-    force_severe_underforce_hold_progress: bool = True
-    surface_uniformity_feedback_gain: float = 0.0
-    surface_uniformity_feedback_deadband: float = 0.08
-    surface_uniformity_feedback_min_scale: float = 0.85
-    surface_uniformity_feedback_max_scale: float = 1.15
-    surface_uniformity_feedback_warmup_bins: int = 8
-    force_steady_error_band_n: float = 5.0
-    force_overload_ratio: float = 1.5
-    force_overload_rate_scale: float = 0.02
-    path_tracking_slowdown_start_mm: float = 2.0
-    path_tracking_stop_mm: float = 8.0
-    path_tracking_min_rate_scale: float = 0.0
-    path_projection_window: int = 160
-    path_projection_max_advance_index: float = 0.0
-    path_lookahead_min_index: float = 0.0
-    path_lookahead_max_index: float = 8.0
-    path_lookahead_time_s: float = 0.015
-    path_command_max_xy_step_mm: float = 0.0
-    path_command_max_z_step_mm: float = 4.0
-    approach_interpolation_enabled: bool = True
+    nominal_speed_mm_s: float = 6.0
+    residual_speed_fraction: float = 0.67
+    min_speed_mm_s: float = 1.0
+    max_speed_mm_s: float = 12.0
+    action_filter_tau_s: float = 0.08
+    action_slew_per_s: float = 4.0
+
+    force_overload_ratio: float = 1.6
+    tracking_stop_mm: float = 10.0
+    contact_force_n: float = 1.5
+    projection_window: int = 200
+    surface_bins: int = 256
     approach_duration_s: float = 2.0
+    # Model the gravity feed-forward of the robot's inner position servo.
+    # Gravity remains enabled in PhysX and the FT sensor still sees tool weight.
+    joint_gravity_compensation: bool = True
 
+    # Sim-to-real randomization in measurement/latency channels.  These are
+    # redrawn independently per environment at reset.
+    force_scale_range: tuple[float, float] = (0.90, 1.10)
+    force_bias_range_n: tuple[float, float] = (-0.75, 0.75)
+    max_action_delay_steps: int = 3
+    # One selected environment only; interval is in control steps (8 ms each).
     enable_debug_print: bool = True
-    debug_print_interval: int = 10
+    debug_print_interval: int = 50
     debug_env_id: int = 0
-
-    joint_lower_limits: tuple | None = (
-        -2.0 * math.pi,
-        -2.0 * math.pi,
-        -math.pi,
-        -2.0 * math.pi,
-        -2.0 * math.pi,
-        -2.0 * math.pi,
-    )
-    joint_upper_limits: tuple | None = (
-        2.0 * math.pi,
-        2.0 * math.pi,
-        math.pi,
-        2.0 * math.pi,
-        2.0 * math.pi,
-        2.0 * math.pi,
-    )
 
 
 @configclass
 class AdmittanceControlActionCfg(ActionTermCfg):
     class_type: type | None = None
     asset_name: str = "robot"
-
-    original_forcecon: OriginalControllerForceConCfg = OriginalControllerForceConCfg()
     integration: ActionIntegrationCfg = ActionIntegrationCfg()
 
 
 class AdmittanceControlAction(ActionTerm):
     cfg: AdmittanceControlActionCfg
 
-    def __init__(self, cfg, env: ManagerBasedRLEnv):
+    def __init__(self, cfg: AdmittanceControlActionCfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
-
         self.cfg = cfg
-        self.fc_cfg = cfg.original_forcecon
         self.int_cfg = cfg.integration
-
-        self.robot = self._env.scene[cfg.asset_name]
-        self._num_envs_local = self._env.num_envs
-        self._step_dt_local = float(self._env.step_dt)
-        self._control_period = float(getattr(y2_cfg, "CONTROL_PERIOD", self._step_dt_local))
-
-        body_ids = self.robot.find_bodies(self.int_cfg.body_name)[0]
-        if len(body_ids) == 0:
-            raise ValueError(f"[Action] body_name='{self.int_cfg.body_name}' not found.")
-        self.ee_idx = int(body_ids[0])
-
-        self._raw_actions = torch.zeros((self._num_envs_local, self.int_cfg.action_dim), device=self.device)
-        self._processed_actions = torch.zeros_like(self._raw_actions)
-
-        traj_full = self._load_hdf5_positions(self.int_cfg.hdf5_file_path, self.int_cfg.position_dataset_key)
-        force_full = self._load_hdf5_forces(self.int_cfg.hdf5_file_path, self.int_cfg.force_dataset_key, traj_full.shape[0])
-
-        self.traj_positions = traj_full.contiguous()
-        self.traj_forces = force_full.contiguous()
-        self.traj_length = self.traj_positions.shape[0]
-        segment_lengths = torch.linalg.norm(
-            self.traj_positions[1:, 0:3] - self.traj_positions[:-1, 0:3],
-            dim=-1,
-        )
-        self.traj_segment_lengths_mm = torch.empty((self.traj_length,), dtype=torch.float32, device=self.device)
-        self.traj_segment_lengths_mm[:-1] = segment_lengths
-        self.traj_segment_lengths_mm[-1] = segment_lengths[-1] if segment_lengths.numel() > 0 else 1.0
-        self.traj_segment_lengths_mm = torch.clamp(self.traj_segment_lengths_mm, min=1.0e-6)
-
-        self.path_cursor = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
-        self.path_index = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
-        self.current_target_index = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
-        self.path_done = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
-        self.current_index_delta = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
-        self.current_sliding_velocity_mm_s = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
-        self.command_velocity_filtered_mm_s = torch.zeros(
-            (self._num_envs_local,),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        self.current_abs_fz = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
-        self.filtered_abs_fz = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
-        self.force_spike_hold_count = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
-        self.current_mrr_n_mm_s = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
-        self.prev_mrr_n_mm_s = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
-        self.current_mrr_delta_n_mm_s = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
-        self.command_mrr_filtered_n_mm_s = torch.zeros(
-            (self._num_envs_local,),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        self.cumulative_removal = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
-        self.surface_removal_by_index = torch.zeros(
-            (self._num_envs_local, self.traj_length),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        self.surface_visit_counts = torch.zeros(
-            (self._num_envs_local, self.traj_length),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        self.surface_last_index = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
-        self.current_path_tracking_error_mm = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
-        self.force_normal_offset_mm = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
-        self.force_normal_error_i = torch.zeros((self._num_envs_local,), dtype=torch.float32, device=self.device)
-        self.approach_active = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
-        self.approach_step = torch.zeros((self._num_envs_local,), dtype=torch.long, device=self.device)
-        self.approach_start_pos_mm = torch.zeros((self._num_envs_local, 3), dtype=torch.float32, device=self.device)
-        self.approach_start_wxyz = torch.zeros((self._num_envs_local, 3), dtype=torch.float32, device=self.device)
-        self.approach_total_steps = max(
-            1,
-            int(round(float(self.int_cfg.approach_duration_s) / max(self._step_dt_local, 1.0e-8))),
-        )
-
-        self.progress_rate_filtered = torch.full(
-            (self._num_envs_local,),
-            float(self.int_cfg.base_index_rate),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        self.command_rate_filtered = torch.full(
-            (self._num_envs_local,),
-            float(self.int_cfg.min_index_rate),
-            dtype=torch.float32,
-            device=self.device,
-        )
-
-        self.des_pos_mm_raw = torch.zeros((self._num_envs_local, 3), device=self.device)
-        self.des_wxyz_raw = torch.zeros((self._num_envs_local, 3), device=self.device)
-        self.des_force = torch.zeros((self._num_envs_local, 3), device=self.device)
-        self.cmd_target_xyz_mm = torch.zeros((self._num_envs_local, 3), dtype=torch.float32, device=self.device)
-
-        self.prev_q_cmd_6 = torch.zeros((self._num_envs_local, 6), device=self.device)
-        self.prev_valid = torch.zeros((self._num_envs_local,), dtype=torch.bool, device=self.device)
-
-        if self.int_cfg.joint_lower_limits is not None:
-            self._q_min = torch.tensor(self.int_cfg.joint_lower_limits, device=self.device, dtype=torch.float32)
-        else:
-            self._q_min = None
-        if self.int_cfg.joint_upper_limits is not None:
-            self._q_max = torch.tensor(self.int_cfg.joint_upper_limits, device=self.device, dtype=torch.float32)
-        else:
-            self._q_max = None
-
-        self.kin = y2_pb.UR10eKinematics(
-            dt=self._control_period,
-            ee2tcp=getattr(y2_cfg, "EE2TCP", [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ]),
-        )
-
-        self.R_offset = self._get_orientation_offset_rotm(self.device)
-
-        model_path = getattr(y2_cfg, "CONTEXT_NAF_MDGRADI_CKPT", None) or getattr(y2_cfg, "FORCECON_MODEL_PATH", None)
-        if not model_path:
-            raise RuntimeError("ForceCon model path not found in y2_control_pybind config.")
-
-        self.force_controllers = []
-        for _ in range(self._num_envs_local):
-            self.force_controllers.append(
-                y2_pb.ForceCon1DMode5(
-                    model_path,
-                    self._step_dt_local,
-                    1,
-                    "cpu",
-                    float(self.fc_cfg.force_md_ratio),
-                    float(self.fc_cfg.force_fc_fext),
-                    float(self.fc_cfg.force_free_mass),
-                    float(self.fc_cfg.force_free_damping),
-                    float(self.fc_cfg.force_free_stiffness),
-                    float(self.fc_cfg.force_contact_stiffness),
-                    float(self.fc_cfg.force_recovery_tau),
-                    list(self.fc_cfg.force_action_low),
-                    list(self.fc_cfg.force_action_high),
-                    float(self.fc_cfg.force_mass_min),
-                    float(self.fc_cfg.force_mass_max),
-                    float(self.fc_cfg.force_alpha_min),
-                    float(self.fc_cfg.force_alpha_max),
-                    float(self.fc_cfg.force_alpha_rate_up),
-                    float(self.fc_cfg.force_alpha_rate_down),
-                )
+        self.robot = env.scene[cfg.asset_name]
+        self._num_envs_local = env.num_envs
+        self._step_dt_local = float(env.step_dt)
+        self._debug_printer = None
+        if self.int_cfg.enable_debug_print:
+            if not 0 <= self.int_cfg.debug_env_id < env.num_envs:
+                raise ValueError(f"debug_env_id must be in [0, {env.num_envs - 1}]")
+            self._debug_printer = EpisodeDebugPrinter(
+                self.int_cfg.debug_env_id, self.int_cfg.debug_print_interval
+            )
+        if abs(self._step_dt_local - float(y2_cfg.CONTROL_PERIOD)) > 1.0e-9:
+            raise RuntimeError(
+                f"Isaac step_dt={self._step_dt_local} differs from production "
+                f"CONTROL_PERIOD={y2_cfg.CONTROL_PERIOD}"
             )
 
-        local_debug.print_action_init(
-            hdf5_file_path=self.int_cfg.hdf5_file_path,
-            position_dataset_key=self.int_cfg.position_dataset_key,
-            traj_shape=tuple(traj_full.shape),
-            body_name=self.int_cfg.body_name,
-            ee_idx=self.ee_idx,
-            num_envs=self._num_envs_local,
+        body_ids = self.robot.find_bodies(self.int_cfg.body_name)[0]
+        if not body_ids:
+            raise ValueError(f"body '{self.int_cfg.body_name}' was not found")
+        self.ee_idx = int(body_ids[0])
+
+        self._raw_actions = torch.zeros((env.num_envs, 1), device=self.device)
+        self._processed_actions = torch.zeros_like(self._raw_actions)
+        delay_slots = max(1, int(self.int_cfg.max_action_delay_steps) + 1)
+        self._action_history = torch.zeros((env.num_envs, delay_slots), device=self.device)
+        self._action_delay = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
+
+        self.traj_positions, self.traj_forces = self._load_trajectory()
+        self.traj_length = int(self.traj_positions.shape[0])
+        lengths = torch.linalg.norm(
+            self.traj_positions[1:, :3] - self.traj_positions[:-1, :3], dim=-1
         )
+        if lengths.numel() == 0 or float(torch.sum(lengths)) <= 0.0:
+            raise ValueError("trajectory must contain at least two distinct positions")
+        self.segment_lengths_mm = torch.clamp(lengths, min=1.0e-6)
+        self.arc_mm = torch.cat(
+            (torch.zeros(1, device=self.device), torch.cumsum(self.segment_lengths_mm, dim=0))
+        )
+        self.path_length_mm = float(self.arc_mm[-1])
+        self._diagnostic_arc_mm = self.arc_mm.detach().cpu().tolist()
+
+        n, bins = env.num_envs, int(self.int_cfg.surface_bins)
+        self.path_cursor_mm = torch.zeros(n, device=self.device)
+        self.path_cursor = self.path_cursor_mm  # compatibility for diagnostics
+        self.path_index = torch.zeros(n, dtype=torch.long, device=self.device)
+        self.current_target_index = torch.zeros_like(self.path_index)
+        self.physical_path_index = torch.zeros_like(self.path_index)
+        self.path_done = torch.zeros(n, dtype=torch.bool, device=self.device)
+        self.current_index_delta = torch.zeros(n, device=self.device)
+        self.commanded_speed_mm_s = torch.zeros(n, device=self.device)
+        self.current_sliding_velocity_mm_s = torch.zeros(n, device=self.device)
+        self.current_abs_fz = torch.zeros(n, device=self.device)
+        self.force_error_n = torch.zeros(n, device=self.device)
+        self.force_derivative_n_s = torch.zeros(n, device=self.device)
+        self.current_path_tracking_error_mm = torch.zeros(n, device=self.device)
+        self.prev_mrr_n_mm_s = torch.zeros(n, device=self.device)
+        self.current_mrr_n_mm_s = torch.zeros(n, device=self.device)
+        self.current_mrr_delta_n_mm_s = torch.zeros(n, device=self.device)
+        self.realized_removal_step = torch.zeros(n, device=self.device)
+        self.cumulative_removal = torch.zeros(n, device=self.device)
+        self.surface_removal_by_index = torch.zeros((n, bins), device=self.device)
+        self.surface_visit_counts = torch.zeros((n, bins), device=self.device)
+        self.surface_last_index = torch.zeros(n, dtype=torch.long, device=self.device)
+        self.safety_shield_active = torch.zeros(n, dtype=torch.bool, device=self.device)
+        self.policy_state = torch.zeros((n, 12), device=self.device)
+        self.polishing_active = torch.zeros(n, dtype=torch.bool, device=self.device)
+
+        self._filtered_action = torch.zeros(n, device=self.device)
+        self._previous_force = torch.zeros(n, device=self.device)
+        self._previous_tcp_mm = torch.zeros((n, 3), device=self.device)
+        self._previous_tcp_valid = torch.zeros(n, dtype=torch.bool, device=self.device)
+        self._force_scale = torch.ones(n, device=self.device)
+        self._force_bias = torch.zeros(n, device=self.device)
+        self._approach_step = torch.zeros(n, dtype=torch.long, device=self.device)
+        self._calibration_step = torch.zeros(n, dtype=torch.long, device=self.device)
+        self._calibration_steps = (
+            local_ft_sensor.FT_BIAS_WARMUP_SAMPLES + local_ft_sensor.FT_BIAS_INIT_SAMPLES
+            if local_ft_sensor.FT_USE_BIAS else 0
+        )
+        self._approach_steps = max(1, round(self.int_cfg.approach_duration_s / self._step_dt_local))
+        self._approach_start = torch.zeros((n, 6), device=self.device)
+        self._previous_q_command = torch.zeros((n, 6), device=self.device)
+        self._previous_q_valid = torch.zeros(n, dtype=torch.bool, device=self.device)
+
+        self.kinematics = [
+            y2_pb.RobotKinematics(
+                robot_model=y2_cfg.ROBOT_KINEMATICS,
+                dt=y2_cfg.CONTROL_PERIOD,
+                ee2tcp=y2_cfg.EE2TCP,
+            )
+            for _ in range(n)
+        ]
+        self.force_controllers = [
+            y2_pb.Mode3ForceController(
+                y2_cfg.NAF_MDGRADI_CKPT,
+                y2_cfg.CONTROL_PERIOD,
+                y2_cfg.FORCE_CON_COORDINATE,
+                y2_cfg.FORCE_SWITCH_DESIRED_FORCE_THRESHOLD,
+                y2_cfg.FORCE_SWITCH_ACTUAL_FORCE_THRESHOLD,
+                y2_cfg.FORCE_SWITCH_PRECONTACT_FORCE_HOLD,
+                y2_cfg.FORCE_SWITCH_RETURN_TAU,
+            )
+            for _ in range(n)
+        ]
 
     @property
     def action_dim(self):
-        return self.int_cfg.action_dim
+        return 1
 
     @property
     def raw_actions(self):
@@ -516,748 +250,315 @@ class AdmittanceControlAction(ActionTerm):
     def processed_actions(self):
         return self._processed_actions
 
-    def _load_hdf5_positions(self, file_path: str, dataset_key: str) -> torch.Tensor:
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"[Action] HDF5 file not found: {file_path}")
-        with h5py.File(file_path, "r") as f:
-            data = f[dataset_key][:] if dataset_key in f else f[list(f.keys())[0]][:]
-        data = torch.tensor(data, dtype=torch.float32, device=self.device)
-        return data[:, :6]
-
-    def _load_hdf5_forces(self, file_path: str, dataset_key: str, expected_rows: int) -> torch.Tensor:
-        with h5py.File(file_path, "r") as f:
-            data = f[dataset_key][:] if dataset_key in f else torch.zeros((expected_rows, 3), dtype=torch.float32).cpu().numpy()
-        data = torch.tensor(data, dtype=torch.float32, device=self.device)
-        return data[:, :3]
-
-    def _get_orientation_offset_rotm(self, device: torch.device) -> torch.Tensor:
-        T_home = self.kin.forward_kinematics(_HOME_Q.detach().cpu().tolist())
-        T_home = torch.tensor(T_home, dtype=torch.float32, device=device)
-        R_home_fk = T_home[:3, :3]
-        desired_home_spatial = torch.tensor([[0.0, 0.0, 1.5708]], dtype=torch.float32, device=device)
-        R_home_desired = spatial_to_rotmat(desired_home_spatial).squeeze(0)
-        return R_home_desired @ R_home_fk.T
-
-    def _fk_pose_pybind_corrected(self, q6: torch.Tensor):
-        T = self.kin.forward_kinematics(q6.detach().cpu().to(torch.float64).tolist())
-        T = torch.tensor(T, dtype=torch.float32, device=self.device)
-        pos_mm = T[:3, 3]
-        R_fk = T[:3, :3]
-        R_corr = self.R_offset @ R_fk
-        quat_corr = rotmat_to_quat(R_corr.unsqueeze(0)).squeeze(0)
-        wxyz_corr = rotmat_to_spatial(R_corr.unsqueeze(0)).squeeze(0)
-        return pos_mm, quat_corr, wxyz_corr, R_corr
-
-    def _solve_pybind_single_step_ik(self, q_seed: torch.Tensor, target_pos_mm: torch.Tensor, target_rotm: torch.Tensor):
-        T = self.kin.forward_kinematics(q_seed.detach().cpu().to(torch.float64).tolist())
-        T = torch.tensor(T, dtype=torch.float32, device=self.device)
-
-        pos_cur_mm = T[:3, 3]
-        R_fk = T[:3, :3]
-        R_cur = self.R_offset @ R_fk
-
-        pos_err_mm = target_pos_mm - pos_cur_mm
-        rot_err_rad = rotmat_to_spatial((target_rotm @ R_cur.T).unsqueeze(0)).squeeze(0)
-
-        pos_err_norm_mm = torch.linalg.norm(pos_err_mm)
-        rot_err_norm_rad = torch.linalg.norm(rot_err_rad)
-
-        err_6 = torch.cat([pos_err_mm, rot_err_rad], dim=0)
-
-        J = self.kin.calculate_jacobian(q_seed.detach().cpu().to(torch.float64).tolist())
-        J = torch.tensor(J, dtype=torch.float32, device=self.device)
-
-        dq = torch.linalg.lstsq(J, err_6.unsqueeze(-1)).solution.squeeze(-1)
-        dq_norm = float(torch.linalg.norm(dq).item())
-
-        q_next = q_seed + dq
-
-        if self._q_min is not None and self._q_max is not None:
-            q_next = torch.clamp(q_next, self._q_min, self._q_max)
-
-        return q_next, pos_err_norm_mm, rot_err_norm_rad, dq_norm
-
-    def _reset_force_controller_for_env(self, env_id: int, xd_mm: float):
-        self.force_controllers[env_id].reset(float(xd_mm) / 1000.0)
-
-    def _compute_progress_rate(self, env_id: int, idx: int, abs_fz: float) -> float:
-        target_abs_fz = abs(float(self.traj_forces[idx, 2].item()))
-        nominal_force = target_abs_fz if target_abs_fz > self.int_cfg.force_eps_n else abs_fz
-        force_blend = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_velocity_compensation", 0.25))))
-        denom = (1.0 - force_blend) * max(nominal_force, self.int_cfg.force_eps_n) + force_blend * max(abs_fz, self.int_cfg.force_eps_n)
-        target_velocity_mm_s = float(self.int_cfg.target_mrr_n_mm_s) / denom
-        segment_length_mm = float(self.traj_segment_lengths_mm[idx].item())
-        raw_rate = target_velocity_mm_s * self._step_dt_local / max(segment_length_mm, 1.0e-6)
-
-        raw_rate = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, raw_rate))
-
-        if target_abs_fz > self.int_cfg.force_eps_n:
-            steady_band = float(getattr(self.int_cfg, "force_steady_error_band_n", 5.0))
-            if abs_fz > target_abs_fz + steady_band:
-                error_ratio = (abs_fz - target_abs_fz) / max(target_abs_fz, self.int_cfg.force_eps_n)
-                error_scale = max(
-                    self.int_cfg.min_force_error_rate_scale,
-                    1.0 - (error_ratio - self.int_cfg.force_error_slowdown_ratio),
-                )
-                raw_rate *= error_scale
-                raw_rate *= 0.35
-
-        beta = self.int_cfg.progress_rate_ema_beta
-        prev = float(self.progress_rate_filtered[env_id].item())
-        filt = beta * raw_rate + (1.0 - beta) * prev
-        filt = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, filt))
-
-        self.progress_rate_filtered[env_id] = filt
-        return filt
-
-    def _smooth_command_rate(self, env_id: int, desired_rate: float, hard_stop: bool = False) -> float:
-        if hard_stop:
-            self.command_rate_filtered[env_id] = 0.0
-            return 0.0
-
-        desired_rate = max(0.0, min(float(self.int_cfg.max_index_rate), float(desired_rate)))
-        prev = float(self.command_rate_filtered[env_id].item())
-        beta = float(getattr(self.int_cfg, "command_rate_ema_beta", 0.20))
-        beta = max(0.0, min(1.0, beta))
-
-        ema_rate = beta * desired_rate + (1.0 - beta) * prev
-        max_delta_up = max(0.0, float(getattr(self.int_cfg, "command_rate_max_delta_up", 4.0)))
-        max_delta_down = max(0.0, float(getattr(self.int_cfg, "command_rate_max_delta_down", 12.0)))
-        lower = prev - max_delta_down
-        upper = prev + max_delta_up
-        smoothed_rate = max(lower, min(upper, ema_rate))
-        smoothed_rate = max(0.0, min(float(self.int_cfg.max_index_rate), smoothed_rate))
-
-        self.command_rate_filtered[env_id] = smoothed_rate
-        return smoothed_rate
-
-    def _smooth_command_velocity(self, env_id: int, desired_velocity_mm_s: float, hard_stop: bool = False) -> float:
-        prev = float(self.command_velocity_filtered_mm_s[env_id].item())
-        if hard_stop:
-            decay = max(0.0, min(1.0, float(getattr(self.int_cfg, "command_velocity_hard_stop_decay", 0.85))))
-            smoothed_velocity = prev * decay
-            self.command_velocity_filtered_mm_s[env_id] = smoothed_velocity
-            return smoothed_velocity
-
-        max_velocity = max(0.0, float(getattr(self.int_cfg, "command_velocity_max_mm_s", 45.0)))
-        desired_velocity_mm_s = max(0.0, min(max_velocity, float(desired_velocity_mm_s)))
-        beta = float(getattr(self.int_cfg, "command_velocity_ema_beta", 0.15))
-        beta = max(0.0, min(1.0, beta))
-
-        ema_velocity = beta * desired_velocity_mm_s + (1.0 - beta) * prev
-        max_delta_up = max(0.0, float(getattr(self.int_cfg, "command_velocity_max_delta_up_mm_s", 12.0)))
-        max_delta_down = max(0.0, float(getattr(self.int_cfg, "command_velocity_max_delta_down_mm_s", 36.0)))
-        lower = prev - max_delta_down
-        upper = prev + max_delta_up
-        smoothed_velocity = max(lower, min(upper, ema_velocity))
-        smoothed_velocity = max(0.0, min(max_velocity, smoothed_velocity))
-
-        spike_delta = max(0.0, float(getattr(self.int_cfg, "command_velocity_spike_delta_mm_s", 8.0)))
-        if spike_delta > 0.0 and abs(smoothed_velocity - prev) > spike_delta:
-            return_ratio = max(0.0, min(1.0, float(getattr(self.int_cfg, "command_velocity_spike_return_ratio", 0.20))))
-            direction = 1.0 if smoothed_velocity > prev else -1.0
-            smoothed_velocity = prev + direction * spike_delta * return_ratio
-            smoothed_velocity = max(0.0, min(max_velocity, smoothed_velocity))
-
-        self.command_velocity_filtered_mm_s[env_id] = smoothed_velocity
-        return smoothed_velocity
-
-    def _filter_normal_force(self, env_id: int, raw_abs_fz: float) -> float:
-        raw_abs_fz = max(0.0, float(raw_abs_fz))
-        prev = float(self.filtered_abs_fz[env_id].item())
-        beta = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_filter_beta", 0.20))))
-        if prev <= 0.0:
-            filtered = raw_abs_fz
-        else:
-            filtered = beta * raw_abs_fz + (1.0 - beta) * prev
-
-        spike_delta = max(0.0, float(getattr(self.int_cfg, "force_spike_delta_n", 1.20)))
-        if spike_delta > 0.0 and prev > 0.0 and abs(raw_abs_fz - prev) > spike_delta:
-            self.force_spike_hold_count[env_id] = int(getattr(self.int_cfg, "force_spike_hold_steps", 8))
-            direction = 1.0 if raw_abs_fz > prev else -1.0
-            filtered = prev + direction * spike_delta * 0.25
-
-        self.filtered_abs_fz[env_id] = filtered
-        return filtered
-
-    def _protect_velocity_on_force_spike(self, env_id: int, velocity_mm_s: float) -> float:
-        hold_count = int(self.force_spike_hold_count[env_id].item())
-        if hold_count <= 0:
-            return velocity_mm_s
-
-        prev = float(self.command_velocity_filtered_mm_s[env_id].item())
-        abs_fz = float(self.filtered_abs_fz[env_id].item())
-        band_min = float(getattr(self.int_cfg, "force_band_min_n", 0.0))
-        if band_min > 0.0 and abs_fz < band_min:
-            decay = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_spike_velocity_decay", 0.92))))
-            protected_velocity = min(float(velocity_mm_s), prev * decay)
-        else:
-            protected_velocity = prev
-        self.command_velocity_filtered_mm_s[env_id] = max(0.0, protected_velocity)
-        self.force_spike_hold_count[env_id] = max(0, hold_count - 1)
-        return max(0.0, protected_velocity)
-
-    def _smooth_command_mrr(self, env_id: int, desired_mrr_n_mm_s: float, hard_stop: bool = False) -> float:
-        if hard_stop:
-            self.command_mrr_filtered_n_mm_s[env_id] = 0.0
-            return 0.0
-
-        target_mrr = float(self.int_cfg.target_mrr_n_mm_s)
-        min_mrr = target_mrr * float(getattr(self.int_cfg, "command_mrr_min_ratio", 0.35))
-        max_mrr = target_mrr * float(getattr(self.int_cfg, "command_mrr_max_ratio", 1.6))
-        desired_mrr_n_mm_s = max(min_mrr, min(max_mrr, float(desired_mrr_n_mm_s)))
-        prev = float(self.command_mrr_filtered_n_mm_s[env_id].item())
-        beta = float(getattr(self.int_cfg, "command_mrr_ema_beta", 0.25))
-        beta = max(0.0, min(1.0, beta))
-
-        ema_mrr = beta * desired_mrr_n_mm_s + (1.0 - beta) * prev
-        max_delta_up = max(0.0, float(getattr(self.int_cfg, "command_mrr_max_delta_up_n_mm_s", 80.0)))
-        max_delta_down = max(0.0, float(getattr(self.int_cfg, "command_mrr_max_delta_down_n_mm_s", 160.0)))
-        lower = prev - max_delta_down
-        upper = prev + max_delta_up
-        smoothed_mrr = max(lower, min(upper, ema_mrr))
-        smoothed_mrr = max(0.0, min(max_mrr, smoothed_mrr))
-
-        self.command_mrr_filtered_n_mm_s[env_id] = smoothed_mrr
-        return smoothed_mrr
-
-    def _surface_uniformity_rate_scale(self, env_id: int, idx: int) -> float:
-        gain = max(0.0, float(getattr(self.int_cfg, "surface_uniformity_feedback_gain", 0.0)))
-        if gain <= 0.0:
-            return 1.0
-
-        warmup_bins = max(1, int(getattr(self.int_cfg, "surface_uniformity_feedback_warmup_bins", 8)))
-        last_idx = int(self.surface_last_index[env_id].item())
-        if last_idx < warmup_bins:
-            return 1.0
-
-        idx = int(min(max(0, idx), self.traj_length - 1))
-        upto = min(max(last_idx, idx), self.traj_length - 1)
-        values = self.surface_removal_by_index[env_id, : upto + 1]
-        visited_values = values[values > 0.0]
-        if visited_values.numel() < warmup_bins:
-            return 1.0
-
-        mean_removal = float(torch.mean(visited_values).item())
-        if mean_removal <= 1.0e-6:
-            return 1.0
-
-        current_removal = float(self.surface_removal_by_index[env_id, idx].item())
-        relative_error = (mean_removal - current_removal) / mean_removal
-        deadband = max(0.0, float(getattr(self.int_cfg, "surface_uniformity_feedback_deadband", 0.08)))
-        if abs(relative_error) <= deadband:
-            return 1.0
-
-        signed_error = relative_error - deadband if relative_error > 0.0 else relative_error + deadband
-        scale = 1.0 - gain * signed_error
-        min_scale = max(0.0, float(getattr(self.int_cfg, "surface_uniformity_feedback_min_scale", 0.85)))
-        max_scale = max(min_scale, float(getattr(self.int_cfg, "surface_uniformity_feedback_max_scale", 1.15)))
-        return max(min_scale, min(max_scale, scale))
-
-    def _smoothstep(self, x: float) -> float:
-        x = max(0.0, min(1.0, x))
-        return x * x * (3.0 - 2.0 * x)
-
-    def _path_tracking_rate_scale(self, tracking_error_mm: float) -> float:
-        start = float(self.int_cfg.path_tracking_slowdown_start_mm)
-        stop = float(self.int_cfg.path_tracking_stop_mm)
-        min_scale = float(self.int_cfg.path_tracking_min_rate_scale)
-        if stop <= start:
-            return 1.0
-        if tracking_error_mm <= start:
-            return 1.0
-        if tracking_error_mm >= stop:
-            return min_scale
-        ratio = (tracking_error_mm - start) / (stop - start)
-        return 1.0 - ratio * (1.0 - min_scale)
-
-    def _project_cursor_to_path(self, env_id: int, current_pos_mm: torch.Tensor) -> float:
-        window = max(8, int(self.int_cfg.path_projection_window))
-        cursor = float(self.path_cursor[env_id].item())
-        center = int(max(0, min(self.traj_length - 1, round(cursor))))
-        start = max(0, center - window // 3)
-        end = min(self.traj_length, center + window)
-        if end <= start:
-            return float(center)
-
-        xy = self.traj_positions[start:end, 0:2]
-        delta = xy - current_pos_mm[0:2].unsqueeze(0)
-        dist2 = torch.sum(delta * delta, dim=1)
-        local_idx = int(torch.argmin(dist2).item())
-        projected = float(start + local_idx)
-        max_advance = max(0.0, float(self.int_cfg.path_projection_max_advance_index))
-        projected = min(projected, cursor + max_advance)
-        return max(cursor - float(window), projected)
-
-    def _compute_lookahead_indices(self, base_rate: float) -> float:
-        lookahead = base_rate * float(self.int_cfg.path_lookahead_time_s) / max(self._step_dt_local, 1.0e-8)
-        return max(
-            float(self.int_cfg.path_lookahead_min_index),
-            min(float(self.int_cfg.path_lookahead_max_index), lookahead),
+    def _load_trajectory(self) -> tuple[torch.Tensor, torch.Tensor]:
+        path = self.int_cfg.hdf5_file_path
+        if not os.path.isfile(path):
+            raise FileNotFoundError(path)
+        with h5py.File(path, "r") as stream:
+            position = stream[self.int_cfg.position_dataset_key][:, :6]
+            force = stream[self.int_cfg.force_dataset_key][:, :3]
+        if position.shape[0] != force.shape[0]:
+            raise ValueError("position and force trajectories have different lengths")
+        return (
+            torch.as_tensor(position, device=self.device, dtype=torch.float32),
+            torch.as_tensor(force, device=self.device, dtype=torch.float32),
         )
 
-    def _limit_command_step(self, current_pos_mm: torch.Tensor, target_pos_mm: torch.Tensor) -> torch.Tensor:
-        limited = target_pos_mm.clone()
+    def _fk(self, env_id: int, q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        transform = torch.tensor(
+            self.kinematics[env_id].forward_kinematics(q.detach().cpu().double().tolist()),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        rotation = transform[:3, :3]
+        pose = torch.cat((transform[:3, 3], rotmat_to_spatial(rotation.unsqueeze(0))[0]))
+        return pose, transform[:3, 3], rotation
 
-        xy_delta = target_pos_mm[0:2] - current_pos_mm[0:2]
-        xy_norm = float(torch.linalg.norm(xy_delta).item())
-        max_xy = float(self.int_cfg.path_command_max_xy_step_mm)
-        if xy_norm > max_xy > 0.0:
-            limited[0:2] = current_pos_mm[0:2] + xy_delta * (max_xy / max(xy_norm, 1.0e-6))
+    def _trajectory_at(self, distance_mm: float) -> tuple[torch.Tensor, torch.Tensor, int]:
+        distance = torch.tensor(distance_mm, device=self.device)
+        upper = int(torch.searchsorted(self.arc_mm, distance, right=True).item())
+        lower = min(max(0, upper - 1), self.traj_length - 2)
+        fraction = (distance_mm - float(self.arc_mm[lower])) / float(self.segment_lengths_mm[lower])
+        fraction = min(1.0, max(0.0, fraction))
+        pose = torch.lerp(self.traj_positions[lower], self.traj_positions[lower + 1], fraction)
+        force = torch.lerp(self.traj_forces[lower], self.traj_forces[lower + 1], fraction)
+        return pose, force, lower
 
-        z_delta = float((target_pos_mm[2] - current_pos_mm[2]).item())
-        max_z = float(self.int_cfg.path_command_max_z_step_mm)
-        if max_z > 0.0:
-            z_delta = max(-max_z, min(max_z, z_delta))
-            limited[2] = current_pos_mm[2] + z_delta
+    def _nearest_physical_index(self, env_id: int, tcp_mm: torch.Tensor) -> int:
+        center = int(self.physical_path_index[env_id])
+        window = int(self.int_cfg.projection_window)
+        begin = max(0, center - window)
+        end = min(self.traj_length, center + window + 1)
+        distance = torch.linalg.norm(self.traj_positions[begin:end, :3] - tcp_mm, dim=-1)
+        return begin + int(torch.argmin(distance).item())
 
-        return limited
+    def _command_ik(self, env_id: int, q_seed: torch.Tensor, pose: torch.Tensor) -> torch.Tensor:
+        transform = torch.eye(4, device=self.device, dtype=torch.float32)
+        transform[:3, :3] = spatial_to_rotmat(pose[3:6].unsqueeze(0))[0]
+        transform[:3, 3] = pose[:3]
+        result = self.kinematics[env_id].solve_ik(
+            q_seed.detach().cpu().double().tolist(), transform.detach().cpu().double().tolist()
+        )
+        return torch.tensor(result, device=self.device, dtype=torch.float32)
 
-    def _update_force_normal_offset(
-        self,
-        env_id: int,
-        target_abs_fz: float,
-        measured_fz: float,
-    ) -> float:
-        if target_abs_fz <= self.int_cfg.force_eps_n:
-            self.force_normal_offset_mm[env_id] = 0.0
-            self.force_normal_error_i[env_id] = 0.0
-            return 0.0
-
-        abs_fz = abs(measured_fz)
-        error_n = abs_fz - target_abs_fz
-        if abs(error_n) < float(self.int_cfg.force_normal_deadband_n):
-            error_n = 0.0
-
-        push_sign = 1.0 if float(self.int_cfg.force_normal_push_sign) >= 0.0 else -1.0
-        retract_sign = -push_sign
-
-        prev_offset = float(self.force_normal_offset_mm[env_id].item())
-
-        if error_n > 0.0:
-            self.force_normal_error_i[env_id] = torch.clamp(self.force_normal_error_i[env_id], max=0.0)
-            self.force_normal_error_i[env_id] -= float(error_n) * self._step_dt_local
-            i_limit = float(self.int_cfg.force_normal_offset_limit_mm) / max(
-                float(self.int_cfg.force_normal_ki_mm_per_n_s),
-                1.0e-6,
-            )
-            self.force_normal_error_i[env_id] = torch.clamp(
-                self.force_normal_error_i[env_id],
-                -i_limit,
-                i_limit,
-            )
-            target_offset = retract_sign * (
-                float(self.int_cfg.force_normal_kp_mm_per_n) * error_n
-            )
-        else:
-            underforce_n = max(0.0, target_abs_fz - abs_fz - float(self.int_cfg.force_normal_deadband_n))
-            self.force_normal_error_i[env_id] += float(underforce_n) * self._step_dt_local
-            i_limit = float(self.int_cfg.force_normal_offset_limit_mm) / max(
-                float(self.int_cfg.force_normal_ki_mm_per_n_s),
-                1.0e-6,
-            )
-            self.force_normal_error_i[env_id] = torch.clamp(
-                self.force_normal_error_i[env_id],
-                -i_limit,
-                i_limit,
-            )
-            target_offset = push_sign * (
-                float(self.int_cfg.force_normal_release_kp_mm_per_n) * underforce_n
-                + float(self.int_cfg.force_normal_ki_mm_per_n_s) * float(self.force_normal_error_i[env_id].item())
-            )
-
-        limit = float(self.int_cfg.force_normal_offset_limit_mm)
-        target_offset = max(-limit, min(limit, target_offset))
-
-        if error_n > 0.0:
-            max_step = float(getattr(self.int_cfg, "force_normal_retract_max_step_mm", self.int_cfg.force_normal_max_step_mm))
-        else:
-            max_step = float(self.int_cfg.force_normal_max_step_mm)
-        delta = max(-max_step, min(max_step, target_offset - prev_offset))
-        next_offset = prev_offset + delta
-        self.force_normal_offset_mm[env_id] = next_offset
-        return next_offset
-
-    @torch.no_grad()
     def reset(self, env_ids=None):
         super().reset(env_ids)
         if env_ids is None:
             env_ids = torch.arange(self._num_envs_local, device=self.device)
-
-        self._raw_actions[env_ids] = 0.0
-        self._processed_actions[env_ids] = 0.0
-
-        self.path_cursor[env_ids] = 0.0
-        self.path_index[env_ids] = 0
-        self.current_target_index[env_ids] = 0
+        printer = self._debug_printer
+        if printer is not None and printer.env_id in env_ids.tolist():
+            printer.reset()
+        tensors_zero = (
+            self._raw_actions, self._processed_actions, self._action_history,
+            self.path_cursor_mm, self.path_index, self.current_target_index,
+            self.physical_path_index, self.current_index_delta, self.commanded_speed_mm_s,
+            self.current_sliding_velocity_mm_s, self.current_abs_fz, self.force_error_n,
+            self.force_derivative_n_s, self.current_path_tracking_error_mm,
+            self.prev_mrr_n_mm_s, self.current_mrr_n_mm_s,
+            self.current_mrr_delta_n_mm_s, self.realized_removal_step,
+            self.cumulative_removal, self.surface_removal_by_index,
+            self.surface_visit_counts, self.surface_last_index,
+            self.policy_state, self._filtered_action, self._previous_force,
+            self._previous_tcp_mm, self._approach_step, self._calibration_step,
+            self._previous_q_command,
+        )
+        for tensor in tensors_zero:
+            tensor[env_ids] = 0
         self.path_done[env_ids] = False
-        self.current_index_delta[env_ids] = 0.0
-        self.current_sliding_velocity_mm_s[env_ids] = 0.0
-        self.command_velocity_filtered_mm_s[env_ids] = 0.0
-        self.current_abs_fz[env_ids] = 0.0
-        self.filtered_abs_fz[env_ids] = 0.0
-        self.force_spike_hold_count[env_ids] = 0
-        self.current_mrr_n_mm_s[env_ids] = 0.0
-        self.prev_mrr_n_mm_s[env_ids] = 0.0
-        self.current_mrr_delta_n_mm_s[env_ids] = 0.0
-        self.command_mrr_filtered_n_mm_s[env_ids] = 0.0
-        self.cumulative_removal[env_ids] = 0.0
-        self.surface_removal_by_index[env_ids] = 0.0
-        self.surface_visit_counts[env_ids] = 0.0
-        self.surface_last_index[env_ids] = 0
-        self.current_path_tracking_error_mm[env_ids] = 0.0
-        self.force_normal_offset_mm[env_ids] = 0.0
-        self.force_normal_error_i[env_ids] = 0.0
-        self.progress_rate_filtered[env_ids] = float(self.int_cfg.base_index_rate)
-        self.command_rate_filtered[env_ids] = float(self.int_cfg.min_index_rate)
-        self.approach_step[env_ids] = 0
-        self.approach_active[env_ids] = bool(self.int_cfg.approach_interpolation_enabled)
-
-        des = self.traj_positions[0].unsqueeze(0).repeat(len(env_ids), 1)
-        frc = self.traj_forces[0].unsqueeze(0).repeat(len(env_ids), 1)
-
-        self.des_pos_mm_raw[env_ids] = des[:, 0:3]
-        self.des_wxyz_raw[env_ids] = des[:, 3:6]
-        self.des_force[env_ids] = frc
-        self.cmd_target_xyz_mm[env_ids] = des[:, 0:3]
-
-        self.prev_q_cmd_6[env_ids] = 0.0
-        self.prev_valid[env_ids] = False
-
-        q_all = self.robot.data.joint_pos
-        q = q_all[:, :6]
+        self.polishing_active[env_ids] = False
+        self.safety_shield_active[env_ids] = False
+        self._previous_tcp_valid[env_ids] = False
+        self._previous_q_valid[env_ids] = False
+        count = len(env_ids)
+        low, high = self.int_cfg.force_scale_range
+        self._force_scale[env_ids] = low + (high - low) * torch.rand(count, device=self.device)
+        low, high = self.int_cfg.force_bias_range_n
+        self._force_bias[env_ids] = low + (high - low) * torch.rand(count, device=self.device)
+        self._action_delay[env_ids] = torch.randint(
+            0, int(self.int_cfg.max_action_delay_steps) + 1, (count,), device=self.device
+        )
+        q = self.robot.data.joint_pos[:, :6]
         for env_id in env_ids.tolist():
-            pos_mm, _, wxyz, _ = self._fk_pose_pybind_corrected(q[env_id])
-            self.approach_start_pos_mm[env_id] = pos_mm
-            self.approach_start_wxyz[env_id] = wxyz
+            pose, _, _ = self._fk(env_id, q[env_id])
+            self._approach_start[env_id] = pose
+            self.force_controllers[env_id].reset(pose.detach().cpu().double().tolist())
 
-        xd0 = float(self.traj_positions[0, 2].item())
-        for env_id in env_ids.tolist():
-            self._reset_force_controller_for_env(env_id, xd0)
+    def _record_visualization(self, env_id, measured_pose, normal_force):
+        # One-way diagnostics: use the controller's already measured TCP and
+        # metrics, without extra FT reads, physics steps or policy observations.
+        if env_id == 0 and local_vis._visualization_enabled(self._env):
+            local_vis.record_control_step(self._env, self, measured_pose, normal_force)
+
+    def _print_debug(
+        self, env_id, phase, measured_pose, *, reference_pose=None,
+        command_pose=None, wrench=None, desired_force=None, normal_force=None,
+    ):
+        printer = self._debug_printer
+        if printer is None or env_id != printer.env_id or not printer.tick():
+            return
+        i = env_id
+        if reference_pose is None:
+            reference_pose, _, _ = self._fk(i, self.robot.data.default_joint_pos[i, :6])
+            command_pose = reference_pose
+            desired_force = torch.zeros(3, device=self.device)
+        normal = spatial_to_rotmat(reference_pose[3:6].unsqueeze(0))[0, :, 2]
+        normal_offset = float(torch.dot(command_pose[:3] - reference_pose[:3], normal))
+        cursor_mm = float(self.path_cursor_mm[i])
+        cursor = arc_to_index(cursor_mm, self._diagnostic_arc_mm)
+        previous_cursor = arc_to_index(
+            cursor_mm - float(self.current_index_delta[i]), self._diagnostic_arc_mm
+        )
+        printer.write(format_polishing_live(
+            episode=printer.episode, step=printer.step - 1, env_id=i,
+            current_index=int(self.path_index[i]), last_index=self.traj_length - 1,
+            target_index=int(self.current_target_index[i]), cursor=cursor,
+            current_pose=measured_pose.detach().cpu().tolist(),
+            target_pose=reference_pose.detach().cpu().tolist(),
+            command_pose=command_pose.detach().cpu().tolist(),
+            target_force=abs(float(desired_force[2])),
+            normal_force=float("nan") if normal_force is None else abs(normal_force),
+            sliding_velocity=float(self.current_sliding_velocity_mm_s[i]),
+            removal_rate=float(self.current_mrr_n_mm_s[i]),
+            cumulative_removal=float(self.cumulative_removal[i]),
+            fn_offset=normal_offset, action=float(self._processed_actions[i, 0]),
+            index_rate=cursor - previous_cursor,
+            path_error_xy=float(torch.linalg.norm(measured_pose[:2] - reference_pose[:2])),
+            reward_debug=local_debug.format_reward_debug(self._env, i),
+        ))
 
     @torch.no_grad()
     def process_actions(self, actions: torch.Tensor):
-        self._raw_actions = torch.nan_to_num(actions.clone(), nan=0.0)
-        self._processed_actions[:] = torch.clamp(self._raw_actions, -1.0, 1.0)
+        self._raw_actions.copy_(torch.nan_to_num(actions, nan=0.0, posinf=1.0, neginf=-1.0))
+        self._action_history[:, 1:] = self._action_history[:, :-1].clone()
+        self._action_history[:, 0] = torch.clamp(self._raw_actions[:, 0], -1.0, 1.0)
+        delayed = self._action_history.gather(1, self._action_delay[:, None]).squeeze(1)
+        alpha = 1.0 - math.exp(-self._step_dt_local / max(self.int_cfg.action_filter_tau_s, 1.0e-6))
+        target = self._filtered_action + alpha * (delayed - self._filtered_action)
+        max_delta = self.int_cfg.action_slew_per_s * self._step_dt_local
+        self._filtered_action += torch.clamp(target - self._filtered_action, -max_delta, max_delta)
+        self._processed_actions[:, 0] = self._filtered_action
 
     @torch.no_grad()
     def apply_actions(self):
         q_all = self.robot.data.joint_pos
         q = q_all[:, :6]
-
-        wrench6 = local_ft_sensor.get_6axis_ft_fixed_joint(
-            env=self._env,
-            asset_name=self.cfg.asset_name,
+        wrench = local_ft_sensor.get_6axis_ft_fixed_joint(
+            env=self._env, asset_name=self.cfg.asset_name,
             fixed_joint_name=self.int_cfg.fixed_joint_name,
-            joint_prim_relpath=self.int_cfg.joint_prim_relpath,
-            verbose=False,
-        )
-
-        q_cmd_all = q_all.clone()
-        pos_err_norm_mm = torch.zeros((self._num_envs_local,), device=self.device)
-        rot_err_norm_rad = torch.zeros((self._num_envs_local,), device=self.device)
-
-        debug_needed = False
-        debug_env_id = 0
-        global_step = 0
-        if self.int_cfg.enable_debug_print:
-            global_step = int(self._env.episode_length_buf[0].item())
-            if self.int_cfg.debug_print_interval <= 0 or global_step % self.int_cfg.debug_print_interval == 0:
-                debug_needed = True
-                debug_env_id = min(self.int_cfg.debug_env_id, self._num_envs_local - 1)
-
-        pybind_called = False
-        pybind_success = False
-        pybind_dq_norm = 0.0
+            joint_prim_relpath=self.int_cfg.joint_prim_relpath, verbose=False,
+        ).clone()
+        wrench[:, :3] *= self._force_scale[:, None]
+        wrench[:, 2] += self._force_bias
+        q_command = q_all.clone()
 
         for env_id in range(self._num_envs_local):
-            q_seed = self.prev_q_cmd_6[env_id] if self.prev_valid[env_id] else q[env_id]
-
-            if bool(self.approach_active[env_id].item()):
-                step = int(self.approach_step[env_id].item())
-                alpha = self._smoothstep(float(step + 1) / float(self.approach_total_steps))
-
-                target_pos_mm = self.approach_start_pos_mm[env_id] + alpha * (
-                    self.traj_positions[0, 0:3] - self.approach_start_pos_mm[env_id]
-                )
-                target_wxyz = self.approach_start_wxyz[env_id] + alpha * (
-                    self.traj_positions[0, 3:6] - self.approach_start_wxyz[env_id]
-                )
-                target_rotm = spatial_to_rotmat(target_wxyz.view(1, 3)).squeeze(0)
-
-                self.path_index[env_id] = 0
-                self.current_target_index[env_id] = 0
-                self.des_pos_mm_raw[env_id] = target_pos_mm
-                self.des_wxyz_raw[env_id] = target_wxyz
-                self.des_force[env_id] = self.traj_forces[0]
-                self.cmd_target_xyz_mm[env_id] = target_pos_mm
-                self.current_index_delta[env_id] = 0.0
-                self.current_sliding_velocity_mm_s[env_id] = 0.0
-                self.command_velocity_filtered_mm_s[env_id] = 0.0
-                self.current_abs_fz[env_id] = abs(float(wrench6[env_id, 2].item()))
-                self.current_mrr_n_mm_s[env_id] = 0.0
-                self.prev_mrr_n_mm_s[env_id] = 0.0
-                self.current_mrr_delta_n_mm_s[env_id] = 0.0
-                self.command_mrr_filtered_n_mm_s[env_id] = 0.0
-                self.current_path_tracking_error_mm[env_id] = float(torch.linalg.norm(target_pos_mm[0:2] - self.approach_start_pos_mm[env_id, 0:2]).item())
-                self.force_normal_offset_mm[env_id] = 0.0
-                self.force_normal_error_i[env_id] = 0.0
-
-                pybind_called = True
-                q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_single_step_ik(
-                    q_seed, target_pos_mm, target_rotm
-                )
-                pybind_success = True
-                pybind_dq_norm = dq_norm
-
-                pos_err_norm_mm[env_id] = pos_e_mm
-                rot_err_norm_rad[env_id] = rot_e_rad
-
-                self.prev_q_cmd_6[env_id] = q_cmd6
-                self.prev_valid[env_id] = True
-                q_cmd_all[env_id, :6] = q_cmd6
-
-                self.approach_step[env_id] += 1
-                if int(self.approach_step[env_id].item()) >= self.approach_total_steps:
-                    self.approach_active[env_id] = False
-                    self.path_cursor[env_id] = 0.0
-                    self.progress_rate_filtered[env_id] = float(self.int_cfg.base_index_rate)
-                    self.command_rate_filtered[env_id] = float(self.int_cfg.min_index_rate)
-                    self.command_velocity_filtered_mm_s[env_id] = 0.0
-                    self.prev_mrr_n_mm_s[env_id] = 0.0
-                    self.current_mrr_delta_n_mm_s[env_id] = 0.0
-                    self.command_mrr_filtered_n_mm_s[env_id] = 0.0
-                    self._reset_force_controller_for_env(env_id, float(self.traj_positions[0, 2].item()))
+            measured_pose, tcp_mm, rotation = self._fk(env_id, q[env_id])
+            if int(self._calibration_step[env_id]) < self._calibration_steps:
+                # Static FT zeroing requires a stationary joint target. Do not
+                # start the approach or accumulate removal during calibration.
+                q_command[env_id, :6] = self.robot.data.default_joint_pos[env_id, :6]
+                self._calibration_step[env_id] += 1
+                self._approach_start[env_id] = measured_pose
+                self._record_visualization(env_id, measured_pose, 0.0)
+                self._print_debug(env_id, "CALIBRATION", measured_pose)
                 continue
+            approach = int(self._approach_step[env_id]) < self._approach_steps
+            self.polishing_active[env_id] = not approach
+            normal = rotation[:, 2]
+            measured_normal_force = float(torch.dot(normal, wrench[env_id, :3]))
+            abs_force = abs(measured_normal_force)
+            force_delta = (abs_force - float(self._previous_force[env_id])) / self._step_dt_local
+            self.force_derivative_n_s[env_id] = force_delta
+            self._previous_force[env_id] = abs_force
+            self.current_abs_fz[env_id] = abs_force
 
-            cur_pos_mm, _, _, cur_rotm = self._fk_pose_pybind_corrected(q[env_id])
+            tangent_distance = 0.0
+            if bool(self._previous_tcp_valid[env_id]):
+                delta = tcp_mm - self._previous_tcp_mm[env_id]
+                tangent = delta - normal * torch.dot(delta, normal)
+                tangent_distance = min(float(torch.linalg.norm(tangent)), 5.0)
+            self._previous_tcp_mm[env_id] = tcp_mm
+            self._previous_tcp_valid[env_id] = True
+            actual_speed = tangent_distance / self._step_dt_local
+            self.current_sliding_velocity_mm_s[env_id] = actual_speed
+            previous_mrr = float(self.current_mrr_n_mm_s[env_id])
+            in_contact = not approach and abs_force >= self.int_cfg.contact_force_n
+            actual_mrr = abs_force * actual_speed if in_contact else 0.0
+            self.prev_mrr_n_mm_s[env_id] = previous_mrr
+            self.current_mrr_n_mm_s[env_id] = actual_mrr
+            self.current_mrr_delta_n_mm_s[env_id] = actual_mrr - previous_mrr
+            removal = abs_force * tangent_distance if in_contact else 0.0
+            self.realized_removal_step[env_id] = removal
+            self.cumulative_removal[env_id] += removal
 
-            projected_cursor = self._project_cursor_to_path(env_id, cur_pos_mm)
-            self.path_cursor[env_id] = min(max(float(self.path_cursor[env_id].item()), projected_cursor), float(self.traj_length - 1))
-            idx_for_rate = int(min(max(0, round(float(self.path_cursor[env_id].item()))), self.traj_length - 1))
-            base_rate_for_lookahead = self._compute_progress_rate(env_id, idx_for_rate, float(self.current_abs_fz[env_id].item()))
-            lookahead_idx = self._compute_lookahead_indices(base_rate_for_lookahead)
-            target_cursor = min(float(self.path_cursor[env_id].item()) + lookahead_idx, float(self.traj_length - 1))
+            physical_index = self._nearest_physical_index(env_id, tcp_mm)
+            self.physical_path_index[env_id] = physical_index
+            physical_progress = float(self.arc_mm[physical_index]) / max(self.path_length_mm, 1.0e-6)
+            bin_index = min(int(physical_progress * self.int_cfg.surface_bins), self.int_cfg.surface_bins - 1)
+            if removal > 0.0:
+                self.surface_removal_by_index[env_id, bin_index] += removal
+                self.surface_visit_counts[env_id, bin_index] += 1.0
+                self.surface_last_index[env_id] = max(int(self.surface_last_index[env_id]), bin_index)
 
-            idx = int(target_cursor)
-            if idx >= self.traj_length:
-                idx = self.traj_length - 1
-                self.path_done[env_id] = True
+            if approach:
+                t = float(self._approach_step[env_id] + 1) / self._approach_steps
+                t = t * t * (3.0 - 2.0 * t)
+                reference_pose = torch.lerp(self._approach_start[env_id], self.traj_positions[0], t)
+                desired_force = torch.zeros(3, device=self.device)
+                # Keep the shared admittance history aligned while the robot
+                # is travelling to the first polishing waypoint.
+                self.force_controllers[env_id].reset(
+                    measured_pose.detach().cpu().double().tolist()
+                )
+                self._approach_step[env_id] += 1
+                command_pose = reference_pose
+            else:
+                reference_pose, desired_force, target_index = self._trajectory_at(
+                    float(self.path_cursor_mm[env_id])
+                )
+                self.path_index[env_id] = target_index
+                self.current_target_index[env_id] = target_index
+                target_force = abs(float(desired_force[2]))
+                tracking_error = float(torch.linalg.norm(tcp_mm - reference_pose[:3]))
+                self.current_path_tracking_error_mm[env_id] = tracking_error
+                self.force_error_n[env_id] = abs_force - target_force
 
-            self.path_index[env_id] = int(self.path_cursor[env_id].item())
-            self.current_target_index[env_id] = idx
+                speed = self.int_cfg.nominal_speed_mm_s * (
+                    1.0 + self.int_cfg.residual_speed_fraction * float(self._filtered_action[env_id])
+                )
+                speed = min(self.int_cfg.max_speed_mm_s, max(self.int_cfg.min_speed_mm_s, speed))
+                overload = target_force > 0.0 and abs_force > self.int_cfg.force_overload_ratio * target_force
+                tracking_stop = tracking_error > self.int_cfg.tracking_stop_mm
+                shield = overload or tracking_stop
+                self.safety_shield_active[env_id] = shield
+                if shield:
+                    speed = 0.0
+                self.commanded_speed_mm_s[env_id] = speed
+                distance_delta = speed * self._step_dt_local
+                self.current_index_delta[env_id] = distance_delta
+                self.path_cursor_mm[env_id] = min(
+                    self.path_length_mm, float(self.path_cursor_mm[env_id]) + distance_delta
+                )
+                self.path_done[env_id] = (
+                    float(self.path_cursor_mm[env_id]) >= self.path_length_mm - 1.0e-6
+                )
 
-            measured_force_base = wrench6[env_id, 0:3]
-            target_fz = float(self.traj_forces[idx, 2].item())
+                output = self.force_controllers[env_id].step(
+                    measured_pose.detach().cpu().double().tolist(),
+                    reference_pose.detach().cpu().double().tolist(),
+                    desired_force.detach().cpu().double().tolist(),
+                    wrench[env_id].detach().cpu().double().tolist(),
+                    rotation.reshape(-1).detach().cpu().double().tolist(),
+                )
+                command_pose = torch.tensor(output[:6], device=self.device, dtype=torch.float32)
 
-            self.des_pos_mm_raw[env_id] = self.traj_positions[idx, 0:3]
-            self.des_wxyz_raw[env_id] = self.traj_positions[idx, 3:6]
-            self.des_force[env_id] = self.traj_forces[idx]
+                visited = self.surface_removal_by_index[env_id, : max(1, bin_index + 1)]
+                positive = visited[visited > 0.0]
+                deficit = 0.0
+                if positive.numel() > 1:
+                    deficit = float((positive.mean() - visited[bin_index]) / positive.mean().clamp_min(1.0e-6))
+                tangent_change = 0.0
+                if 0 < target_index < self.traj_length - 2:
+                    before = self.traj_positions[target_index, :3] - self.traj_positions[target_index - 1, :3]
+                    after = self.traj_positions[target_index + 1, :3] - self.traj_positions[target_index, :3]
+                    tangent_change = float(1.0 - torch.dot(before, after) /
+                                           (torch.linalg.norm(before) * torch.linalg.norm(after)).clamp_min(1.0e-6))
+                progress = float(self.path_cursor_mm[env_id]) / max(self.path_length_mm, 1.0e-6)
+                values = (
+                    float(self.force_error_n[env_id]) / max(target_force, 1.0),
+                    abs_force / max(target_force, 1.0),
+                    force_delta / 100.0,
+                    actual_speed / max(self.int_cfg.max_speed_mm_s, 1.0),
+                    tracking_error / max(self.int_cfg.tracking_stop_mm, 1.0),
+                    float(self._filtered_action[env_id]),
+                    float(self._raw_actions[env_id, 0] - self._filtered_action[env_id]),
+                    progress,
+                    deficit,
+                    tangent_change,
+                    1.0 if abs_force >= self.int_cfg.contact_force_n else 0.0,
+                    1.0 if shield else 0.0,
+                )
+                self.policy_state[env_id] = torch.tensor(values, device=self.device)
 
-            nominal_pos_mm = self.traj_positions[idx, 0:3].clone()
-            target_rotm = spatial_to_rotmat(self.traj_positions[idx, 3:6].view(1, 3)).squeeze(0)
-
-            target_pos_mm = nominal_pos_mm.clone()
-            normal_axis = cur_rotm[:, 2]
-            measured_fz = float(torch.dot(normal_axis, measured_force_base).item())
-            raw_abs_fz = abs(measured_fz)
-            abs_fz = self._filter_normal_force(env_id, raw_abs_fz)
-            filtered_measured_fz = measured_fz if raw_abs_fz <= 1.0e-6 else (1.0 if measured_fz >= 0.0 else -1.0) * abs_fz
-            path_tracking_error_mm = float(torch.linalg.norm(cur_pos_mm[0:2] - nominal_pos_mm[0:2]).item())
-            self.current_path_tracking_error_mm[env_id] = path_tracking_error_mm
-            nominal_tcp_z_m = float(torch.dot(normal_axis, nominal_pos_mm).item()) / 1000.0
-            current_tcp_z_m = float(torch.dot(normal_axis, cur_pos_mm).item()) / 1000.0
-
-            fc_out = self.force_controllers[env_id].step(
-                nominal_tcp_z_m,
-                current_tcp_z_m,
-                float(target_fz),
-                float(filtered_measured_fz),
+            seed = self._previous_q_command[env_id] if self._previous_q_valid[env_id] else q[env_id]
+            q_next = self._command_ik(env_id, seed, command_pose)
+            self._previous_q_command[env_id] = q_next
+            self._previous_q_valid[env_id] = True
+            q_command[env_id, :6] = q_next
+            self._record_visualization(env_id, measured_pose, measured_normal_force)
+            # All values are the existing controller snapshot, before this
+            # physics step. Logging never reads FT again or changes a target.
+            self._print_debug(
+                env_id, "APPROACH" if approach else "POLISH", measured_pose,
+                reference_pose=reference_pose, command_pose=command_pose,
+                wrench=wrench[env_id], desired_force=desired_force,
+                normal_force=measured_normal_force,
             )
-            normal_delta_mm = (float(fc_out[0]) - nominal_tcp_z_m) * 1000.0
-            admittance_limit = float(self.int_cfg.force_admittance_delta_limit_mm)
-            normal_delta_mm = max(-admittance_limit, min(admittance_limit, normal_delta_mm))
-            normal_delta_mm += self._update_force_normal_offset(env_id, abs(target_fz), filtered_measured_fz)
-            total_limit = float(self.int_cfg.force_total_normal_delta_limit_mm)
-            normal_delta_mm = max(-total_limit, min(total_limit, normal_delta_mm))
 
-            target_pos_mm = nominal_pos_mm + normal_axis * normal_delta_mm
-            target_pos_mm = self._limit_command_step(cur_pos_mm, target_pos_mm)
-            self.cmd_target_xyz_mm[env_id] = target_pos_mm
-
-            pybind_called = True
-            q_cmd6, pos_e_mm, rot_e_rad, dq_norm = self._solve_pybind_single_step_ik(
-                q_seed, target_pos_mm, target_rotm
-            )
-            pybind_success = True
-            pybind_dq_norm = dq_norm
-
-            pos_err_norm_mm[env_id] = pos_e_mm
-            rot_err_norm_rad[env_id] = rot_e_rad
-
-            self.prev_q_cmd_6[env_id] = q_cmd6
-            self.prev_valid[env_id] = True
-            q_cmd_all[env_id, :6] = q_cmd6
-
-            if not bool(self.path_done[env_id].item()):
-                base_rate = self._compute_progress_rate(env_id, idx_for_rate, abs_fz)
-                action_scale = 1.0 + float(self.int_cfg.speed_action_scale) * float(self._processed_actions[env_id, 0].item())
-                action_scale = max(0.05, action_scale)
-                final_rate = base_rate * action_scale
-                final_rate *= self._surface_uniformity_rate_scale(env_id, idx_for_rate)
-                final_rate = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, final_rate))
-                target_abs_fz = abs(target_fz)
-                force_rate_limit = None
-                force_limit_is_emergency = False
-                force_band_hold = False
-                if target_abs_fz > self.int_cfg.force_eps_n:
-                    overload_force = float(self.int_cfg.force_overload_ratio) * target_abs_fz
-                    if abs_fz > overload_force:
-                        force_rate_limit = float(self.int_cfg.force_overload_rate_scale)
-                        force_limit_is_emergency = True
-                    band_min = float(getattr(self.int_cfg, "force_band_min_n", 0.0))
-                    band_max = float(getattr(self.int_cfg, "force_band_max_n", 0.0))
-                    if band_min > 0.0 and band_max > band_min and (abs_fz < band_min or abs_fz > band_max):
-                        force_band_hold = bool(getattr(self.int_cfg, "force_band_hold_progress", True))
-                        force_band_should_limit_rate = True
-                        if abs_fz < band_min:
-                            severe_min = float(getattr(self.int_cfg, "force_severe_underforce_n", 0.0))
-                            if severe_min > 0.0 and abs_fz < severe_min:
-                                force_band_hold = bool(getattr(self.int_cfg, "force_severe_underforce_hold_progress", True))
-                            low_scale = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_band_low_speed_scale", 0.65))))
-                            deficit_ratio = min(1.0, max(0.0, (band_min - abs_fz) / max(band_min, self.int_cfg.force_eps_n)))
-                            final_rate *= 1.0 - (1.0 - low_scale) * deficit_ratio
-                            saturated_min = float(getattr(self.int_cfg, "force_band_saturated_min_n", band_min))
-                            if abs_fz >= saturated_min:
-                                force_band_should_limit_rate = False
-                        else:
-                            high_scale = max(0.0, min(1.0, float(getattr(self.int_cfg, "force_band_high_speed_scale", 0.45))))
-                            excess_ratio = min(1.0, max(0.0, (abs_fz - band_max) / max(band_max, self.int_cfg.force_eps_n)))
-                            final_rate *= 1.0 - (1.0 - high_scale) * excess_ratio
-                        if force_band_should_limit_rate:
-                            band_limit = float(getattr(self.int_cfg, "force_band_index_rate_limit", 0.05))
-                            force_rate_limit = band_limit if force_rate_limit is None else min(force_rate_limit, band_limit)
-                tracking_scale = self._path_tracking_rate_scale(path_tracking_error_mm)
-                final_rate *= tracking_scale
-                hard_stop = False
-                force_limited = False
-                if force_band_hold:
-                    final_rate = 0.0
-                    hard_stop = True
-                if tracking_scale <= 0.0:
-                    final_rate = 0.0
-                    hard_stop = True
-                else:
-                    final_rate = max(self.int_cfg.min_index_rate, min(self.int_cfg.max_index_rate, final_rate))
-                if force_rate_limit is not None:
-                    force_limited_rate = min(final_rate, max(0.0, force_rate_limit))
-                    if force_limited_rate < final_rate:
-                        final_rate = force_limited_rate
-                        if force_limit_is_emergency:
-                            self.command_rate_filtered[env_id] = final_rate
-                            force_limited = True
-                        else:
-                            final_rate = self._smooth_command_rate(env_id, final_rate, hard_stop=hard_stop)
-                    else:
-                        final_rate = self._smooth_command_rate(env_id, final_rate, hard_stop=hard_stop)
-                else:
-                    final_rate = self._smooth_command_rate(env_id, final_rate, hard_stop=hard_stop)
-
-                segment_length_mm = float(self.traj_segment_lengths_mm[idx].item())
-                sliding_velocity_mm_s = final_rate * segment_length_mm / max(self._step_dt_local, 1.0e-8)
-                if force_band_hold:
-                    sliding_velocity_mm_s = 0.0
-                    self.command_velocity_filtered_mm_s[env_id] = 0.0
-                    self.command_mrr_filtered_n_mm_s[env_id] = 0.0
-                    self.command_rate_filtered[env_id] = 0.0
-                elif force_limited:
-                    sliding_velocity_mm_s = self._smooth_command_velocity(
-                        env_id,
-                        sliding_velocity_mm_s,
-                        hard_stop=hard_stop,
-                    )
-                    self.command_mrr_filtered_n_mm_s[env_id] = abs_fz * sliding_velocity_mm_s
-                else:
-                    sliding_velocity_mm_s = self._smooth_command_velocity(
-                        env_id,
-                        sliding_velocity_mm_s,
-                        hard_stop=hard_stop,
-                    )
-                    desired_mrr_n_mm_s = abs_fz * sliding_velocity_mm_s
-                    smoothed_mrr_n_mm_s = self._smooth_command_mrr(
-                        env_id,
-                        desired_mrr_n_mm_s,
-                        hard_stop=hard_stop,
-                    )
-                    mrr_limited_velocity_mm_s = smoothed_mrr_n_mm_s / max(abs_fz, self.int_cfg.force_eps_n)
-                    sliding_velocity_mm_s = self._smooth_command_velocity(
-                        env_id,
-                        mrr_limited_velocity_mm_s,
-                        hard_stop=hard_stop,
-                    )
-                sliding_velocity_mm_s = self._protect_velocity_on_force_spike(env_id, sliding_velocity_mm_s)
-                final_rate = sliding_velocity_mm_s * self._step_dt_local / max(segment_length_mm, 1.0e-6)
-                final_rate = max(0.0, min(self.int_cfg.max_index_rate, final_rate))
-                self.command_rate_filtered[env_id] = final_rate
-
-                self.current_index_delta[env_id] = final_rate
-                self.current_sliding_velocity_mm_s[env_id] = sliding_velocity_mm_s
-                self.current_abs_fz[env_id] = abs_fz
-                prev_mrr_n_mm_s = float(self.current_mrr_n_mm_s[env_id].item())
-                current_mrr_n_mm_s = abs_fz * sliding_velocity_mm_s
-                self.prev_mrr_n_mm_s[env_id] = prev_mrr_n_mm_s
-                self.current_mrr_n_mm_s[env_id] = current_mrr_n_mm_s
-                self.current_mrr_delta_n_mm_s[env_id] = current_mrr_n_mm_s - prev_mrr_n_mm_s
-                removal_amount = self.current_mrr_n_mm_s[env_id] * self._step_dt_local
-                self.cumulative_removal[env_id] += removal_amount
-                removal_bin = int(min(max(0, idx_for_rate), self.traj_length - 1))
-                if float(removal_amount.item()) > 0.0:
-                    self.surface_removal_by_index[env_id, removal_bin] += removal_amount
-                    self.surface_visit_counts[env_id, removal_bin] += 1.0
-                    self.surface_last_index[env_id] = max(int(self.surface_last_index[env_id].item()), removal_bin)
-                self.path_cursor[env_id] = min(float(self.path_cursor[env_id].item()) + final_rate, target_cursor)
-
-                if self.path_cursor[env_id] >= float(self.traj_length - 1):
-                    self.path_cursor[env_id] = float(self.traj_length - 1)
-                    self.path_done[env_id] = True
-
-        self.robot.set_joint_position_target(q_cmd_all)
-
-        if debug_needed:
-            current_index = int(self.path_index[debug_env_id].item())
-            target_index = int(self.current_target_index[debug_env_id].item())
-            progress_pct = 100.0 * float(self.path_cursor[debug_env_id].item()) / max(float(self.traj_length - 1), 1.0)
-            episode_number = max(1, int(getattr(self._env, "_ep_curriculum", 1)))
-            cur_dbg_xyz_mm, _, cur_dbg_wxyz, _ = self._fk_pose_pybind_corrected(q[debug_env_id])
-            tgt_dbg_xyz_mm = self.des_pos_mm_raw[debug_env_id]
-            tgt_dbg_wxyz = self.des_wxyz_raw[debug_env_id]
-            cmd_dbg_xyz_mm = self.cmd_target_xyz_mm[debug_env_id]
-            reward_debug = local_debug.format_reward_debug(self._env, debug_env_id)
-            local_debug.print_info(
-                f"\n[Polishing Live] ep{episode_number} step={global_step} env={debug_env_id} "
-                f"| hdf5_index={current_index}/{self.traj_length - 1} ({progress_pct:.1f}%) "
-                f"| target_index={target_index} "
-                f"| cursor={float(self.path_cursor[debug_env_id].item()):.3f}\n"
-                f"  current xyz/wxyz = "
-                f"({float(cur_dbg_xyz_mm[0].item()):.3f}, {float(cur_dbg_xyz_mm[1].item()):.3f}, {float(cur_dbg_xyz_mm[2].item()):.3f}) / "
-                f"({float(cur_dbg_wxyz[0].item()):.4f}, {float(cur_dbg_wxyz[1].item()):.4f}, {float(cur_dbg_wxyz[2].item()):.4f})\n"
-                f"  target  xyz/wxyz = "
-                f"({float(tgt_dbg_xyz_mm[0].item()):.3f}, {float(tgt_dbg_xyz_mm[1].item()):.3f}, {float(tgt_dbg_xyz_mm[2].item()):.3f}) / "
-                f"({float(tgt_dbg_wxyz[0].item()):.4f}, {float(tgt_dbg_wxyz[1].item()):.4f}, {float(tgt_dbg_wxyz[2].item()):.4f})\n"
-                f"  command xyz      = "
-                f"({float(cmd_dbg_xyz_mm[0].item()):.3f}, {float(cmd_dbg_xyz_mm[1].item()):.3f}, {float(cmd_dbg_xyz_mm[2].item()):.3f})\n"
-                f"  force/speed      = "
-                f"| target_force_N={abs(float(self.des_force[debug_env_id, 2].item())):.4f} "
-                f"| normal_force_N={float(self.current_abs_fz[debug_env_id].item()):.4f} "
-                f"| sliding_velocity_mm_s={float(self.current_sliding_velocity_mm_s[debug_env_id].item()):.4f} "
-                f"| removal_rate_N_mm_s={float(self.current_mrr_n_mm_s[debug_env_id].item()):.4f} "
-                f"| cumulative_removal={float(self.cumulative_removal[debug_env_id].item()):.4f}\n"
-                f"  control          = "
-                f"| fn_offset_mm={float(self.force_normal_offset_mm[debug_env_id].item()):.4f} "
-                f"| action={float(self._processed_actions[debug_env_id, 0].item()):.4f} "
-                f"| index_rate={float(self.current_index_delta[debug_env_id].item()):.4f} "
-                f"| path_err_xy_mm={float(self.current_path_tracking_error_mm[debug_env_id].item()):.3f}\n"
-                f"  rewards          = {reward_debug}\n"
+        self.robot.set_joint_position_target(q_command)
+        if self.int_cfg.joint_gravity_compensation:
+            self.robot.set_joint_effort_target(
+                self.robot.root_physx_view.get_gravity_compensation_forces()
             )
 
 

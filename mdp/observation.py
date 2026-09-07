@@ -38,7 +38,8 @@ _orientation_offset_rotm: torch.Tensor | None = None
 def _get_y2_kin_solver():
     global _y2_kin_solver
     if _y2_kin_solver is None:
-        _y2_kin_solver = y2_pb.UR10eKinematics(
+        _y2_kin_solver = y2_pb.RobotKinematics(
+            robot_model=y2_cfg.ROBOT_KINEMATICS,
             dt=float(y2_cfg.CONTROL_PERIOD),
             ee2tcp=y2_cfg.EE2TCP,
         )
@@ -73,6 +74,16 @@ def _get_action_term(env: "ManagerBasedRLEnv", action_term_name: str = "arm_acti
 
 def get_action_term(env: "ManagerBasedRLEnv", action_term_name: str = "arm_action"):
     return _get_action_term(env, action_term_name=action_term_name)
+
+
+def adaptive_velocity_observation(
+    env: "ManagerBasedRLEnv", action_term_name: str = "arm_action"
+) -> torch.Tensor:
+    """Compact observation made only from quantities available on the robot."""
+    term = _get_action_term(env, action_term_name)
+    if term is None or not hasattr(term, "policy_state"):
+        raise RuntimeError(f"action term '{action_term_name}' has no policy_state")
+    return torch.nan_to_num(term.policy_state, nan=0.0, posinf=5.0, neginf=-5.0)
 
 
 def get_ee_idx(

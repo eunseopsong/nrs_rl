@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Configuration for UR10e with spindle tool (local USD scene).
+"""Configuration for the production UR10 CB3 with a spindle tool.
 
 - Loads local USD:
     /home/eunseop/isaac/isaac_save/ur10e_only_v2.usd
@@ -33,13 +33,14 @@ Notes
 """
 
 import isaaclab.sim as sim_utils
+from pathlib import Path
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
 # -----------------------------------------------------------------------------
 # User paths and EE frame
 # -----------------------------------------------------------------------------
-UR10E_USD_PATH = "/home/eunseop/isaac/isaac_save/ur10e_only_v3.usd"
+UR10_USD_PATH = str(Path(__file__).with_name("ur10_w_spindle.usda"))
 EE_FRAME_NAME = "spindle_link"
 
 # -----------------------------------------------------------------------------
@@ -70,9 +71,9 @@ UR10E_ARM_JOINTS = [
 # -----------------------------------------------------------------------------
 # Base articulation configuration
 # -----------------------------------------------------------------------------
-UR10E_W_SPINDLE_CFG = ArticulationCfg(
+UR10_W_SPINDLE_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path=UR10E_USD_PATH,
+        usd_path=UR10_USD_PATH,
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -90,10 +91,13 @@ UR10E_W_SPINDLE_CFG = ArticulationCfg(
         # ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
+        # UR's URDF base_link is rotated pi from the DH base used by Y2 and
+        # the polishing dataset. Make world/environment axes the Y2 base axes.
+        rot=(0.0, 0.0, 0.0, 1.0),
         joint_pos=UR10E_HOME_DICT,
     ),
     actuators={
-        "ur10e_arm": ImplicitActuatorCfg(
+        "ur10_arm": ImplicitActuatorCfg(
             joint_names_expr=UR10E_ARM_JOINTS,
             effort_limit_sim=150.0,
             stiffness=120.0,
@@ -104,22 +108,28 @@ UR10E_W_SPINDLE_CFG = ArticulationCfg(
 )
 
 # Expose EE frame name for downstream controllers / tasks
-UR10E_W_SPINDLE_CFG.ee_frame_name = EE_FRAME_NAME
+UR10_W_SPINDLE_CFG.ee_frame_name = EE_FRAME_NAME
 
 # -----------------------------------------------------------------------------
 # High-PD variant
 # Helpful for task-space / differential IK style control
 # -----------------------------------------------------------------------------
-UR10E_W_SPINDLE_HIGH_PD_CFG = UR10E_W_SPINDLE_CFG.copy()
-UR10E_W_SPINDLE_HIGH_PD_CFG.spawn.rigid_props.disable_gravity = True
-UR10E_W_SPINDLE_HIGH_PD_CFG.actuators["ur10e_arm"].stiffness = 3000.0
-UR10E_W_SPINDLE_HIGH_PD_CFG.actuators["ur10e_arm"].damping = 100.0
-UR10E_W_SPINDLE_HIGH_PD_CFG.ee_frame_name = EE_FRAME_NAME
+UR10_W_SPINDLE_HIGH_PD_CFG = UR10_W_SPINDLE_CFG.copy()
+UR10_W_SPINDLE_HIGH_PD_CFG.spawn.rigid_props.disable_gravity = False
+UR10_W_SPINDLE_HIGH_PD_CFG.actuators["ur10_arm"].stiffness = 900.0
+UR10_W_SPINDLE_HIGH_PD_CFG.actuators["ur10_arm"].damping = 45.0
+UR10_W_SPINDLE_HIGH_PD_CFG.ee_frame_name = EE_FRAME_NAME
+
+# Compatibility aliases for launch files that still import the old symbol.
+UR10E_W_SPINDLE_CFG = UR10_W_SPINDLE_CFG
+UR10E_W_SPINDLE_HIGH_PD_CFG = UR10_W_SPINDLE_HIGH_PD_CFG
 
 # -----------------------------------------------------------------------------
 # Exports
 # -----------------------------------------------------------------------------
 __all__ = [
+    "UR10_W_SPINDLE_CFG",
+    "UR10_W_SPINDLE_HIGH_PD_CFG",
     "UR10E_W_SPINDLE_CFG",
     "UR10E_W_SPINDLE_HIGH_PD_CFG",
     "EE_FRAME_NAME",

@@ -1,6 +1,7 @@
 from setuptools import setup, Extension, find_packages
 from setuptools.command.build_ext import build_ext
 import pathlib
+import os
 import subprocess
 import sys
 
@@ -12,6 +13,7 @@ class CMakeBuild(build_ext):
 
         ext_fullpath = pathlib.Path(self.get_ext_fullpath(ext.name)).resolve()
         extdir = ext_fullpath.parent
+        extdir.mkdir(parents=True, exist_ok=True)
 
         build_temp = pathlib.Path(self.build_temp) / ext.name
         build_temp.mkdir(parents=True, exist_ok=True)
@@ -40,6 +42,10 @@ class CMakeBuild(build_ext):
             f"-DTORCH_INCLUDE_DIRS={';'.join(torch_include_dirs)}",
             f"-DTORCH_LIBRARY_DIRS={';'.join(torch_library_dirs)}",
             f"-DTORCH_LIB_NAMES={';'.join(torch_lib_names)}",
+            "-DY2_CONTROL_SOURCE_DIR=" + os.environ.get(
+                "Y2_CONTROL_SOURCE_DIR",
+                "/home/eunseop/dev_ws/src/y2_ur10skku_control",
+            ),
         ]
 
         build_args = [
@@ -67,7 +73,7 @@ ext_modules = [
 setup(
     name="y2_control_pybind",
     version="0.0.1",
-    description="Pybind wrapper for Y2 UR10e kinematics and Mode5 force control",
+    description="Python bindings compiled from the live Y2 robot controller sources",
     packages=find_packages(),
     ext_modules=ext_modules,
     cmdclass={"build_ext": CMakeBuild},

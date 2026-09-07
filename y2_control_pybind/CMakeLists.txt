@@ -8,6 +8,12 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11 REQUIRED CONFIG)
 
+set(Y2_CONTROL_SOURCE_DIR "/home/eunseop/dev_ws/src/y2_ur10skku_control" CACHE PATH
+    "Path to the live y2_ur10skku_control source tree")
+if(NOT EXISTS "${Y2_CONTROL_SOURCE_DIR}/Y2ForceCon/src/mode3_force_control_core.cpp")
+    message(FATAL_ERROR "Y2_CONTROL_SOURCE_DIR does not contain the shared force-control core")
+endif()
+
 add_compile_definitions(Y2_IK_SOLVER_MODE=Y2_IK_SOLVER_DLS)
 
 # Torch ABI compatibility
@@ -35,23 +41,27 @@ separate_arguments(TORCH_LIB_NAMES_LIST UNIX_COMMAND "${TORCH_LIB_NAMES}")
 
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include
+    ${Y2_CONTROL_SOURCE_DIR}/Y2Matrix/include
+    ${Y2_CONTROL_SOURCE_DIR}/Y2Kinematics/include
+    ${Y2_CONTROL_SOURCE_DIR}/Y2ForceCon/include
     ${TORCH_INCLUDE_DIRS_LIST}
 )
 
 set(Y2_MATRIX_SRCS
-    cpp/src/Y2Matrix/YMatrix.cpp
-    cpp/src/Y2Matrix/RotationTransform.cpp
+    ${Y2_CONTROL_SOURCE_DIR}/Y2Matrix/src/YMatrix.cpp
+    ${Y2_CONTROL_SOURCE_DIR}/Y2Matrix/src/RotationTransform.cpp
 )
 
 set(Y2_KINEMATICS_SRCS
-    cpp/src/Y2Kinematics/Kinematics.cpp
-    cpp/src/Y2Kinematics/KinematicsUR10e.cpp
-    cpp/src/Y2Kinematics/QP_solver.cpp
+    ${Y2_CONTROL_SOURCE_DIR}/Y2Kinematics/src/Kinematics.cpp
+    ${Y2_CONTROL_SOURCE_DIR}/Y2Kinematics/src/KinematicsUR10.cpp
+    ${Y2_CONTROL_SOURCE_DIR}/Y2Kinematics/src/KinematicsUR10e.cpp
 )
 
 set(Y2_FORCECON_SRCS
-    cpp/src/Y2ForceCon/admittance_control.cpp
-    cpp/src/Y2ForceCon/contextNaf_mdGradi.cpp
+    ${Y2_CONTROL_SOURCE_DIR}/Y2ForceCon/src/admittance_control.cpp
+    ${Y2_CONTROL_SOURCE_DIR}/Y2ForceCon/src/Naf_mdGradi.cpp
+    ${Y2_CONTROL_SOURCE_DIR}/Y2ForceCon/src/mode3_force_control_core.cpp
 )
 
 set(Y2_API_SRCS
@@ -75,6 +85,9 @@ pybind11_add_module(_y2_control_pybind
 
 target_include_directories(_y2_control_pybind PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include
+    ${Y2_CONTROL_SOURCE_DIR}/Y2Matrix/include
+    ${Y2_CONTROL_SOURCE_DIR}/Y2Kinematics/include
+    ${Y2_CONTROL_SOURCE_DIR}/Y2ForceCon/include
     ${TORCH_INCLUDE_DIRS_LIST}
 )
 

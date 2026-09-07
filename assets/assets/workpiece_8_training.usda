@@ -1,0 +1,17 @@
+#usda 1.0
+(
+    defaultPrim = "Workpiece"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "Workpiece" (
+    references = @/home/eunseop/isaac/isaac_save/workpiece_8_v2.usd@</World>
+) {
+    # Isaac Lab owns the one simulation scene. Cloning an embedded scene into
+    # every environment is unsupported by PhysX replication.
+    over "PhysicsScene" (
+        active = false
+    ) {
+    }
+}

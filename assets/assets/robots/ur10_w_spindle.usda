@@ -1,0 +1,66 @@
+#usda 1.0
+(
+    defaultPrim = "Robot"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "Robot" (
+    references = @/home/eunseop/isaac/isaac_save/universal_robots/ur_description/urdf/ur10/ur10.usd@</ur10_robot>
+) {
+    def Xform "spindle_link" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    ) {
+        # Coincide with wrist_3_link at the referenced robot's zero-joint pose.
+        # A fixed joint with zero local offsets requires coincident body frames.
+        double3 xformOp:translate = (1.1842999458312988, 0.2561410665512085, 0.011599980294704437)
+        quatd xformOp:orient = (0, 0, 0.7071067811865476, 0.7071067811865476)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+        bool physics:rigidBodyEnabled = true
+        float physics:mass = 2.0
+        float3 physics:centerOfMass = (0.0, 0.0, 0.057)
+
+        def Xform "visuals" {
+            def Cylinder "polishing_tool" {
+                double radius = 0.028
+                double height = 0.114
+                float3[] extent = [(-0.028, -0.028, -0.057), (0.028, 0.028, 0.057)]
+                double3 xformOp:translate = (0.0, 0.0, 0.057)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+        }
+        def Xform "collisions" {
+            def Cylinder "polishing_tool" (
+                prepend apiSchemas = ["PhysicsCollisionAPI"]
+            ) {
+                double radius = 0.028
+                double height = 0.114
+                float3[] extent = [(-0.028, -0.028, -0.057), (0.028, 0.028, 0.057)]
+                double3 xformOp:translate = (0.0, 0.0, 0.057)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+        }
+    }
+
+    def Scope "joints" {
+        # Match the DH dimensions compiled in KinematicsUR10.hpp (metres here).
+        over "shoulder_pan_joint" {
+            point3f physics:localPos0 = (0, 0, 0.128)
+        }
+        over "wrist_1_joint" {
+            point3f physics:localPos0 = (-0.5723, 0, 0.1639)
+        }
+        def PhysicsFixedJoint "tool0_to_spindle" {
+            rel physics:body0 = </Robot/wrist_3_link>
+            rel physics:body1 = </Robot/spindle_link>
+            bool physics:jointEnabled = true
+            bool physics:collisionEnabled = false
+            float physics:breakForce = 3.4028235e38
+            float physics:breakTorque = 3.4028235e38
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            point3f physics:localPos0 = (0, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+        }
+    }
+}

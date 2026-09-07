@@ -95,6 +95,10 @@ _rl_force_buffer = []
 _rl_index_buffer = []
 _rl_sliding_velocity_buffer = []
 _rl_reward_components_buffer = defaultdict(list)
+# Optional exact per-control-step metrics from the current shared Y2 controller.
+_rl_removal_rate_buffer = []
+_rl_removal_step_buffer = []
+_last_control_record_step = None
 
 _current_ep_reward = 0.0
 
@@ -659,6 +663,44 @@ def _compute_episode_summary(
 # Step Recording
 # ============================================================
 
+def _capture_controller_rewards(env):
+    """Called before the reward manager resets, including the terminal reward."""
+    global _current_ep_reward
+    manager = getattr(env, "reward_manager", None)
+    if manager is None:
+        return
+    sums = getattr(manager, "_episode_sums", {})
+    for name, values in sums.items():
+        _rl_reward_components_buffer[name].append(float(values[0]))
+    if sums:
+        _current_ep_reward = sum(float(values[0]) for values in sums.values())
+
+
+def record_control_step(env, term, measured_pose, normal_force):
+    """Record env0 exactly once per control step, including the terminal step.
+
+    This hook is intentionally outside the policy observation group. Positions
+    are Y2 TCP/base millimetres, force is the controller's measured TCP-normal
+    projection (including sensor randomization), and removal excludes preparation.
+    """
+    global _last_control_record_step
+    step = int(env.common_step_counter)
+    if step == _last_control_record_step:
+        return
+    from .adaptive_velocity_debug import arc_to_index
+
+    # force3[2] is the legacy plotting interface for the normal-force channel,
+    # NOT a new base-frame sensor reading.
+    state = measured_pose.detach().cpu().numpy()[None, :]
+    force = np.array([[0.0, 0.0, normal_force]])
+    record_step([0], state, force, step * float(env.step_dt))
+    _rl_index_buffer.append(arc_to_index(float(term.path_cursor_mm[0]), term._diagnostic_arc_mm))
+    _rl_sliding_velocity_buffer.append(float(term.current_sliding_velocity_mm_s[0]))
+    _rl_removal_rate_buffer.append(float(term.current_mrr_n_mm_s[0]))
+    _rl_removal_step_buffer.append(float(term.realized_removal_step[0]))
+    _last_control_record_step = step
+
+
 def record_step(env_ids, state6, force3, sim_time):
     global _rl_time_buffer, _rl_state_buffer, _rl_force_buffer
     global _rl_start_time, _has_seen_any_step
@@ -827,15 +869,9 @@ def process_episode():
     global _rl_start_time, _episode_counter, _summary_metrics
     global _current_ep_reward, _global_removal_history
 
-    if len(_rl_time_buffer) < 5: # 스텝 수가 너무 적어도 진행되도록 허들 낮춤
-        _rl_time_buffer.clear()
-        _rl_state_buffer.clear()
-        _rl_force_buffer.clear()
-        _rl_index_buffer.clear()
-        _rl_sliding_velocity_buffer.clear()
-        _rl_reward_components_buffer.clear()
-        _rl_start_time = None
-        _current_ep_reward = 0.0
+    if len(_rl_time_buffer) < 5:
+        _clear_episode_buffers()
+        _episode_counter += 1
         return 0.0
 
     t = np.array(_rl_time_buffer, dtype=float)
@@ -868,6 +904,13 @@ def process_episode():
         0.0,
     )
     dremoval = removal_rate * dt
+    if len(_rl_removal_step_buffer) == len(t):
+        # Do not recalculate with the legacy contact threshold or the hard-coded
+        # first dt=1 ms: plots/summaries must agree with the unchanged RL metrics.
+        removal_rate = np.asarray(_rl_removal_rate_buffer, dtype=float)
+        dremoval = np.asarray(_rl_removal_step_buffer, dtype=float)
+        contact_indices = np.flatnonzero(dremoval > 0.0)
+        contact_start_idx = int(contact_indices[0]) if contact_indices.size else None
 
     contact_window_start = int(contact_start_idx) if contact_start_idx is not None else 0
     contact_window_start = max(0, min(contact_window_start, len(dremoval) - 1))
@@ -892,6 +935,21 @@ def process_episode():
         episode_reward=_current_ep_reward,
     )
     _write_episode_summary(ep_dir, summary)
+    # Preserve the legacy PNGs but disclose their analytical (not experimental)
+    # comparison and ideal-mean blending, so they cannot be read as PPO proof.
+    (RUN_LOG_DIR / "00_visualization_notes.txt").write_text(
+        "Layout/filenames: nrs_rl e4efeeb. Tracked environment: env0.\n"
+        "TCP: Y2 base mm / spatial-angle rad. Force: measured TCP-normal N.\n"
+        "Removal: controller proxy in N*mm; rate: N*mm/s, NOT material volume.\n"
+        "Preparation contributes zero removal. Terminal sample/rewards included.\n"
+        "02/05/07 retain legacy ideal-mean blending (88% mean + 12% measured rate,\n"
+        "total-normalized). Their adaptive curves are POST-PROCESSED, not raw\n"
+        "policy measurements. Constant velocity is an analytical same-force\n"
+        "reference, NOT an independently simulated baseline. These comparison\n"
+        "images do not establish RL improvement. See 03 for measured force/speed\n"
+        "and 00_summary.txt for the unmodified controller removal proxy.\n",
+        encoding="utf-8",
+    )
     for key in _summary_metrics:
         _summary_metrics[key].append(summary[key])
     save_global_summary()
@@ -902,14 +960,7 @@ def process_episode():
 
     _episode_counter += 1
     
-    _rl_time_buffer.clear()
-    _rl_state_buffer.clear()
-    _rl_force_buffer.clear()
-    _rl_index_buffer.clear()
-    _rl_sliding_velocity_buffer.clear()
-    _rl_reward_components_buffer.clear()
-    _rl_start_time = None
-    _current_ep_reward = 0.0 
+    _clear_episode_buffers()
 
     return float(np.sum(dremoval))
 
@@ -1372,7 +1423,11 @@ def rl_episode_done():
     return process_episode()
 
 def _clear_episode_buffers():
-    global _rl_start_time, _current_ep_reward
+    global _rl_start_time, _current_ep_reward, _has_seen_any_step, _last_control_record_step
+    _rl_removal_rate_buffer.clear()
+    _rl_removal_step_buffer.clear()
+    _last_control_record_step = None
+    _has_seen_any_step = False
     _rl_time_buffer.clear()
     _rl_state_buffer.clear()
     _rl_force_buffer.clear()
@@ -1409,6 +1464,8 @@ def on_episode_reset(env, env_ids=None):
         if reset_step >= 0 and _last_processed_reset_step == reset_step:
             return
         if len(_rl_time_buffer) > 0:
+            if _rl_removal_step_buffer:
+                _capture_controller_rewards(env)
             if _should_save_episode(env):
                 rl_episode_done()
             else:

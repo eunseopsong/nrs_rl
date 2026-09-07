@@ -1,85 +1,60 @@
+"""Single source of truth for robot/simulator controller parameters.
+
+Values are loaded from the ROS controller YAML at import time.  Training now
+fails early if the production configuration is missing instead of silently
+falling back to the former UR10e + 144 mm training geometry.
+"""
+
+from __future__ import annotations
+
+import os
 from pathlib import Path
 
-"""
-Configuration mirrored from y2_ur10skku_control/setup_parameters.hpp.
+import yaml
 
-Units:
-- Length: mm
-- Angle: rad
-- Time: s
-"""
 
-ROBOT_KINEMATICS = 2
-NUMBER_OF_JOINTS = 6
+Y2_CONTROL_SOURCE_DIR = Path(
+    os.environ.get("Y2_CONTROL_SOURCE_DIR", "/home/eunseop/dev_ws/src/y2_ur10skku_control")
+).resolve()
+ROBOT_CONFIG_PATH = Path(
+    os.environ.get(
+        "Y2_ROBOT_CONFIG",
+        str(Y2_CONTROL_SOURCE_DIR / "Y2RobMotion/config/setup_parameters.yaml"),
+    )
+).resolve()
 
-PACKAGE_BUNDLE_DIR = "/home/eunseop/dev_ws/src/y2_ur10skku_control"
+if not ROBOT_CONFIG_PATH.is_file():
+    raise FileNotFoundError(f"Production robot configuration not found: {ROBOT_CONFIG_PATH}")
 
-TRAJECTORY_MODE = 2
-FORCE_CON_COORDINATE = 1
+with ROBOT_CONFIG_PATH.open("r", encoding="utf-8") as stream:
+    _cfg = yaml.safe_load(stream)
 
-CONTROL_PERIOD = 0.008
-ROBOT_NAME = "ur10skku"
+ROBOT_KINEMATICS = str(_cfg["ROBOT_KINEMATICS"])
+NUMBER_OF_JOINTS = int(_cfg["NUMBER_OF_JOINTS"])
+CONTROL_PERIOD = float(_cfg["CONTROL_PERIOD"])
+FORCE_CON_COORDINATE = int(_cfg["Force_Con_Coordinate"])
+EE2TCP = [[float(value) for value in row] for row in _cfg["EE2TCP"]]
+TCP_LENGTH_MM = float(EE2TCP[2][3])
+JOINT_NAMES = list(_cfg["JOINT_NAMES"])
 
-TEST_MODE = 0
-REMAPPING_ENABLED = 1
-REMAP_STATE_TOPIC = "/joint_states"
-REMAP_COMMAND_TOPIC = "/forward_position_controller/commands"
-
-JOINT_NAMES = [
-    "shoulder_pan_joint",
-    "shoulder_lift_joint",
-    "elbow_joint",
-    "wrist_1_joint",
-    "wrist_2_joint",
-    "wrist_3_joint",
-]
-
-TCP_LENGTH_MM = 111.0
-
-EE2TCP = [
-    [-1.0,  0.0,  0.0,   0.0],
-    [ 0.0,  1.0,  0.0,   0.0],
-    [ 0.0,  0.0, -1.0, TCP_LENGTH_MM],
-    [ 0.0,  0.0,  0.0,   1.0],
-]
-
-# ----------------------------------------------------------------------
-# ForceCon Mode 5 checkpoint path
-# ----------------------------------------------------------------------
-_THIS_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _THIS_DIR.parent
-
-CHECKPOINT_DIR = _PROJECT_ROOT / "checkpoints"
-ORIGINAL_Y2_FORCECON_CHECKPOINT_DIR = (
-    Path(PACKAGE_BUNDLE_DIR) / "Y2ForceCon" / "src" / "checkpoints"
+FORCE_SWITCH_DESIRED_FORCE_THRESHOLD = float(
+    _cfg["FORCE_SWITCH_DESIRED_FORCE_THRESHOLD"]
 )
-CONTEXT_NAF_MDGRADI_CKPT = str(
-    ORIGINAL_Y2_FORCECON_CHECKPOINT_DIR / "ContextNAF_MDGradi" / "contextNAF_mdGradi_policy_script.pt"
+FORCE_SWITCH_ACTUAL_FORCE_THRESHOLD = float(
+    _cfg["FORCE_SWITCH_ACTUAL_FORCE_THRESHOLD"]
 )
+FORCE_SWITCH_PRECONTACT_FORCE_HOLD = float(
+    _cfg["FORCE_SWITCH_PRECONTACT_FORCE_HOLD"]
+)
+FORCE_SWITCH_RETURN_TAU = float(_cfg["FORCE_SWITCH_RETURN_TAU_M"])
 
-# ----------------------------------------------------------------------
-# Recommended default parameters for Mode 5 (mirroring robot_motion.cpp)
-# Position axes example defaults used in original Y2RobMotion:
-#   FC_MASS      = {2, 2, 2, ...}
-#   FC_DAMPER    = {6000, 6000, 6000, ...}
-#   FC_STIFFNESS = {2000, 2000, 2000, ...}
-# Contact branch sets K=0.0 in latest RL mode.
-# ----------------------------------------------------------------------
-FORCECON_MODE5_MD_RATIO = 1000.0
-FORCECON_MODE5_FC_FEXT = 50.0
+NAF_MDGRADI_CKPT = str(
+    Y2_CONTROL_SOURCE_DIR
+    / "Y2ForceCon/src/checkpoints/NAF_MDGradi/NAF_mdGradi_policy_script.pt"
+)
+if not Path(NAF_MDGRADI_CKPT).is_file():
+    raise FileNotFoundError(f"Production NAF MD-gradient checkpoint not found: {NAF_MDGRADI_CKPT}")
 
-FORCECON_MODE5_FREE_MASS = 2.0
-FORCECON_MODE5_FREE_DAMPING = 6000.0
-FORCECON_MODE5_FREE_STIFFNESS = 2000.0
-FORCECON_MODE5_CONTACT_STIFFNESS = 0.0
-FORCECON_MODE5_RECOVERY_TAU = 0.2
-
-FORCECON_MODE5_ACTION_LOW = [-0.25, -0.25]
-FORCECON_MODE5_ACTION_HIGH = [0.25, 0.25]
-
-FORCECON_MODE5_MASS_MIN = 0.5
-FORCECON_MODE5_MASS_MAX = 5.0
-FORCECON_MODE5_ALPHA_MIN = 0.5
-FORCECON_MODE5_ALPHA_MAX = 3.0
-FORCECON_MODE5_ALPHA_RATE_UP = 4.0
-FORCECON_MODE5_ALPHA_RATE_DOWN = 4.0
+# Backward-compatible name for older scripts.  It now points to the actual
+# Mode-3 checkpoint intentionally.
+CONTEXT_NAF_MDGRADI_CKPT = NAF_MDGRADI_CKPT

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import MISSING
+from pathlib import Path
 import importlib
 
 import isaaclab.sim as sim_utils
@@ -19,8 +20,6 @@ from isaaclab.managers import (
 )
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
-import nrs_rl.tasks.manager_based.nrs_rl.mdp.rewards as custom_rewards
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
 
 local_obs = importlib.import_module(
@@ -43,11 +42,12 @@ local_vis = importlib.import_module(
 )
 
 from nrs_rl.tasks.manager_based.nrs_rl.assets.assets.robots.ur10e_w_spindle import (
-    UR10E_W_SPINDLE_HIGH_PD_CFG,
+    UR10_W_SPINDLE_HIGH_PD_CFG,
 )
 
-# HDF5_TRAJ_PATH = "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/cmd_continue9D_flat.h5"
-HDF5_TRAJ_PATH = "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/cmd_continue9D_convex_2.h5"
+HDF5_TRAJ_PATH = "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/cmd_continue9D_flat.h5"
+#HDF5_TRAJ_PATH = "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/cmd_continue9D_convex_2.h5"
+#HDF5_TRAJ_PATH = "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/datasets/cmd_continue9D_tail_lamp_proxy_run2.h5"
 local_vis.configure_run_log_dir(HDF5_TRAJ_PATH)
 
 
@@ -69,7 +69,7 @@ class SpindleSceneCfg(InteractiveSceneCfg):
     workpiece = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Workpiece",
         spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/eunseop/isaac/isaac_save/workpiece_8_v2.usd",
+            usd_path=str(Path(__file__).parent / "assets/assets/workpiece_8_training.usda"),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.0),
@@ -83,23 +83,6 @@ class ActionsCfg:
     arm_action = local_action.AdmittanceControlActionCfg(
         class_type=local_action.AdmittanceControlAction,
         asset_name="robot",
-        original_forcecon=local_action.OriginalControllerForceConCfg(
-            force_md_ratio=1000.0,
-            force_fc_fext=50.0,
-            force_free_mass=2.0,
-            force_free_damping=6000.0,
-            force_free_stiffness=2000.0,
-            force_contact_stiffness=0.0,
-            force_recovery_tau=0.2,
-            force_action_low=(-0.25, -0.25),
-            force_action_high=(0.25, 0.25),
-            force_mass_min=0.5,
-            force_mass_max=5.0,
-            force_alpha_min=0.5,
-            force_alpha_max=3.0,
-            force_alpha_rate_up=4.0,
-            force_alpha_rate_down=4.0,
-        ),
         integration=local_action.ActionIntegrationCfg(
             body_name="spindle_link",
             fixed_joint_name="tool0_to_spindle",
@@ -111,72 +94,21 @@ class ActionsCfg:
 
             action_dim=1,
 
-            target_mrr_n_mm_s=335.0,
-            speed_action_scale=0.12,
-            base_index_rate=30.0,
-            min_index_rate=1.0,
-            max_index_rate=96.0,
-            progress_rate_ema_beta=0.55,
-            command_rate_ema_beta=0.10,
-            command_rate_max_delta_up=2.0,
-            command_rate_max_delta_down=2.0,
-            command_velocity_ema_beta=0.12,
-            command_velocity_max_delta_up_mm_s=1.1,
-            command_velocity_max_delta_down_mm_s=1.6,
-            command_velocity_spike_delta_mm_s=1.8,
-            command_velocity_spike_return_ratio=0.10,
-            command_velocity_hard_stop_decay=0.98,
-            command_velocity_max_mm_s=37.5,
-            force_filter_beta=0.05,
-            force_spike_delta_n=2.00,
-            force_spike_hold_steps=0,
-            force_spike_velocity_decay=0.95,
-            force_velocity_compensation=0.25,
-            command_mrr_ema_beta=0.12,
-            command_mrr_max_delta_up_n_mm_s=28.0,
-            command_mrr_max_delta_down_n_mm_s=38.0,
-            command_mrr_min_ratio=0.65,
-            command_mrr_max_ratio=1.10,
-            force_eps_n=1.0,
-            force_tracking_ready_ratio=0.8,
-            min_force_rate_scale=0.25,
-            force_error_slowdown_ratio=0.35,
-            min_force_error_rate_scale=0.35,
-            force_normal_kp_mm_per_n=0.35,
-            force_normal_release_kp_mm_per_n=0.68,
-            force_normal_ki_mm_per_n_s=3.60,
-            force_normal_max_step_mm=2.50,
-            force_normal_retract_max_step_mm=4.00,
-            force_normal_offset_limit_mm=60.0,
-            force_total_normal_delta_limit_mm=60.0,
-            force_normal_deadband_n=0.30,
-            force_band_min_n=8.5,
-            force_band_max_n=11.5,
-            force_band_index_rate_limit=4.0,
-            force_band_saturated_min_n=8.8,
-            force_band_low_speed_scale=0.25,
-            force_band_high_speed_scale=0.35,
-            force_band_hold_progress=False,
-            force_severe_underforce_n=7.0,
-            force_severe_underforce_hold_progress=False,
-            surface_uniformity_feedback_gain=0.18,
-            surface_uniformity_feedback_deadband=0.10,
-            surface_uniformity_feedback_min_scale=0.90,
-            surface_uniformity_feedback_max_scale=1.08,
-            surface_uniformity_feedback_warmup_bins=10,
-            path_tracking_slowdown_start_mm=2.0,
-            path_tracking_stop_mm=8.0,
-            path_tracking_min_rate_scale=0.0,
-            path_projection_window=160,
-            path_projection_max_advance_index=0.0,
-            path_lookahead_min_index=0.0,
-            path_lookahead_max_index=8.0,
-            path_lookahead_time_s=0.015,
-            path_command_max_xy_step_mm=0.0,
-            path_command_max_z_step_mm=8.0,
-            approach_interpolation_enabled=True,
+            nominal_speed_mm_s=6.0,
+            residual_speed_fraction=0.67,
+            min_speed_mm_s=1.0,
+            max_speed_mm_s=12.0,
+            action_filter_tau_s=0.08,
+            action_slew_per_s=4.0,
+            force_overload_ratio=1.6,
+            tracking_stop_mm=10.0,
+            contact_force_n=1.5,
+            projection_window=200,
+            surface_bins=256,
             approach_duration_s=2.0,
-
+            force_scale_range=(0.90, 1.10),
+            force_bias_range_n=(-0.75, 0.75),
+            max_action_delay_steps=3,
             enable_debug_print=True,
             debug_print_interval=50,
             debug_env_id=0,
@@ -188,78 +120,13 @@ class ActionsCfg:
 class ObservationCfg:
     @configclass
     class PolicyCfg(ObsGroup):
-        joint_pos = ObsTerm(
-            func=mdp.joint_pos_rel,
-            noise=Unoise(n_min=-0.01, n_max=0.01),
-        )
-
-        joint_vel = ObsTerm(
-            func=mdp.joint_vel_rel,
-            noise=Unoise(n_min=-0.01, n_max=0.01),
-        )
-
-        actions = ObsTerm(func=mdp.last_action)
-
-        ee_pose = ObsTerm(
-            func=local_obs.get_ee_pose,
-            params={"asset_name": "robot"},
-        )
-
-        target_positions = ObsTerm(
-            func=local_obs.get_hdf5_target_positions,
-            params={"horizon": 5},
-        )
-
-        target_forces = ObsTerm(
-            func=local_obs.get_hdf5_target_forces,
-            params={"horizon": 5},
-        )
-
-        ft_6axis = ObsTerm(
-            func=local_ft_sensor.get_6axis_ft_fixed_joint,
-            params={
-                "asset_name": "robot",
-                "fixed_joint_name": "tool0_to_spindle",
-                "joint_prim_relpath": "joints",
-                "verbose": False,
-            },
-        )
+        adaptive_velocity_state = ObsTerm(func=local_obs.adaptive_velocity_observation)
 
         def __post_init__(self):
             self.enable_corruption = True
             self.concatenate_terms = True
 
-    @configclass
-    class DebugCfg(ObsGroup):
-        processed_polishing_target = ObsTerm(
-            func=local_obs.get_processed_polishing_target,
-            params={
-                "asset_name": "robot",
-                "body_name": "spindle_link",
-                "fixed_joint_name": "tool0_to_spindle",
-                "joint_prim_relpath": "joints",
-                "contact_force_threshold": 10.0,
-                "removal_gain": 0.001,
-                "offset_axis": 2,
-            },
-        )
-
-        visualization_step = ObsTerm(
-            func=local_vis.rl_step_hook,
-            params={
-                "action_term_name": "arm_action",
-                "asset_name": "robot",
-                "fixed_joint_name": "tool0_to_spindle",
-                "joint_prim_relpath": "joints",
-            },
-        )
-
-        def __post_init__(self):
-            self.enable_corruption = False
-            self.concatenate_terms = True
-
     policy: PolicyCfg = PolicyCfg()
-    debug: DebugCfg = DebugCfg()
 
 
 @configclass
@@ -292,49 +159,13 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """Reward terms for the RL environment."""
-
-    removal_rate_reward = RewardTermCfg(
-        func=custom_rewards.removal_rate_reward,
-        weight=2.0,
-        params={
-            "saturation_mrr": 500.0,
-            "min_contact_force": 1.0,
-        },
-    )
-
-    removal_constancy_reward = RewardTermCfg(
-        func=custom_rewards.removal_constancy_reward,
-        weight=4.0,
-        params={
-            "delta_tau": 25.0,
-            "min_contact_force": 1.0,
-            "min_active_mrr": 80.0,
-        },
-    )
-
-    removal_instability_penalty = RewardTermCfg(
-        func=custom_rewards.removal_instability_penalty,
-        weight=20.0,
-        params={
-            "spike_delta": 35.0,
-            "spike_tau": 20.0,
-            "dip_mrr": 220.0,
-            "dip_tau": 35.0,
-            "dip_weight": 2.0,
-            "min_contact_force": 1.0,
-            "min_prev_mrr": 180.0,
-        },
-    )
-
-    surface_uniformity_reward = RewardTermCfg(
-        func=custom_rewards.surface_uniformity_reward,
-        weight=8.0,
-        params={
-            "cv_tau": 0.35,
-            "total_tau": 5500.0,
-        },
-    )
+    realized_removal = RewTerm(func=local_rewards.realized_removal_reward, weight=2.0)
+    force_tracking = RewTerm(func=local_rewards.force_tracking_reward, weight=1.0)
+    spatial_uniformity = RewTerm(func=local_rewards.spatial_uniformity_reward, weight=3.0)
+    removal_variation = RewTerm(func=local_rewards.removal_variation_penalty, weight=0.25)
+    action_rate = RewTerm(func=local_rewards.action_rate_penalty, weight=0.02)
+    safety_shield = RewTerm(func=local_rewards.safety_shield_penalty, weight=2.0)
+    completion_quality = RewTerm(func=local_rewards.completion_quality_reward, weight=20.0)
 
 @configclass
 class TerminationsCfg:
@@ -353,7 +184,7 @@ class VisualizationCfg:
 
 @configclass
 class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
-    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=64, env_spacing=2.5)
+    scene: SpindleSceneCfg = SpindleSceneCfg(num_envs=16, env_spacing=2.5)
     observations: ObservationCfg = ObservationCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
@@ -378,6 +209,6 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_found_lost_pairs_capacity = 1024 * 1024 * 16
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 16
 
-        self.scene.robot = UR10E_W_SPINDLE_HIGH_PD_CFG.replace(
+        self.scene.robot = UR10_W_SPINDLE_HIGH_PD_CFG.replace(
             prim_path="{ENV_REGEX_NS}/Robot"
         )

@@ -1,14 +1,18 @@
 #pragma once
 
-#include "Y2Kinematics/KinematicsUR10e.hpp"
+#include "Y2Kinematics/Kinematics.hpp"
+
+#include <memory>
+#include <string>
 
 #include <vector>
 
 namespace y2_control_pybind {
 
-class UR10eKinematics {
+class RobotKinematics {
 public:
-    UR10eKinematics(
+    RobotKinematics(
+        const std::string& robot_model = "ur10",
         double dt = 0.01,
         const std::vector<std::vector<double>>& ee2tcp = {
             {1.0, 0.0, 0.0, 0.0},
@@ -35,7 +39,7 @@ public:
                           const std::vector<double>& a_max);
 
 private:
-    KinematicsUR10e kin_;
+    std::unique_ptr<Kinematics> kin_;
 };
 
 }  // namespace y2_control_pybind
