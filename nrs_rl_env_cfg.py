@@ -94,6 +94,7 @@ class ActionsCfg:
 
             action_dim=1,
 
+            # Keep the exact scheduler envelope used by Y2RobMotion.
             nominal_speed_mm_s=6.0,
             residual_speed_fraction=0.67,
             min_speed_mm_s=1.0,
@@ -159,16 +160,26 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    realized_removal = RewTerm(func=local_rewards.realized_removal_reward, weight=2.0)
+    # Uniform rate at useful throughput is the objective. A throughput-only
+    # reward favors the maximum speed, while a trend penalty misses slow drift.
+    realized_removal = RewTerm(func=local_rewards.realized_removal_reward, weight=0.25)
+    removal_rate_tracking = RewTerm(
+        func=local_rewards.removal_rate_tracking_penalty, weight=4.0,
+        params={"target_mrr_n_mm_s": 60.0},
+    )
     force_tracking = RewTerm(func=local_rewards.force_tracking_reward, weight=1.0)
-    spatial_uniformity = RewTerm(func=local_rewards.spatial_uniformity_reward, weight=3.0)
-    removal_variation = RewTerm(func=local_rewards.removal_variation_penalty, weight=0.25)
+    force_overshoot = RewTerm(func=local_rewards.force_overshoot_penalty, weight=0.5)
+    spatial_uniformity = RewTerm(func=local_rewards.spatial_uniformity_reward, weight=0.25)
+    removal_variation = RewTerm(func=local_rewards.removal_variation_penalty, weight=0.5)
     action_rate = RewTerm(func=local_rewards.action_rate_penalty, weight=0.02)
+    command_acceleration = RewTerm(func=local_rewards.command_acceleration_penalty, weight=0.05)
+    command_jerk = RewTerm(func=local_rewards.command_jerk_penalty, weight=0.02)
     safety_shield = RewTerm(func=local_rewards.safety_shield_penalty, weight=2.0)
     completion_quality = RewTerm(func=local_rewards.completion_quality_reward, weight=20.0)
 
 @configclass
 class TerminationsCfg:
+    control_failed = DoneTerm(func=local_terms.control_failed)
     trajectory_finished = DoneTerm(
         func=local_terms.trajectory_finished,
     )

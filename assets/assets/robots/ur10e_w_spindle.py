@@ -116,8 +116,11 @@ UR10_W_SPINDLE_CFG.ee_frame_name = EE_FRAME_NAME
 # -----------------------------------------------------------------------------
 UR10_W_SPINDLE_HIGH_PD_CFG = UR10_W_SPINDLE_CFG.copy()
 UR10_W_SPINDLE_HIGH_PD_CFG.spawn.rigid_props.disable_gravity = False
-UR10_W_SPINDLE_HIGH_PD_CFG.actuators["ur10_arm"].stiffness = 900.0
-UR10_W_SPINDLE_HIGH_PD_CFG.actuators["ur10_arm"].damping = 45.0
+# The 900/45 servo accumulated ~10 mm tangential error under 10 N contact,
+# enough to latch the production tracking shield. This 3600/90 pair passed
+# full-path and repeated-reset tests. Hardware stiffness still needs measurement.
+UR10_W_SPINDLE_HIGH_PD_CFG.actuators["ur10_arm"].stiffness = 3600.0
+UR10_W_SPINDLE_HIGH_PD_CFG.actuators["ur10_arm"].damping = 90.0
 UR10_W_SPINDLE_HIGH_PD_CFG.ee_frame_name = EE_FRAME_NAME
 
 # Compatibility aliases for launch files that still import the old symbol.

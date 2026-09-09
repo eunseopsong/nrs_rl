@@ -73,6 +73,7 @@ set(Y2_BINDING_SRCS
     cpp/src/bindings/module.cpp
     cpp/src/bindings/bind_kinematics.cpp
     cpp/src/bindings/bind_forcecon.cpp
+    cpp/src/bindings/bind_speed_limiter.cpp
 )
 
 pybind11_add_module(_y2_control_pybind

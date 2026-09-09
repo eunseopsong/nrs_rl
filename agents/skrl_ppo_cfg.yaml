@@ -49,6 +49,10 @@ agent:
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:
     kl_threshold: 0.008
+    # The scheduler otherwise defaults to 1e-2. The 20260908_233822 run
+    # reached a logged mean LR of 0.0081 despite the configured 3e-4 start.
+    min_lr: 1.0e-05
+    max_lr: 3.0e-04
   state_preprocessor: RunningStandardScaler
   state_preprocessor_kwargs: null
   value_preprocessor: RunningStandardScaler
@@ -61,7 +65,7 @@ agent:
   clip_predicted_values: True
   entropy_loss_scale: 0.001
   value_loss_scale: 2.0
-  kl_threshold: 0.0
+  kl_threshold: 0.016
   rewards_shaper_scale: 1.0
   time_limit_bootstrap: False
   # logging and checkpoint

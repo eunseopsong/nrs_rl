@@ -28,7 +28,7 @@ y2_cfg = importlib.import_module(
 y2_pb = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.y2_control_pybind.y2_control_py._y2_control_pybind"
 )
-if not hasattr(y2_pb, "Mode3ForceController") or not hasattr(y2_pb, "RobotKinematics"):
+if not all(hasattr(y2_pb, name) for name in ("Mode3ForceController", "RobotKinematics", "PpoSpeedLimiter")):
     raise RuntimeError(
         "The y2_control_pybind extension is stale. Rebuild it with "
         "python setup.py build_ext --inplace in y2_control_pybind."
@@ -97,9 +97,23 @@ class ActionIntegrationCfg:
     max_speed_mm_s: float = 12.0
     action_filter_tau_s: float = 0.08
     action_slew_per_s: float = 4.0
+    max_speed_acceleration_mm_s2: float = 16.0
+    max_speed_jerk_mm_s3: float = 160.0
+    # Reward-only causal band-pass: reject sensor-scale noise and slow trends.
+    removal_noise_tau_s: float = 0.024
+    removal_trend_tau_s: float = 0.20
 
     force_overload_ratio: float = 1.6
     tracking_stop_mm: float = 10.0
+    # Hard simulation guard.  A failed IK/contact state must terminate the
+    # rollout instead of feeding an invalid pose back into the robot forever.
+    max_force_abort_n: float = 40.0
+    max_tracking_error_mm: float = 50.0
+    max_command_position_step_mm: float = 8.0
+    max_command_angle_step_rad: float = 0.20
+    max_joint_step_rad: float = 0.12
+    fault_termination_steps: int = 125
+    shield_timeout_s: float = 5.0
     contact_force_n: float = 1.5
     projection_window: int = 200
     surface_bins: int = 256
@@ -183,6 +197,23 @@ class AdmittanceControlAction(ActionTerm):
         self.path_done = torch.zeros(n, dtype=torch.bool, device=self.device)
         self.current_index_delta = torch.zeros(n, device=self.device)
         self.commanded_speed_mm_s = torch.zeros(n, device=self.device)
+        self.requested_speed_mm_s = torch.zeros(n, device=self.device)
+        self.command_acceleration_mm_s2 = torch.zeros(n, device=self.device)
+        self.command_jerk_mm_s3 = torch.zeros(n, device=self.device)
+        self.command_smoothness_valid = torch.zeros(n, dtype=torch.bool, device=self.device)
+        self._previous_speed_enabled = torch.zeros(n, dtype=torch.bool, device=self.device)
+        self.action_delta = torch.zeros(n, device=self.device)
+        self._previous_clipped_action = torch.zeros(n, device=self.device)
+        self.filtered_mrr_n_mm_s = torch.zeros(n, device=self.device)
+        self.mrr_fluctuation_n_mm_s = torch.zeros(n, device=self.device)
+        self._mrr_trend = torch.zeros(n, device=self.device)
+        self._mrr_filter_valid = torch.zeros(n, dtype=torch.bool, device=self.device)
+        self.speed_limiters = [
+            y2_pb.PpoSpeedLimiter(self._step_dt_local, self.int_cfg.max_speed_mm_s,
+                                 self.int_cfg.max_speed_acceleration_mm_s2,
+                                 self.int_cfg.max_speed_jerk_mm_s3)
+            for _ in range(n)
+        ]
         self.current_sliding_velocity_mm_s = torch.zeros(n, device=self.device)
         self.current_abs_fz = torch.zeros(n, device=self.device)
         self.force_error_n = torch.zeros(n, device=self.device)
@@ -197,6 +228,11 @@ class AdmittanceControlAction(ActionTerm):
         self.surface_visit_counts = torch.zeros((n, bins), device=self.device)
         self.surface_last_index = torch.zeros(n, dtype=torch.long, device=self.device)
         self.safety_shield_active = torch.zeros(n, dtype=torch.bool, device=self.device)
+        self.safety_fault_active = torch.zeros(n, dtype=torch.bool, device=self.device)
+        self.safety_terminated = torch.zeros(n, dtype=torch.bool, device=self.device)
+        self.safety_fault_reason = torch.zeros(n, dtype=torch.long, device=self.device)
+        self._shield_steps = torch.zeros(n, dtype=torch.long, device=self.device)
+        self._safety_fault_steps = torch.zeros(n, dtype=torch.long, device=self.device)
         self.policy_state = torch.zeros((n, 12), device=self.device)
         self.polishing_active = torch.zeros(n, dtype=torch.bool, device=self.device)
 
@@ -215,6 +251,7 @@ class AdmittanceControlAction(ActionTerm):
         self._approach_steps = max(1, round(self.int_cfg.approach_duration_s / self._step_dt_local))
         self._approach_start = torch.zeros((n, 6), device=self.device)
         self._previous_q_command = torch.zeros((n, 6), device=self.device)
+        self._previous_command_pose = torch.zeros((n, 6), device=self.device)
         self._previous_q_valid = torch.zeros(n, dtype=torch.bool, device=self.device)
 
         self.kinematics = [
@@ -303,8 +340,21 @@ class AdmittanceControlAction(ActionTerm):
 
     def reset(self, env_ids=None):
         super().reset(env_ids)
-        if env_ids is None:
-            env_ids = torch.arange(self._num_envs_local, device=self.device)
+        if env_ids is None or isinstance(env_ids, slice):
+            selection = slice(None) if env_ids is None else env_ids
+            env_ids = torch.arange(self._num_envs_local, device=self.device)[selection]
+        else:
+            env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        if env_ids.numel() == 0:
+            return
+        # Preserve failure diagnostics before clearing this subset of envs.
+        if hasattr(self._env, "extras"):
+            log = self._env.extras.setdefault("log", {})
+            log["Safety/failure_fraction"] = self.safety_terminated[env_ids].float().mean()
+            log["Safety/fault_steps"] = self._safety_fault_steps[env_ids].float().mean()
+            log["Safety/path_progress_mm"] = self.path_cursor_mm[env_ids].mean()
+            for bit, name in ((1, "force"), (2, "tracking"), (4, "command"), (8, "joint"), (16, "stall")):
+                log[f"Safety/{name}_fraction"] = ((self.safety_fault_reason[env_ids] & bit) != 0).float().mean()
         printer = self._debug_printer
         if printer is not None and printer.env_id in env_ids.tolist():
             printer.reset()
@@ -320,13 +370,19 @@ class AdmittanceControlAction(ActionTerm):
             self.surface_visit_counts, self.surface_last_index,
             self.policy_state, self._filtered_action, self._previous_force,
             self._previous_tcp_mm, self._approach_step, self._calibration_step,
-            self._previous_q_command,
+            self._previous_q_command, self._previous_command_pose, self._shield_steps,
+            self._safety_fault_steps, self.safety_fault_reason,
+            self.requested_speed_mm_s, self.command_acceleration_mm_s2, self.command_jerk_mm_s3,
+            self.command_smoothness_valid, self._previous_speed_enabled, self.action_delta, self._previous_clipped_action,
+            self.filtered_mrr_n_mm_s, self.mrr_fluctuation_n_mm_s, self._mrr_trend, self._mrr_filter_valid,
         )
         for tensor in tensors_zero:
             tensor[env_ids] = 0
         self.path_done[env_ids] = False
         self.polishing_active[env_ids] = False
         self.safety_shield_active[env_ids] = False
+        self.safety_fault_active[env_ids] = False
+        self.safety_terminated[env_ids] = False
         self._previous_tcp_valid[env_ids] = False
         self._previous_q_valid[env_ids] = False
         count = len(env_ids)
@@ -339,9 +395,35 @@ class AdmittanceControlAction(ActionTerm):
         )
         q = self.robot.data.joint_pos[:, :6]
         for env_id in env_ids.tolist():
+            self.speed_limiters[env_id].reset()
+            # solve_IK keeps q_prev for acceleration bounds. PhysX teleports
+            # joints on episode reset, so the C++ history must teleport too.
+            self.kinematics[env_id].set_prev_q(q[env_id].detach().cpu().double().tolist())
             pose, _, _ = self._fk(env_id, q[env_id])
             self._approach_start[env_id] = pose
+            self._previous_command_pose[env_id] = pose
             self.force_controllers[env_id].reset(pose.detach().cpu().double().tolist())
+
+    def _update_safety_status(self, env_id: int, reason: int, shield: bool):
+        """Count once per control tick, after all command checks have run."""
+        previous_reason = int(self.safety_fault_reason[env_id])
+        self._safety_fault_steps[env_id] = self._safety_fault_steps[env_id] + 1 if reason else 0
+        self._shield_steps[env_id] = self._shield_steps[env_id] + 1 if shield or reason else 0
+        stalled = float(self._shield_steps[env_id]) * self._step_dt_local >= self.int_cfg.shield_timeout_s
+        self.safety_fault_active[env_id] = bool(reason)
+        self.safety_fault_reason[env_id] = reason | (16 if stalled else 0)
+        self.safety_shield_active[env_id] = shield or bool(reason)
+        self.safety_terminated[env_id] |= (
+            int(self._safety_fault_steps[env_id]) >= self.int_cfg.fault_termination_steps or stalled
+        )
+        if reason and reason != previous_reason and self.int_cfg.enable_debug_print:
+            local_debug_message = (
+                f"[Control fault] env={env_id} reason={reason} "
+                f"force_N={float(self.current_abs_fz[env_id]):.3f} "
+                f"tracking_mm={float(self.current_path_tracking_error_mm[env_id]):.3f} "
+                f"cursor_mm={float(self.path_cursor_mm[env_id]):.3f}"
+            )
+            print(local_debug_message, flush=True)
 
     def _record_visualization(self, env_id, measured_pose, normal_force):
         # One-way diagnostics: use the controller's already measured TCP and
@@ -389,6 +471,9 @@ class AdmittanceControlAction(ActionTerm):
     @torch.no_grad()
     def process_actions(self, actions: torch.Tensor):
         self._raw_actions.copy_(torch.nan_to_num(actions, nan=0.0, posinf=1.0, neginf=-1.0))
+        clipped = self._raw_actions[:, 0].clamp(-1.0, 1.0)
+        self.action_delta.copy_(clipped - self._previous_clipped_action)
+        self._previous_clipped_action.copy_(clipped)
         self._action_history[:, 1:] = self._action_history[:, :-1].clone()
         self._action_history[:, 0] = torch.clamp(self._raw_actions[:, 0], -1.0, 1.0)
         delayed = self._action_history.gather(1, self._action_delay[:, None]).squeeze(1)
@@ -413,12 +498,17 @@ class AdmittanceControlAction(ActionTerm):
 
         for env_id in range(self._num_envs_local):
             measured_pose, tcp_mm, rotation = self._fk(env_id, q[env_id])
+            hold_current_pose = False
+            fault_reason = 0
+            shield = False
+            speed = 0.0
             if int(self._calibration_step[env_id]) < self._calibration_steps:
                 # Static FT zeroing requires a stationary joint target. Do not
                 # start the approach or accumulate removal during calibration.
                 q_command[env_id, :6] = self.robot.data.default_joint_pos[env_id, :6]
                 self._calibration_step[env_id] += 1
                 self._approach_start[env_id] = measured_pose
+                self._previous_command_pose[env_id] = measured_pose
                 self._record_visualization(env_id, measured_pose, 0.0)
                 self._print_debug(env_id, "CALIBRATION", measured_pose)
                 continue
@@ -442,23 +532,11 @@ class AdmittanceControlAction(ActionTerm):
             actual_speed = tangent_distance / self._step_dt_local
             self.current_sliding_velocity_mm_s[env_id] = actual_speed
             previous_mrr = float(self.current_mrr_n_mm_s[env_id])
-            in_contact = not approach and abs_force >= self.int_cfg.contact_force_n
-            actual_mrr = abs_force * actual_speed if in_contact else 0.0
-            self.prev_mrr_n_mm_s[env_id] = previous_mrr
-            self.current_mrr_n_mm_s[env_id] = actual_mrr
-            self.current_mrr_delta_n_mm_s[env_id] = actual_mrr - previous_mrr
-            removal = abs_force * tangent_distance if in_contact else 0.0
-            self.realized_removal_step[env_id] = removal
-            self.cumulative_removal[env_id] += removal
 
             physical_index = self._nearest_physical_index(env_id, tcp_mm)
             self.physical_path_index[env_id] = physical_index
             physical_progress = float(self.arc_mm[physical_index]) / max(self.path_length_mm, 1.0e-6)
             bin_index = min(int(physical_progress * self.int_cfg.surface_bins), self.int_cfg.surface_bins - 1)
-            if removal > 0.0:
-                self.surface_removal_by_index[env_id, bin_index] += removal
-                self.surface_visit_counts[env_id, bin_index] += 1.0
-                self.surface_last_index[env_id] = max(int(self.surface_last_index[env_id]), bin_index)
 
             if approach:
                 t = float(self._approach_step[env_id] + 1) / self._approach_steps
@@ -470,7 +548,6 @@ class AdmittanceControlAction(ActionTerm):
                 self.force_controllers[env_id].reset(
                     measured_pose.detach().cpu().double().tolist()
                 )
-                self._approach_step[env_id] += 1
                 command_pose = reference_pose
             else:
                 reference_pose, desired_force, target_index = self._trajectory_at(
@@ -490,28 +567,108 @@ class AdmittanceControlAction(ActionTerm):
                 overload = target_force > 0.0 and abs_force > self.int_cfg.force_overload_ratio * target_force
                 tracking_stop = tracking_error > self.int_cfg.tracking_stop_mm
                 shield = overload or tracking_stop
-                self.safety_shield_active[env_id] = shield
-                if shield:
-                    speed = 0.0
-                self.commanded_speed_mm_s[env_id] = speed
-                distance_delta = speed * self._step_dt_local
-                self.current_index_delta[env_id] = distance_delta
-                self.path_cursor_mm[env_id] = min(
-                    self.path_length_mm, float(self.path_cursor_mm[env_id]) + distance_delta
-                )
-                self.path_done[env_id] = (
-                    float(self.path_cursor_mm[env_id]) >= self.path_length_mm - 1.0e-6
-                )
+                finite_wrench = bool(torch.isfinite(wrench[env_id]).all())
+                if not finite_wrench or abs_force > self.int_cfg.max_force_abort_n:
+                    fault_reason |= 1
+                if tracking_error > self.int_cfg.max_tracking_error_mm:
+                    fault_reason |= 2
+                if fault_reason:
+                    command_pose = measured_pose
+                    hold_current_pose = True
+                else:
+                    output = self.force_controllers[env_id].step(
+                        measured_pose.detach().cpu().double().tolist(),
+                        reference_pose.detach().cpu().double().tolist(),
+                        desired_force.detach().cpu().double().tolist(),
+                        wrench[env_id].detach().cpu().double().tolist(),
+                        rotation.reshape(-1).detach().cpu().double().tolist(),
+                    )
+                    command_pose = torch.tensor(output[:6], device=self.device, dtype=torch.float32)
 
-                output = self.force_controllers[env_id].step(
-                    measured_pose.detach().cpu().double().tolist(),
-                    reference_pose.detach().cpu().double().tolist(),
-                    desired_force.detach().cpu().double().tolist(),
-                    wrench[env_id].detach().cpu().double().tolist(),
-                    rotation.reshape(-1).detach().cpu().double().tolist(),
-                )
-                command_pose = torch.tensor(output[:6], device=self.device, dtype=torch.float32)
+            # Check command-to-command continuity. Comparing to measured TCP
+            # incorrectly rejects normal compliance/servo lag during contact.
+            if not hold_current_pose:
+                previous_pose = self._previous_command_pose[env_id]
+                command_position_step = float(torch.linalg.norm(command_pose[:3] - previous_pose[:3]))
+                rotations = spatial_to_rotmat(torch.stack((command_pose[3:6], previous_pose[3:6])))
+                cos_angle = ((rotations[0] * rotations[1]).sum() - 1.0) * 0.5
+                command_angle_step = float(torch.acos(cos_angle.clamp(-1.0, 1.0)))
+                if (not bool(torch.isfinite(command_pose).all())
+                        or command_position_step > self.int_cfg.max_command_position_step_mm
+                        or command_angle_step > self.int_cfg.max_command_angle_step_rad):
+                    fault_reason |= 4
+                    hold_current_pose = True
 
+            seed = self._previous_q_command[env_id] if self._previous_q_valid[env_id] else q[env_id]
+            q_next = q[env_id] if hold_current_pose else self._command_ik(env_id, seed, command_pose)
+            if not hold_current_pose:
+                joint_step = float(torch.linalg.norm(q_next - seed))
+                joint_valid = (
+                    bool(torch.isfinite(q_next).all())
+                    and joint_step <= self.int_cfg.max_joint_step_rad
+                )
+                if not joint_valid:
+                    fault_reason |= 8
+                    hold_current_pose = True
+            if hold_current_pose:
+                q_next = q[env_id]
+                command_pose = measured_pose
+                self.kinematics[env_id].set_prev_q(q_next.detach().cpu().double().tolist())
+                self.force_controllers[env_id].reset(measured_pose.detach().cpu().double().tolist())
+                speed = 0.0
+            self._update_safety_status(env_id, fault_reason, shield)
+            if approach and not hold_current_pose:
+                self._approach_step[env_id] += 1
+            self.requested_speed_mm_s[env_id] = speed
+            speed_enabled = not approach and not shield and not hold_current_pose and not self.safety_terminated[env_id]
+            limiter = self.speed_limiters[env_id]
+            speed = limiter.step(speed, bool(speed_enabled))
+            self.command_smoothness_valid[env_id] = bool(speed_enabled) and bool(self._previous_speed_enabled[env_id])
+            self._previous_speed_enabled[env_id] = bool(speed_enabled)
+            # Log derivatives of the applied command, including emergency
+            # stops. The reward mask excludes stop/release transitions.
+            acceleration = (speed - float(self.commanded_speed_mm_s[env_id])) / self._step_dt_local
+            self.command_jerk_mm_s3[env_id] = (acceleration - float(self.command_acceleration_mm_s2[env_id])) / self._step_dt_local
+            self.command_acceleration_mm_s2[env_id] = acceleration
+            distance_delta = speed * self._step_dt_local
+            self.commanded_speed_mm_s[env_id] = speed
+            self.current_index_delta[env_id] = distance_delta
+            self.path_cursor_mm[env_id] = min(self.path_length_mm, float(self.path_cursor_mm[env_id]) + distance_delta)
+            self.path_done[env_id] = (
+                not bool(self.safety_terminated[env_id])
+                and float(self.path_cursor_mm[env_id]) >= self.path_length_mm - 1.0e-6
+            )
+
+            # Fault samples must not create removal or completion rewards.
+            in_contact = not approach and not fault_reason and abs_force >= self.int_cfg.contact_force_n
+            actual_mrr = abs_force * actual_speed if in_contact else 0.0
+            removal = abs_force * tangent_distance if in_contact else 0.0
+            self.prev_mrr_n_mm_s[env_id] = previous_mrr
+            self.current_mrr_n_mm_s[env_id] = actual_mrr
+            self.current_mrr_delta_n_mm_s[env_id] = actual_mrr - previous_mrr
+            # Filtering affects the vibration reward only. Raw removal and all
+            # performance metrics retain every measured sample and dropout.
+            if not approach and not fault_reason:
+                if not self._mrr_filter_valid[env_id]:
+                    self.filtered_mrr_n_mm_s[env_id] = actual_mrr
+                    self._mrr_trend[env_id] = actual_mrr
+                    self._mrr_filter_valid[env_id] = True
+                fast = 1.0 - math.exp(-self._step_dt_local / self.int_cfg.removal_noise_tau_s)
+                slow = 1.0 - math.exp(-self._step_dt_local / self.int_cfg.removal_trend_tau_s)
+                self.filtered_mrr_n_mm_s[env_id] += fast * (actual_mrr - self.filtered_mrr_n_mm_s[env_id])
+                self._mrr_trend[env_id] += slow * (self.filtered_mrr_n_mm_s[env_id] - self._mrr_trend[env_id])
+                self.mrr_fluctuation_n_mm_s[env_id] = self.filtered_mrr_n_mm_s[env_id] - self._mrr_trend[env_id]
+            else:
+                self._mrr_filter_valid[env_id] = False
+                self.mrr_fluctuation_n_mm_s[env_id] = 0.0
+            self.realized_removal_step[env_id] = removal
+            self.cumulative_removal[env_id] += removal
+            if removal > 0.0:
+                self.surface_removal_by_index[env_id, bin_index] += removal
+                self.surface_visit_counts[env_id, bin_index] += 1.0
+                self.surface_last_index[env_id] = max(int(self.surface_last_index[env_id]), bin_index)
+
+            if not approach:
                 visited = self.surface_removal_by_index[env_id, : max(1, bin_index + 1)]
                 positive = visited[visited > 0.0]
                 deficit = 0.0
@@ -523,26 +680,24 @@ class AdmittanceControlAction(ActionTerm):
                     after = self.traj_positions[target_index + 1, :3] - self.traj_positions[target_index, :3]
                     tangent_change = float(1.0 - torch.dot(before, after) /
                                            (torch.linalg.norm(before) * torch.linalg.norm(after)).clamp_min(1.0e-6))
-                progress = float(self.path_cursor_mm[env_id]) / max(self.path_length_mm, 1.0e-6)
                 values = (
                     float(self.force_error_n[env_id]) / max(target_force, 1.0),
-                    abs_force / max(target_force, 1.0),
-                    force_delta / 100.0,
+                    abs_force / max(target_force, 1.0), force_delta / 100.0,
                     actual_speed / max(self.int_cfg.max_speed_mm_s, 1.0),
                     tracking_error / max(self.int_cfg.tracking_stop_mm, 1.0),
                     float(self._filtered_action[env_id]),
-                    float(self._raw_actions[env_id, 0] - self._filtered_action[env_id]),
-                    progress,
-                    deficit,
-                    tangent_change,
+                    float(self._raw_actions[env_id, 0].clamp(-1.0, 1.0) - self._filtered_action[env_id]),
+                    float(self.path_cursor_mm[env_id]) / max(self.path_length_mm, 1.0e-6),
+                    deficit, tangent_change,
                     1.0 if abs_force >= self.int_cfg.contact_force_n else 0.0,
-                    1.0 if shield else 0.0,
+                    float(self.safety_shield_active[env_id]),
                 )
                 self.policy_state[env_id] = torch.tensor(values, device=self.device)
-
-            seed = self._previous_q_command[env_id] if self._previous_q_valid[env_id] else q[env_id]
-            q_next = self._command_ik(env_id, seed, command_pose)
+                if fault_reason:
+                    self.policy_state[env_id].zero_()
+                    self.policy_state[env_id, -1] = 1.0
             self._previous_q_command[env_id] = q_next
+            self._previous_command_pose[env_id] = command_pose
             self._previous_q_valid[env_id] = True
             q_command[env_id, :6] = q_next
             self._record_visualization(env_id, measured_pose, measured_normal_force)

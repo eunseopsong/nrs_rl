@@ -98,6 +98,13 @@ _rl_reward_components_buffer = defaultdict(list)
 # Optional exact per-control-step metrics from the current shared Y2 controller.
 _rl_removal_rate_buffer = []
 _rl_removal_step_buffer = []
+_rl_control_trace_buffer = []
+CONTROL_TRACE_FIELDS = (
+    "raw_action", "filtered_action", "requested_speed_mm_s", "commanded_speed_mm_s",
+    "command_acceleration_mm_s2", "command_jerk_mm_s3", "filtered_mrr_n_mm_s",
+    "mrr_fluctuation_n_mm_s", "path_cursor_mm", "tracking_error_mm",
+    "polishing_active", "safety_shield_active", "safety_fault_reason",
+)
 _last_control_record_step = None
 
 _current_ep_reward = 0.0
@@ -123,7 +130,6 @@ HEATMAP_DISPLAY_NOISE_FLOOR_FRACTION = 0.006
 HEATMAP_DISPLAY_LOWER_PERCENTILE = 1.0
 HEATMAP_DISPLAY_UPPER_PERCENTILE = 99.2
 PRESTON_RATE_PATH_MASK_FRACTION = 0.08
-COMPARISON_REWARD_ACTION_IDEAL_BLEND = 0.88
 PLOT_MM_TO_M = 1.0e-3
 PLOT_SIGNAL_SMOOTHING_WINDOW = 101
 PLOT_STABILITY_BAND_FRACTION = 0.05
@@ -176,6 +182,9 @@ _summary_metrics = {
     "mean_normal_force": [],
     "mean_sliding_velocity": [],
     "episode_reward": [],
+    "processing_rate_cv": [],
+    "processing_mean_rate": [],
+    "processing_zero_removal_fraction": [],
 }
 
 # ============================================================
@@ -251,17 +260,20 @@ def _wide_axis_limits_for_plot(x, center=None, expand_factor=PLOT_AXIS_EXPAND_FA
 
 
 def _contact_rate_axis_limits(*arrays, contact_mask=None, center=None):
+    # Include stops and spikes. Percentile limits hide the vibration being
+    # evaluated; contact masks are for summary statistics, not display clipping.
     values = []
     for array in arrays:
         array = np.asarray(array, dtype=float)
-        if contact_mask is not None and len(contact_mask) == len(array):
-            array = array[np.asarray(contact_mask, dtype=bool)]
-        array = array[np.isfinite(array) & (array > 0.0)]
+        array = array[np.isfinite(array)]
         if array.size:
             values.append(array)
     if not values:
         return None
-    return _wide_axis_limits_for_plot(np.concatenate(values), center=center)
+    all_values = np.concatenate(values)
+    low, high = float(all_values.min()), float(all_values.max())
+    padding = max(high - low, abs(high) * 0.05, 1.0e-9) * 0.05
+    return low - padding, high + padding
 
 
 def _normalize_heatmap_for_display(grid):
@@ -308,42 +320,40 @@ def _removal_heatmap_display(x, y, removal, extent, bins):
 
 
 def _mean_rate_heatmap_display(x, y, rate, extent, bins):
+    """Cell-mean rate in N mm/s, independent of time-sample density.
+
+    Smooth occupied cell means with a normalized spatial kernel. Empty space is
+    masked, never multiplied into rate/color. A constant rate therefore stays
+    constant even where the robot dwells or the path bends.
+    """
     weights = np.asarray(rate, dtype=float)
+    valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(weights)
+    x, y, weights = np.asarray(x)[valid], np.asarray(y)[valid], weights[valid]
     grid_sum, _, _ = np.histogram2d(x, y, bins=bins, range=[extent[:2], extent[2:]], weights=weights)
     grid_count, _, _ = np.histogram2d(x, y, bins=bins, range=[extent[:2], extent[2:]])
+    occupied = grid_count.T > 0
+    cell_mean = np.divide(grid_sum.T, grid_count.T, out=np.zeros_like(grid_sum.T), where=occupied)
 
     cell_size_x = (extent[1] - extent[0]) / max(bins, 1)
     cell_size_y = (extent[3] - extent[2]) / max(bins, 1)
     mean_cell_size = max(0.5 * (cell_size_x + cell_size_y), 1.0e-6)
-    smoothing_sigma_cells = max(
-        HEATMAP_MIN_SMOOTHING_SIGMA_CELLS,
-        HEATMAP_SMOOTHING_SIGMA_MM / mean_cell_size,
-    )
-    count_smoothed = gaussian_filter(
-        grid_count.T,
-        sigma=smoothing_sigma_cells * HEATMAP_DISPLAY_SMOOTHING_MULTIPLIER,
-    )
-    rate_sum_smoothed = gaussian_filter(
-        grid_sum.T,
-        sigma=smoothing_sigma_cells * HEATMAP_DISPLAY_SMOOTHING_MULTIPLIER,
-    )
+    smoothing_sigma_cells = max(0.5, 2.0 / mean_cell_size)
+    count_smoothed = gaussian_filter(occupied.astype(float), sigma=smoothing_sigma_cells)
+    rate_sum_smoothed = gaussian_filter(cell_mean, sigma=smoothing_sigma_cells)
     grid_smoothed = np.divide(
         rate_sum_smoothed,
         count_smoothed,
         out=np.zeros_like(rate_sum_smoothed, dtype=float),
         where=count_smoothed > 1.0e-9,
     )
-    count_positive = count_smoothed[np.isfinite(count_smoothed) & (count_smoothed > 0.0)]
-    if count_positive.size > 0:
-        path_scale = max(float(np.nanmax(count_positive)) * PRESTON_RATE_PATH_MASK_FRACTION, 1.0e-12)
-        path_mask = np.clip(count_smoothed / path_scale, 0.0, 1.0)
-        path_mask = np.power(path_mask, 0.38)
-        grid_smoothed = np.where(path_mask > 0.015, grid_smoothed, 0.0)
-    else:
-        path_mask = np.zeros_like(grid_smoothed)
-    rate_display, _, _ = _normalize_heatmap_for_display(grid_smoothed)
-    grid_display = rate_display * path_mask
+    support = count_smoothed > max(float(count_smoothed.max()) * 0.05, 1.0e-9)
+    grid_display = np.ma.array(grid_smoothed, mask=~support)
     return grid_display, grid_smoothed
+
+
+def _rate_heatmap_upper(*grids):
+    """Common physical scale, including all supported cell-mean rates."""
+    return max([1.0e-9] + [float(grid.max()) for grid in grids if grid.count()])
 
 
 def _heatmap_display_with_range(grid, lower, upper):
@@ -617,6 +627,7 @@ def _compute_episode_summary(
     removal_rate,
     contact_start_idx,
     episode_reward,
+    polishing_mask=None,
 ):
     samples = int(len(t))
     duration_s = float(t[-1] - t[0]) if samples > 1 else 0.0
@@ -657,6 +668,15 @@ def _compute_episode_summary(
         "episode_reward": float(episode_reward),
     }
     summary.update(_removal_cell_stats(xyz, dremoval, contact_start_idx))
+    if polishing_mask is None:
+        polishing_mask = np.zeros(samples, dtype=bool)
+        if contact_start_idx is not None:
+            polishing_mask[int(contact_start_idx):] = True
+    processing_rate = np.asarray(removal_rate)[np.asarray(polishing_mask, dtype=bool)]
+    processing_mean = _mean(processing_rate)
+    summary["processing_rate_cv"] = _std(processing_rate) / processing_mean if processing_mean > 1.0e-9 else float("nan")
+    summary["processing_mean_rate"] = processing_mean
+    summary["processing_zero_removal_fraction"] = float(np.mean(processing_rate <= 0.0)) if processing_rate.size else float("nan")
     return summary
 
 # ============================================================
@@ -674,6 +694,20 @@ def _capture_controller_rewards(env):
         _rl_reward_components_buffer[name].append(float(values[0]))
     if sums:
         _current_ep_reward = sum(float(values[0]) for values in sums.values())
+
+
+def control_trace_snapshot(term, env_id=0):
+    """One CPU snapshot of speed commands and guards; never reads a sensor."""
+    zero = term.current_sliding_velocity_mm_s[env_id].new_zeros(())
+    raw = getattr(term, "raw_actions", None)
+    processed = getattr(term, "processed_actions", None)
+    values = [raw[env_id, 0] if raw is not None else zero,
+              processed[env_id, 0] if processed is not None else zero]
+    for name in CONTROL_TRACE_FIELDS[2:]:
+        attribute = "current_path_tracking_error_mm" if name == "tracking_error_mm" else name
+        value = getattr(term, attribute, None)
+        values.append(value[env_id] if value is not None else zero)
+    return torch.stack([v.float() for v in values]).detach().cpu().numpy()
 
 
 def record_control_step(env, term, measured_pose, normal_force):
@@ -698,6 +732,8 @@ def record_control_step(env, term, measured_pose, normal_force):
     _rl_sliding_velocity_buffer.append(float(term.current_sliding_velocity_mm_s[0]))
     _rl_removal_rate_buffer.append(float(term.current_mrr_n_mm_s[0]))
     _rl_removal_step_buffer.append(float(term.realized_removal_step[0]))
+    # A single device->CPU copy, with no additional FT sampling or physics step.
+    _rl_control_trace_buffer.append(control_trace_snapshot(term))
     _last_control_record_step = step
 
 
@@ -731,6 +767,28 @@ def record_step(env_ids, state6, force3, sim_time):
 # ============================================================
 # Global Summary Plot
 # ============================================================
+
+def _save_command_tracking_plot(out_dir, t, speed, trace):
+    """Show raw command/response differences without averaging the TCP trace."""
+    columns = {name: trace[:, i] for i, name in enumerate(CONTROL_TRACE_FIELDS)}
+    fig, axes = plt.subplots(3, 1, figsize=(8, 7), sharex=True)
+    axes[0].plot(t, speed, label="Measured TCP", color=PAPER_VELOCITY_COLOR, linewidth=0.8)
+    axes[0].plot(t, columns["commanded_speed_mm_s"], label="Applied speed command", linewidth=1.1)
+    axes[0].plot(t, columns["requested_speed_mm_s"], label="Requested speed", linestyle="--", linewidth=0.8)
+    axes[0].set_ylabel("Speed [mm/s]")
+    axes[0].legend(loc="best")
+    axes[1].plot(t, columns["command_acceleration_mm_s2"], linewidth=0.8)
+    axes[1].set_ylabel("Command acceleration\n[mm/s²]")
+    axes[2].plot(t, columns["command_jerk_mm_s3"], linewidth=0.8)
+    axes[2].set_ylabel("Command jerk\n[mm/s³]")
+    axes[2].set_xlabel("Time [s]")
+    for ax in axes:
+        _paper_grid(ax)
+    fig.suptitle("Raw commands and measured TCP (safety stops included)")
+    fig.tight_layout()
+    fig.savefig(out_dir / "09_command_tracking.png", dpi=200)
+    plt.close(fig)
+
 
 def save_global_summary():
     if not _summary_metrics["episode"]:
@@ -933,21 +991,32 @@ def process_episode():
         removal_rate=removal_rate,
         contact_start_idx=contact_start_idx,
         episode_reward=_current_ep_reward,
+        polishing_mask=(np.asarray(_rl_control_trace_buffer)[:, CONTROL_TRACE_FIELDS.index("polishing_active")] > 0)
+            if len(_rl_control_trace_buffer) == len(t) else None,
     )
     _write_episode_summary(ep_dir, summary)
-    # Preserve the legacy PNGs but disclose their analytical (not experimental)
-    # comparison and ideal-mean blending, so they cannot be read as PPO proof.
+    if len(_rl_control_trace_buffer) == len(t):
+        trace = np.asarray(_rl_control_trace_buffer)
+        np.savez_compressed(ep_dir / "08_control_trace.npz", time_s=t, tcp_pose=s_arr,
+                            normal_force_n=fn, measured_speed_mm_s=speed,
+                            raw_mrr_n_mm_s=removal_rate, removal_step_n_mm=dremoval,
+                            **{name: trace[:, i] for i, name in enumerate(CONTROL_TRACE_FIELDS)})
+        _save_command_tracking_plot(ep_dir, t, speed, trace)
     (RUN_LOG_DIR / "00_visualization_notes.txt").write_text(
         "Layout/filenames: nrs_rl e4efeeb. Tracked environment: env0.\n"
         "TCP: Y2 base mm / spatial-angle rad. Force: measured TCP-normal N.\n"
         "Removal: controller proxy in N*mm; rate: N*mm/s, NOT material volume.\n"
         "Preparation contributes zero removal. Terminal sample/rewards included.\n"
-        "02/05/07 retain legacy ideal-mean blending (88% mean + 12% measured rate,\n"
-        "total-normalized). Their adaptive curves are POST-PROCESSED, not raw\n"
-        "policy measurements. Constant velocity is an analytical same-force\n"
-        "reference, NOT an independently simulated baseline. These comparison\n"
-        "images do not establish RL improvement. See 03 for measured force/speed\n"
-        "and 00_summary.txt for the unmodified controller removal proxy.\n",
+        "02/05/07 use measured adaptive rates, with no ideal-mean mixing.\n"
+        "The same-force constant-speed reference is analytical, not an independent\n"
+        "rollout. No measured RL improvement percentage is inferred from it.\n"
+        "Rate heatmaps use cell means with density-normalized spatial smoothing,\n"
+        "a common physical color scale, and masked unobserved space. They are NOT\n"
+        "accumulated removal maps. Displayed rate CV is temporal\n"
+        "over the displayed window, including zero-rate samples.\n"
+        "Contact CV excludes zero-removal samples. 08_control_trace.npz retains\n"
+        "ALL samples, including preparation, stops and dropouts; use the polishing\n"
+        "flag to evaluate the full processing window. 09 compares commands and TCP.\n",
         encoding="utf-8",
     )
     for key in _summary_metrics:
@@ -989,27 +1058,20 @@ def _velocity_comparison_profiles(
     dt_plot = np.diff(t_plot, prepend=t_plot[0] - default_dt)
     dt_plot = np.where(np.isfinite(dt_plot) & (dt_plot > 0.0), dt_plot, default_dt)
 
-    mean_variable_speed = _mean(variable_speed_plot[contact_mask])
-    constant_rate = np.where(contact_mask, normal_force_plot * mean_variable_speed, 0.0)
+    finite_mask = np.isfinite(normal_force_plot) & np.isfinite(variable_speed_plot) & np.isfinite(variable_removal_rate_plot)
+    mean_variable_speed = _mean(variable_speed_plot[finite_mask])
+    # Same measured force at a constant speed. An adaptive speed stop does not
+    # imply that this analytical reference would also stop.
+    constant_rate = normal_force_plot * mean_variable_speed
 
-    actual_rate = np.where(contact_mask, variable_removal_rate_plot, 0.0)
-    target_rate = _mean(actual_rate[contact_mask])
-    if target_rate <= 0.0:
-        target_rate = _mean(constant_rate[contact_mask])
-
-    reward_action_rate = np.where(
-        contact_mask,
-        COMPARISON_REWARD_ACTION_IDEAL_BLEND * target_rate
-        + (1.0 - COMPARISON_REWARD_ACTION_IDEAL_BLEND) * actual_rate,
-        0.0,
-    )
-    actual_total = float(np.sum(actual_rate * dt_plot))
-    reward_total = float(np.sum(reward_action_rate * dt_plot))
-    if actual_total > 0.0 and reward_total > 0.0:
-        reward_action_rate *= actual_total / reward_total
+    actual_rate = np.asarray(variable_removal_rate_plot, dtype=float).copy()
+    # Keep compatibility keys for plotting callers, but every adaptive value
+    # now comes directly from measured removal. Never manufacture uniformity.
+    reward_action_rate = actual_rate.copy()
 
     return {
         "contact_mask": contact_mask,
+        "analysis_mask": finite_mask,
         "dt": dt_plot,
         "mean_variable_speed": mean_variable_speed,
         "constant_rate": constant_rate,
@@ -1018,9 +1080,9 @@ def _velocity_comparison_profiles(
         "constant_removal": constant_rate * dt_plot,
         "actual_removal": actual_rate * dt_plot,
         "reward_action_removal": reward_action_rate * dt_plot,
-        "constant_rate_cv": _positive_cv(constant_rate[contact_mask]),
-        "actual_rate_cv": _positive_cv(actual_rate[contact_mask]),
-        "reward_rate_cv": _positive_cv(reward_action_rate[contact_mask]),
+        "constant_rate_cv": _cv(_std(constant_rate[finite_mask]), _mean(constant_rate[finite_mask])),
+        "actual_rate_cv": _cv(_std(actual_rate[finite_mask]), _mean(actual_rate[finite_mask])),
+        "reward_rate_cv": _cv(_std(actual_rate[finite_mask]), _mean(actual_rate[finite_mask])),
     }
 
 
@@ -1048,25 +1110,25 @@ def _save_velocity_comparison_plots(
     constant_rate = profiles["constant_rate"]
     reward_action_rate = profiles["reward_action_rate"]
 
-    constant_display, _ = _removal_heatmap_display(x, y, constant_rate, extent, bins)
-    reward_display, _ = _removal_heatmap_display(x, y, reward_action_rate, extent, bins)
+    constant_display, _ = _mean_rate_heatmap_display(x, y, constant_rate, extent, bins)
+    reward_display, _ = _mean_rate_heatmap_display(x, y, reward_action_rate, extent, bins)
+    constant_display *= PLOT_MM_TO_M
+    reward_display *= PLOT_MM_TO_M
+    rate_upper = _rate_heatmap_upper(constant_display, reward_display)
 
     constant_cell_cv = profiles["constant_rate_cv"]
     reward_cell_cv = profiles["reward_rate_cv"]
-    improvement_percent = 0.0
-    if constant_cell_cv > 1.0e-12:
-        improvement_percent = max(0.0, (constant_cell_cv - reward_cell_cv) / constant_cell_cv * 100.0)
     constant_rate_cv = profiles["constant_rate_cv"]
     reward_rate_cv = profiles["reward_rate_cv"]
 
     fig_hm, axes_hm = plt.subplots(1, 2, figsize=(7.2, 3.45), facecolor="white", sharex=True, sharey=True)
     heatmap_items = [
-        ("Constant velocity", constant_display, constant_cell_cv, mean_variable_speed),
+        ("Same-force reference (analytic)", constant_display, constant_cell_cv, mean_variable_speed),
         (
-            f"Adaptive velocity ({improvement_percent:.0f}% lower CV)",
+            "Measured adaptive velocity",
             reward_display,
             reward_cell_cv,
-            _mean(variable_speed_plot[profiles["contact_mask"]]),
+            _mean(variable_speed_plot[profiles["analysis_mask"]]),
         ),
     ]
     im = None
@@ -1077,8 +1139,8 @@ def _save_velocity_comparison_plots(
             extent=extent,
             cmap="viridis",
             vmin=0.0,
-            vmax=1.0,
-            interpolation="bilinear",
+            vmax=rate_upper,
+            interpolation="nearest",
         )
         ax.set_title(title, pad=6)
         ax.set_xlabel("X [mm]")
@@ -1088,7 +1150,7 @@ def _save_velocity_comparison_plots(
         ax.text(
             0.018,
             0.982,
-            f"CV = {cell_cv:.3f}\n$\\bar{{v}}$ = {speed_value * PLOT_MM_TO_M:.4f} m/s",
+            f"Temporal CV = {cell_cv:.3f}\n$\\bar{{v}}$ = {speed_value * PLOT_MM_TO_M:.4f} m/s",
             transform=ax.transAxes,
             va="top",
             ha="left",
@@ -1102,18 +1164,18 @@ def _save_velocity_comparison_plots(
     axes_hm[0].set_ylabel("Y [mm]")
     if im is not None:
         cbar = fig_hm.colorbar(im, ax=axes_hm.ravel().tolist(), fraction=0.035, pad=0.025)
-        cbar.set_label("Normalized Preston rate [a.u.]")
+        cbar.set_label("Mean Preston rate [N m s$^{-1}$]")
         cbar.ax.tick_params(direction="in", length=3.0, width=0.7)
-    fig_hm.suptitle("Spatial Projection of Preston Rate")
+    fig_hm.suptitle("Local Mean Preston Rate (2 mm spatial smoothing)")
     fig_hm.savefig(out_dir / "05_preston_rate_comparison.png", dpi=300, bbox_inches="tight")
     plt.close(fig_hm)
 
     constant_rate_m_s = profiles["constant_rate"] * PLOT_MM_TO_M
     reward_rate_m_s = profiles["reward_action_rate"] * PLOT_MM_TO_M
-    target_rate_m_s = _mean(reward_rate_m_s[profiles["contact_mask"]])
+    target_rate_m_s = _mean(reward_rate_m_s[profiles["analysis_mask"]])
 
     fig_amt, ax_amt = plt.subplots(figsize=(6.8, 3.2), facecolor="white")
-    ax_amt.plot(t_plot, constant_rate_m_s, color=PAPER_CONSTANT_COLOR, linewidth=1.25, alpha=0.95, label=f"Constant velocity (CV={constant_rate_cv:.3f})")
+    ax_amt.plot(t_plot, constant_rate_m_s, color=PAPER_CONSTANT_COLOR, linewidth=1.25, alpha=0.95, label=f"Same-force reference (analytic, CV={constant_rate_cv:.3f})")
     ax_amt.plot(t_plot, reward_rate_m_s, color=PAPER_ADAPTIVE_COLOR, linewidth=1.6, alpha=0.98, label=f"Adaptive velocity (CV={reward_rate_cv:.3f})")
     if target_rate_m_s > 0.0:
         ax_amt.axhline(target_rate_m_s, color=PAPER_REFERENCE_COLOR, linestyle="--", linewidth=0.9, label="Mean adaptive rate")
@@ -1143,7 +1205,7 @@ def _save_constant_velocity_signals_plot(out_dir, t_plot, normal_force_plot, con
 
     fig, axes = plt.subplots(2, 1, figsize=(6.8, 4.4), sharex=True, facecolor="white")
     axes[0].plot(t_plot, normal_force_plot, color=PAPER_FORCE_COLOR, linewidth=1.15)
-    axes[0].set_title("Normal force")
+    axes[0].set_title("Measured force from adaptive run")
     axes[0].set_ylabel("Force [N]")
     axes[0].margins(y=0.08)
     _paper_grid(axes[0])
@@ -1156,7 +1218,7 @@ def _save_constant_velocity_signals_plot(out_dir, t_plot, normal_force_plot, con
         alpha=0.95,
         label=f"Constant velocity = {constant_velocity_mm_s * PLOT_MM_TO_M:.4f} m/s",
     )
-    axes[1].set_title("Constant sliding velocity")
+    axes[1].set_title("Analytical constant-speed reference")
     axes[1].set_xlabel("Time [s]")
     axes[1].set_ylabel("Velocity [m/s]")
     axes[1].margins(y=0.08)
@@ -1199,7 +1261,8 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
 
     # --- 1. Local Preston Rate Heatmap ---
     bins = min(220, max(96, int(np.sqrt(len(x)) * 4)))
-    grid_display, _ = _removal_heatmap_display(x, y, removal_rate_plot, extent, bins)
+    grid_display, _ = _mean_rate_heatmap_display(x, y, removal_rate_plot, extent, bins)
+    grid_display *= PLOT_MM_TO_M
 
     fig, ax = plt.subplots(figsize=(5.4, 4.35), facecolor="white")
     im = ax.imshow(
@@ -1208,27 +1271,27 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
         extent=extent,
         cmap="viridis",
         vmin=0.0,
-        vmax=1.0,
-        interpolation="bilinear",
+        vmax=_rate_heatmap_upper(grid_display),
+        interpolation="nearest",
     )
     colorbar = fig.colorbar(im, ax=ax, fraction=0.048, pad=0.035)
-    colorbar.set_label("Normalized Preston rate [a.u.]")
+    colorbar.set_label("Mean Preston rate [N m s$^{-1}$]")
     colorbar.ax.tick_params(direction="in", length=3.0, width=0.7)
-    ax.set_title("Spatial Preston Rate")
+    ax.set_title("Local Mean Preston Rate (2 mm smoothing)")
     ax.set_xlabel("X [mm]")
     ax.set_ylabel("Y [mm]")
     ax.set_aspect("equal", adjustable="box")
     ax.tick_params(direction="in", length=3.0, width=0.7)
     ax.grid(False)
     contact_samples = int(np.count_nonzero(dremoval_plot > 0.0))
-    positive_display = grid_display[grid_display > 0.0]
+    positive_display = grid_display.compressed()
     display_mean = _mean(positive_display)
     display_std = _std(positive_display)
     ax.text(
         0.018,
         0.982,
-        f"mean = {display_mean:.6f} [a.u.]\n"
-        f"std = {display_std:.6f} [a.u.]\n"
+        f"map mean = {display_mean:.6f} N m/s\n"
+        f"map std = {display_std:.6f} N m/s\n"
         f"samples = {len(dremoval_plot)}\n"
         f"contact = {contact_samples}",
         transform=ax.transAxes,
@@ -1262,7 +1325,7 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
 
     if comparison_profiles is not None:
         reward_action_rate_m_s = comparison_profiles["reward_action_rate"] * PLOT_MM_TO_M
-        reward_action_contact_mask = comparison_profiles["contact_mask"]
+        reward_action_contact_mask = comparison_profiles["analysis_mask"]
         reward_action_rate_mean = _mean(reward_action_rate_m_s[reward_action_contact_mask])
         fig2, ax2 = plt.subplots(figsize=(6.8, 3.2), facecolor="white")
         ax2.plot(
@@ -1279,7 +1342,7 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
                 color=PAPER_REFERENCE_COLOR,
                 linestyle="--",
                 linewidth=0.9,
-                label="Contact-window mean",
+                label="Displayed-window mean",
             )
         ax2.set_title("Adaptive Preston Rate Profile")
         ax2.set_xlabel("Time [s]")
@@ -1426,6 +1489,7 @@ def _clear_episode_buffers():
     global _rl_start_time, _current_ep_reward, _has_seen_any_step, _last_control_record_step
     _rl_removal_rate_buffer.clear()
     _rl_removal_step_buffer.clear()
+    _rl_control_trace_buffer.clear()
     _last_control_record_step = None
     _has_seen_any_step = False
     _rl_time_buffer.clear()

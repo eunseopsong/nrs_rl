@@ -36,3 +36,8 @@ def trajectory_finished(env, action_term_name: str = "arm_action") -> torch.Tens
         done = done.to(device=env.device, dtype=torch.bool)
 
     return done
+
+
+def control_failed(env, action_term_name: str = "arm_action") -> torch.Tensor:
+    """Failed control is terminal, but must never count as path completion."""
+    return _get_action_term(env, action_term_name).safety_terminated
