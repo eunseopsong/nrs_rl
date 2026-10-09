@@ -7,6 +7,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -24,7 +25,6 @@ from nrs_rl.tasks.manager_based.nrs_rl.utils.source_snapshot import snapshot_sou
 from nrs_rl.tasks.manager_based.nrs_rl.utils.assess_fixed_force_velocity import evaluate
 from nrs_rl.tasks.manager_based.nrs_rl.mdp.evaluation.audit_ppo_training import audit
 
-SAVE_SHA = '7fdb205948f787b241270cbe897a0a3056d6ae399745cda128e89cb69a9d996a'
 VARIANTS = [(3201, .98, 1.e-4), (3202, .995, 1.e-4), (3203, .998, 1.e-4)]
 SELECTION_SEED = 3241
 HELDOUT_SEEDS = [3251, 3252]
@@ -34,33 +34,74 @@ def read(path):
     return json.loads(Path(path).read_text())
 
 
+def normalize_plan(plan=None):
+    """Lock independent seed groups and per-run settings before any learning."""
+    if plan is None:
+        plan = {'variants': [{'seed': s, 'gae_lambda': g, 'learning_rate': lr}
+                             for s, g, lr in VARIANTS],
+                'selection_seed': SELECTION_SEED, 'heldout_seeds': HELDOUT_SEEDS}
+    defaults = {'updates': 192, 'eval_interval': 16, 'num_envs': 64,
+                'rollout_steps': 512, 'entropy_coefficient': .0001}
+    result = {**plan, 'variants': [{**defaults, **run} for run in plan['variants']]}
+    seeds = [run['seed'] for run in result['variants']]
+    validation_seeds = [result['selection_seed'], *result['heldout_seeds']]
+    if not seeds or len(result['heldout_seeds']) < 2:
+        raise ValueError('Need training candidates and at least two independent heldouts')
+    if any(type(seed) is not int or seed <= 0 for seed in seeds + validation_seeds):
+        raise ValueError('Seeds must be positive integers')
+    if len(set(seeds + validation_seeds)) != len(seeds + validation_seeds):
+        raise ValueError('Training, selection and heldout seeds must be distinct')
+    for run in result['variants']:
+        for key in ['seed', 'updates', 'eval_interval', 'num_envs', 'rollout_steps']:
+            if type(run[key]) is not int or run[key] <= 0:
+                raise ValueError('Invalid positive integer: ' + key)
+        if not 0. < run['gae_lambda'] <= 1. or not 0. < run['learning_rate'] < .01:
+            raise ValueError('Invalid GAE lambda or learning rate')
+        if not math.isfinite(run['entropy_coefficient']) or run['entropy_coefficient'] < 0.:
+            raise ValueError('Invalid entropy coefficient')
+    return result
+
+
 def preserve(root):
     protocol = read(root / 'protocol.json')
     record = read(protocol['protected_save_record'])
-    assert record['checkpoint_sha256'] == SAVE_SHA == sha(record['checkpoint'])
+    assert record['checkpoint_sha256'] == protocol['protected_actor_sha256'] == sha(record['checkpoint'])
     assert record['training_state_sha256'] == sha(record['training_state'])
+    if 'protected_training_state_sha256' in protocol:
+        assert record['training_state_sha256'] == protocol['protected_training_state_sha256']
+        assert sha(protocol['protected_save_record']) == protocol['protected_save_record_sha256']
     assert sha(ROOT / 'deployment/FIXED_MODEL.json') == protocol['gui_manifest_sha256']
     locked = read(ROOT / 'deployment/FIXED_MODEL.json')
     assert sha(locked['checkpoint']) == locked['checkpoint_sha256']
     return record
 
 
-def initialize(root):
+def initialize(root, plan=None):
     if (root / 'protocol.json').exists():
+        if plan is not None:
+            stored = normalize_plan(read(root / 'protocol.json'))
+            requested = normalize_plan(plan)
+            for key in ['variants', 'selection_seed', 'heldout_seeds']:
+                assert stored[key] == requested[key], 'Cannot change an initialized study: ' + key
         return preserve(root)
+    plan = normalize_plan(plan)
     root.mkdir(parents=True, exist_ok=False)
     record_file = ROOT / 'logs/experiments/uniformity_saves/PPO_FIXED.json'
     record = read(record_file)
-    assert sha(record['checkpoint']) == SAVE_SHA
+    assert sha(record['checkpoint']) == record['checkpoint_sha256']
+    assert record['algorithm'] == 'PPO'
     # Pin the immutable per-save record, not a mutable registry pointer.
     immutable_record = Path(record['save_directory']) / 'SAVE.json'
+    assert read(immutable_record) == record
+    assert sha(record['training_state']) == record['training_state_sha256']
     save(root / 'protocol.json', {
         'algorithm': 'PPO', 'started_at_utc': datetime.now(timezone.utc).isoformat(),
-        'protected_save_record': str(immutable_record), 'protected_actor_sha256': SAVE_SHA,
+        'protected_save_record': str(immutable_record), 'protected_actor_sha256': record['checkpoint_sha256'],
+        'protected_save_record_sha256': sha(immutable_record),
+        'protected_training_state_sha256': record['training_state_sha256'],
         'gui_manifest_sha256': sha(ROOT / 'deployment/FIXED_MODEL.json'),
-        'variants': [{'seed': s, 'gae_lambda': g, 'learning_rate': lr, 'updates': 192}
-                     for s, g, lr in VARIANTS],
-        'selection_seed': SELECTION_SEED, 'heldout_seeds': HELDOUT_SEEDS,
+        'variants': plan['variants'],
+        'selection_seed': plan['selection_seed'], 'heldout_seeds': plan['heldout_seeds'],
         'selection_rule': 'highest eligible CV improvement versus paired Mode 6',
         'acceptance_rule': 'each heldout: CV improvement versus Mode 6 exceeds saved PPO by max(0.5 percentage point, 2x Mode 6 repeat variation)',
         'all_volume_scopes_floor_vs_mode6': .5,
@@ -73,11 +114,14 @@ def initialize(root):
     return preserve(root)
 
 
-def train(root):
-    record = initialize(root)
-    save(root / 'status.json', {'phase': 'continued_ppo_training', 'saved_actor_sha256': SAVE_SHA})
+def train(root, plan=None):
+    record = initialize(root, plan)
+    protocol = read(root / 'protocol.json')
+    variants = normalize_plan(protocol)['variants']
+    save(root / 'status.json', {'phase': 'continued_ppo_training', 'saved_actor_sha256': record['checkpoint_sha256']})
 
-    def one(seed, gae, lr):
+    def one(run):
+        seed, gae, lr = run['seed'], run['gae_lambda'], run['learning_rate']
         output = root / f'training_seed{seed}'
         if (output / 'training_complete.json').exists():
             return read(output / 'training_complete.json')
@@ -85,11 +129,12 @@ def train(root):
             raise RuntimeError('Incomplete run retained, use a new study: ' + str(output))
         command = [sys.executable, '-m', 'nrs_rl.tasks.manager_based.nrs_rl.mdp.agents.train_fixed_force_ppo',
                    '--output', str(output), '--resume', record['training_state'],
-                   '--seed', str(seed), '--updates', '192', '--eval-interval', '16',
+                   '--seed', str(seed), '--updates', str(run['updates']), '--eval-interval', str(run['eval_interval']),
                    '--gae-lambda', str(gae), '--learning-rate', str(lr),
-                   '--entropy-coefficient', '.0001', '--device', 'cpu',
-                   '--isaac-selection-seed', str(SELECTION_SEED),
-                   '--isaac-holdout-seeds', *map(str, HELDOUT_SEEDS)]
+                   '--num-envs', str(run['num_envs']), '--rollout-steps', str(run['rollout_steps']),
+                   '--entropy-coefficient', str(run['entropy_coefficient']), '--device', 'cpu',
+                   '--isaac-selection-seed', str(protocol['selection_seed']),
+                   '--isaac-holdout-seeds', *map(str, protocol['heldout_seeds'])]
         save(root / f'training_seed{seed}_command.json', command)
         with (root / f'training_seed{seed}.log').open('w') as stream:
             subprocess.run(command, cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT, check=True,
@@ -98,10 +143,10 @@ def train(root):
         print('TRAINING_COMPLETE', seed, json.dumps(result), flush=True)
         return result
 
-    with ThreadPoolExecutor(max_workers=len(VARIANTS)) as pool:
-        futures = [pool.submit(one, *v) for v in VARIANTS]
+    with ThreadPoolExecutor(max_workers=len(variants)) as pool:
+        futures = [pool.submit(one, run) for run in variants]
         results = [future.result() for future in futures]
-    proof = audit(root, seeds=tuple(v[0] for v in VARIANTS))
+    proof = audit(root, seeds=tuple(run['seed'] for run in variants))
     save(root / 'ppo_training_audit.json', proof)
     preserve(root)
     save(root / 'status.json', {'phase': 'training_complete', 'runs': results, 'training_audit_passed': proof['passed']})
@@ -128,7 +173,7 @@ def batch(root, training, label, names, seed):
     for name in names:
         source = 'constant' if name == 'constant_b' else name
         assert sha(training / 'checkpoints' / f'{source}.pt') == summary['checkpoint_sha256'][name]
-    assert summary['checkpoint_sha256']['ppo_saved'] == SAVE_SHA
+    assert summary['checkpoint_sha256']['ppo_saved'] == read(root / 'protocol.json')['protected_actor_sha256']
     report = evaluate(output, audit=True)
     print('ISAAC_BATCH', label, json.dumps({k: {
         'eligible': v['eligible'], 'cv_improvement_percent_vs_mode6': 100.*v['mode6_cv_gain'],
@@ -140,6 +185,8 @@ def batch(root, training, label, names, seed):
 def physics(root):
     torch.set_num_threads(1)
     record = preserve(root)
+    protocol = read(root / 'protocol.json')
+    selection_seed, heldout_seeds = protocol['selection_seed'], protocol['heldout_seeds']
     assert read(root / 'ppo_training_audit.json')['passed']
     if not (root / 'package_source_snapshot').exists():
         snapshot_sources(root)
@@ -151,14 +198,15 @@ def physics(root):
     shutil.copy2(constant, training / 'checkpoints/constant.pt')
     shutil.copy2(record['checkpoint'], training / 'checkpoints/ppo_saved.pt')
     candidates = {}
-    for seed, _, _ in VARIANTS:
+    for run in protocol['variants']:
+        seed = run['seed']
         selected = read(root / f'training_seed{seed}/selection_surrogate.json')
         name = f'ppo_seed{seed}'
         candidates[name] = selected
         shutil.copy2(selected['actor'], training / 'checkpoints' / f'{name}.pt')
-    save(root / 'status.json', {'phase': 'isaac_selection', 'seed': SELECTION_SEED})
-    selection = batch(root, training, f'selection_{SELECTION_SEED}',
-                      ['constant', 'ppo_saved', *candidates], SELECTION_SEED)
+    save(root / 'status.json', {'phase': 'isaac_selection', 'seed': selection_seed})
+    selection = batch(root, training, f'selection_{selection_seed}',
+                      ['constant', 'ppo_saved', *candidates], selection_seed)
     eligible = [(selection['candidates'][name]['mode6_cv_gain'], name) for name in candidates
                 if selection['candidates'][name]['eligible']]
     if not eligible:
@@ -181,7 +229,7 @@ def physics(root):
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {seed: pool.submit(batch, root, training, f'heldout_{seed}',
                                     ['constant', 'constant_b', 'ppo_saved', 'selected'], seed)
-                   for seed in HELDOUT_SEEDS}
+                   for seed in heldout_seeds}
         heldouts = {str(seed): future.result() for seed, future in futures.items()}
     checks = []
     for seed, report in heldouts.items():
@@ -254,10 +302,11 @@ if __name__ == '__main__':
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--phase', choices=['train', 'physics', 'all'], default='all')
     parser.add_argument('--wait-training', action='store_true')
+    parser.add_argument('--plan', type=Path, help='JSON training variants and independent evaluation seeds')
     args = parser.parse_args()
     root = args.root.resolve()
     if args.phase in ['train', 'all']:
-        train(root)
+        train(root, read(args.plan) if args.plan else None)
     if args.phase in ['physics', 'all']:
         if args.wait_training:
             deadline = time.monotonic() + 1800.

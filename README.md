@@ -64,12 +64,29 @@ python -m nrs_rl.tasks.manager_based.nrs_rl.mdp.agents.train_fixed_force_ppo \
   --output logs/experiments/ppo_new/training_seed3201 --seed 3201 --updates 192
 ```
 
-사용자가 지정한 mode 6 대비 CV **8.896%** 개선 세이브본의 actor, 학습 재개 상태,
+사용자가 지정한 mode 6 대비 CV **10.812%** 개선 세이브본의 actor, 학습 재개 상태,
 검증 자료 위치는 `logs/experiments/uniformity_saves/PPO_FIXED.json`에 기록되어 있다.
+이전 8.90% 세이브본도 별도 디렉터리에 보존한다.
 학습을 이어갈 때는 `--resume <ppo_training_state.pt>`를 지정한다.
 `mdp/evaluation/refine_fixed_force_ppo.py`는 세이브본 보존, 추가 학습, 후보 선정,
 독립 Isaac 검증을 수행한다. `utils/reporting/export_ppo_refinement_results.py`는 수치 감사와
 공통 그래프를 출력한다. 근사 환경의 결과만으로 최종 개선율을 주장하지 않는다.
+
+반복 학습은 `--plan <JSON>`으로 설정별 seed, GAE lambda, 학습률, update 수,
+환경 수, rollout 길이, entropy 계수를 지정한다. 학습·후보 선정·독립 검증 seed를
+서로 다르게 지정해야 하며, 시작한 실험의 설정과 기준 세이브본은 변경할 수 없다.
+실험은 가변 registry 대신 해당 세이브본의 `SAVE.json`과 actor·학습 상태 해시를 고정한다.
+
+```bash
+python -m nrs_rl.tasks.manager_based.nrs_rl.mdp.evaluation.refine_fixed_force_ppo \
+  --root logs/experiments/ppo_next \
+  --plan logs/experiments/plans/ppo_refinement_20261009_1700.json
+python -m nrs_rl.tasks.manager_based.nrs_rl.utils.reporting.export_ppo_refinement_results \
+  --root logs/experiments/ppo_next
+```
+
+실험 계획과 결과는 Git에 포함하지 않는다. 재실행에는 해당 계획 JSON이 필요하다.
+다른 실험을 시작할 때는 새 결과 디렉터리와 새 검증 seed를 지정한다.
 
 2026-10-09 추가 학습은 세 설정을 각각 192 update 진행했다. 후보 선정 seed 3241에서
 seed 3203의 추가 update 176 정책을 고정한 뒤, 독립 Isaac seed 3251·3252로 검증했다.
@@ -80,11 +97,35 @@ seed 3203의 추가 update 176 정책을 고정한 뒤, 독립 Isaac seed 3251·
 | 기존 8.90% 세이브본 재검증 | 9.10% | 97.45% |
 | 추가 학습 PPO | **10.81%** | **104.35%** |
 
-새 후보는 `logs/experiments/ppo_fixed_force_refinement_20261009_1606/candidate/`에 별도로
-보존하며 기존 세이브본을 교체하지 않는다. 두 seed 검증은 이 기준 경로의 결과이며,
+사용자 요청으로 이 후보를
+`logs/experiments/uniformity_saves/ppo_fixed20_virtual1000_cv10p81_20261009_1700/`에
+새 세이브본으로 보존하고 PPO registry를 갱신했다. actor SHA-256은
+`9010dad6550bfc337b4f7afcd6f67950c82112418cd9ff8a9f8de5ef61d14a2c`다.
+두 seed 검증은 이 기준 경로의 결과이며,
 다른 경로나 실제 재료 제거량까지 검증했다는 의미는 아니다.
 폴더 이동 후 160개 테스트, 16 update 학습 재현, 1,000 step Isaac 재현 검사를 통과했다.
 학습 파라미터와 Isaac 26개 기록 항목은 이동 전후 오차 0이었다.
+
+10.81% 세이브본에서 추가로 세 설정을 각각 320 update 학습했다
+(총 31,457,280 전이). 학습률 5e-5 또는 7.5e-5, GAE lambda .998/.999/.9995와
+동일 batch 크기의 64환경×512 step / 32환경×1,024 step을 비교했다.
+근사 환경의 최대 CV 개선은 mode 6 대비 14.08%였지만,
+Isaac 후보 선정 seed 3341에서는 seed 3301의 추가 update 304가 선정됐다.
+이 checkpoint를 고정한 뒤 seed 3351·3352로 검증한 결과는 다음과 같다.
+
+| 정책 | 공간 CV 개선, mode 6 대비 | 총 제거량 유지, mode 6 대비 |
+| --- | ---: | ---: |
+| 10.81% 세이브본의 이번 재검증 | 10.74% | 104.38% |
+| 추가 학습 PPO 후보 | 11.13% | 104.06% |
+
+새 후보의 시드별 CV 개선은 mode 6 대비 11.20%, 11.07%였다.
+두 시드 모두 제거량 50% 하한을 통과했고, 고정 힘·전진 이동·속도 명령 제한·
+제거량 수치 적분 검증도 통과했다. 다만 같은 실행의 세이브본과 비교한
+mode 6 기준 개선율 차이가 사전에 정한 최소 0.5%p에 못 미쳐 채택하지 않았다.
+이 0.5%p는 교체 판단 기준이며 통계적 유의성을 뜻하지 않는다.
+10.81% 세이브본을 유지하고, 추가 후보와 전체 검증 자료는
+`logs/experiments/ppo_fixed_force_refinement_20261009_1700/`, 그래프는
+`logs/polishing_results/20261009_1938/`에 보존한다.
 
 ```bash
 python -m unittest discover -s source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/utils/tests -p 'test_*.py'
