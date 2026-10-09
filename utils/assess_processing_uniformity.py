@@ -19,7 +19,7 @@ import json
 from pathlib import Path
 import h5py
 import numpy as np
-from nrs_rl.tasks.model_based.policies.spatial_uniformity import PlanarPrestonSurface, assess
+from nrs_rl.tasks.manager_based.nrs_rl.model_based.policies.spatial_uniformity import PlanarPrestonSurface, assess
 
 ENTRY_SECONDS = 2.
 ENTRY_REFERENCE_MM = 18.

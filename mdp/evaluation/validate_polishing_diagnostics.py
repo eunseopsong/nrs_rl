@@ -1,0 +1,1 @@
+../../utils/diagnostics/validate_polishing_diagnostics.py

@@ -1,89 +1,104 @@
-# 가공량 균일도 강화학습
+# 고정 힘 가공량 균일도 제어
 
-이 폴더는 신경망 PPO와 Isaac 로봇 환경, 공통 가공량 계산의 유지보수 위치다.
-현재 고정 힘 PPO는 **목표 20 N, 가상 1,000 RPM, 전진 속도 1개 action**으로
-가공 완료 후 표면 깊이의 **공간 CV**를 줄인다. 속도에 따른 체류시간이 가변하며
-별도 정지시간 action, 역주행, 두 번째 전체 패스는 사용하지 않는다.
+이 디렉터리 `tasks/manager_based/nrs_rl/`가 Git 저장소의 루트다.
+새 소스와 수정은 이 저장소 안에서 관리한다. 실제 신경망 강화학습은 `mdp/`,
+비강화학습 정책 최적화는 `model_based/`, 공통 계산·시각화·디버깅은 `utils/`에 둔다.
 
-기존 OSQP/Powell/CEM 정책은 `../../model_based/`로 분리했다. 기존 고정 배포
-checkpoint는 `deployment/FIXED_MODEL.json`에 기록되어 있으며 자동 교체하지 않는다.
-`scripts/`의 기존 명령 경로는 이 소스에 연결되는 상대 심볼릭 링크로 유지한다.
-기존 배포본의 Python 의존 코드는 `model_based/runtime/fixed_force_12p59_source/`에
-별도로 고정하여, 유지보수 코드의 이동이 기존 mode 5·6 실행을 막지 않도록 했다.
+```text
+nrs_rl/                         # Git 루트
+├── mdp/
+│   ├── env_cfg.py             # Isaac 환경 구성
+│   ├── observation.py, action.py, rewards.py, terminations.py
+│   ├── removal_*.py           # 고정 힘 공간 제거량 PPO MDP
+│   ├── agents/                # PPO actor/critic, 학습, SKRL 설정
+│   ├── evaluation/            # PPO 후보 선정, Isaac 검증, save 관리
+│   ├── runtime/               # PPO ROS 추론
+│   └── tests/
+├── model_based/
+│   ├── policies/              # OSQP/Powell/CEM 기반 정책·export
+│   ├── training/              # 비강화학습 최적화
+│   ├── runtime/               # 비강화학습 추론과 고정 배포 의존 소스
+│   ├── evaluation/
+│   ├── deployment/            # 배포 산출물 생성·경로 관리
+│   └── tests/
+├── utils/
+│   ├── preston_surface.py, rotary_geometry.py, removal_metrics.py
+│   ├── visualization.py, debug.py, adaptive_velocity_debug.py
+│   ├── reporting/             # 두 계열이 공유하는 분석·그래프·PDF
+│   ├── diagnostics/           # ROS·측정·시각화 진단
+│   └── tests/
+├── assets/, datasets/          # 로봇과 기준 경로 입력
+├── y2_control_pybind/           # 공통 하위 힘 제어기
+├── paths.py
+└── .gitignore
+```
 
-## 현재 PPO의 파일별 역할
+이전 `agents/`, `evaluation/`, `runtime/`, `tests/` 및 일부 단일 파일 경로는
+같은 저장소 내부의 새 소스를 가리키는 호환 링크다. 새 코드는 위 정식 경로에 작성한다.
+바깥 `tasks/model_based` 경로를 새 코드나 import에서 사용하지 않는다.
 
-| 폴더 / 파일 | 역할 |
-| --- | --- |
-| `agents/ppo_network.py` | Gaussian actor, critic, 결정론적 TorchScript export |
-| `agents/train_fixed_force_ppo.py` | rollout, GAE, PPO clipped update, 평가와 학습 상태 저장 |
-| `agents/fixed_force_ppo.py` | 위 구현을 모은 공개 import API |
-| `mdp/removal_env.py` | 회전 제거량·이송 응답 근사 환경의 상태와 transition |
-| `mdp/removal_observation.py` | 16D 관측: 힘·속도·경로·깊이 부족량·체류시간 |
-| `mdp/removal_action.py` | 전진 속도, 명령 지연·필터·제한기 |
-| `mdp/removal_rewards.py` | 예상 최종 CV² 감소와 mode 6 제거량 50% 하한 penalty |
-| `mdp/removal_terminations.py` | 경로 완주, 336초 제한 |
-| `mdp/removal_config.py` | 고정 힘·RPM·주기·action 권한 계약 |
-| `mdp/fixed_force_ppo_action.py` | 기존 하위 힘 제어기에 PPO 이송 출력 연결 |
-| `utils/spatial_geometry.py`, `rotary_geometry.py` | 공통 경로/footprint/가상 회전 특징 계산 |
-| `utils/preston_surface.py` | 0.5 mm 최종 깊이 지도와 제거량 적분 |
-| `utils/removal_metrics.py`, `assess_fixed_force_velocity.py` | ROI, 원시 trace 재적분, 동등한 mode 6 비교 |
-| `evaluation/` | Isaac 검증, numerical audit, 그래프·PDF 출력 |
-| `tests/` | PPO gradient, export, 관측/속도/제거량 회귀 검사 |
-| `assets/`, `datasets/`, `y2_control_pybind/` | 기존 로봇·경로·센서·C++ 제어기 |
+## 공정 조건과 성능 지표
 
-## 학습과 검증의 범위
+- 목표 접촉력 **20 N 고정**, 제거량 계산에서만 **가상 1,000 RPM 고정**.
+- PPO action은 전진 속도 1개, 이동속도 범위 1.5–12 mm/s. 속도에 따른 체류시간만 변한다.
+- 역주행, 두 번째 전체 패스, 별도 정지시간 action은 사용하지 않는다.
+- 주 지표는 완주 후 **공간 제거 깊이 CV**. 첫 활성 2초 기여와 초기 18 mm 경로 footprint를 제외한다.
+- 동일 0.5 mm 격자·고정 ROI에서 깊이 0인 셀도 포함하며 모든 성능 백분율은 동일 조건 **mode 6 대비**다.
+- processing ROI, full ROI, whole grid 제거량이 각각 mode 6의 50% 이상이어야 한다.
+- 제거량 단위는 미보정 Preston 모델의 `h/K`, `V/K`다. 100 N 초과 즉시 정지 조건을 유지한다.
 
-PPO **학습은 로봇 접촉 물리를 생략한 회전 제거량/명령 응답 근사 환경**에서 한다.
-Isaac는 학습 이후 독립된 전체 로봇·접촉 물리 검증에 사용한다. 현재 PPO를
-Isaac에서 직접 학습한 모델이라고 부르지 않는다. 두 seed를 각각 64 update,
-2,097,152 transition 학습했고 actor는 20,865개의 신경망 파라미터를 가진다.
-기존 residence profile을 teacher나 초기값으로 넣지 않았다.
-
-모든 성능 백분율은 동등한 mode 6 대비다. 주 지표는 첫 활성 2초 기여와 첫 18 mm
-기준 경로 footprint를 제외한 고정 ROI의 공간 CV다. 깊이 0인 셀도 포함한다.
-제거량은 회전 Preston 모델의 `h/K`, `V/K`이며 실제 재료 제거 계수 보정값은 아니다.
-processing ROI, full ROI, whole grid 각각 mode 6 제거량의 50% 이상인지 확인한다.
+PPO는 회전 제거량·이송 명령 응답 근사 환경에서 stochastic PPO-Clip으로 학습하고,
+별도 Isaac 로봇·접촉 물리 실행으로 검증한다. Isaac에서 직접 학습했다고 표현하지 않는다.
+16D 관측과 progress Fourier 특징, 128×128 actor/critic을 사용하며 actor 파라미터는 20,865개다.
+비-PPO profile을 teacher로 사용하지 않는다. MDP 정의는 `mdp/removal_config.py`,
+`removal_observation.py`, `removal_action.py`, `removal_rewards.py`에서 확인한다.
 
 ## 실행
 
-저장된 검증 결과: `logs/experiments/ppo_fixed_force_20261009/final_report.json`.
-PPO 후보는 같은 실험 폴더의 `candidate/checkpoints/actor.pt`에 따로 저장한다.
-GUI mode 5 배포는 기존 고정 모델을 유지한다.
-
-새 학습은 사용하지 않은 출력 폴더를 지정한다.
+`~/nrs_rl` 작업 공간과 `env_isaaclab` 환경에서 실행한다. 이미 사용한 결과 폴더는 덮어쓰지 않는다.
 
 ```bash
 cd ~/nrs_rl
 conda activate env_isaaclab
-python scripts/train_fixed_force_ppo.py \
-  --output logs/experiments/ppo_new/training_seed3101 --seed 3101 --updates 64
+python -m nrs_rl.tasks.manager_based.nrs_rl.mdp.agents.train_fixed_force_ppo \
+  --output logs/experiments/ppo_new/training_seed3201 --seed 3201 --updates 192
 ```
 
-동일 구현을 패키지로 실행할 수도 있다.
+사용자가 지정한 mode 6 대비 CV **8.896%** 개선 세이브본의 actor, 학습 재개 상태,
+검증 자료 위치는 `logs/experiments/uniformity_saves/PPO_FIXED.json`에 기록되어 있다.
+학습을 이어갈 때는 `--resume <ppo_training_state.pt>`를 지정한다.
+`mdp/evaluation/refine_fixed_force_ppo.py`는 세이브본 보존, 추가 학습, 후보 선정,
+독립 Isaac 검증을 수행한다. `utils/reporting/export_ppo_refinement_results.py`는 수치 감사와
+공통 그래프를 출력한다. 근사 환경의 결과만으로 최종 개선율을 주장하지 않는다.
+
+2026-10-09 추가 학습은 세 설정을 각각 192 update 진행했다. 후보 선정 seed 3241에서
+seed 3203의 추가 update 176 정책을 고정한 뒤, 독립 Isaac seed 3251·3252로 검증했다.
+두 검증의 평균은 다음과 같으며 모든 백분율의 기준은 같은 batch의 mode 6이다.
+
+| 정책 | 공간 CV 개선 | 총 제거량 유지 |
+| --- | ---: | ---: |
+| 기존 8.90% 세이브본 재검증 | 9.10% | 97.45% |
+| 추가 학습 PPO | **10.81%** | **104.35%** |
+
+새 후보는 `logs/experiments/ppo_fixed_force_refinement_20261009_1606/candidate/`에 별도로
+보존하며 기존 세이브본을 교체하지 않는다. 두 seed 검증은 이 기준 경로의 결과이며,
+다른 경로나 실제 재료 제거량까지 검증했다는 의미는 아니다.
+폴더 이동 후 160개 테스트, 16 update 학습 재현, 1,000 step Isaac 재현 검사를 통과했다.
+학습 파라미터와 Isaac 26개 기록 항목은 이동 전후 오차 0이었다.
 
 ```bash
-python -m nrs_rl.tasks.manager_based.nrs_rl.agents.train_fixed_force_ppo \
-  --output logs/experiments/ppo_new_second/training_seed3101 --seed 3101
+python -m unittest discover -s source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/utils/tests -p 'test_*.py'
+python -m unittest discover -s source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/model_based/tests -p 'test_*.py'
 ```
 
-학습 직후 `selection_surrogate.json`은 근사 환경 결과다. Isaac의 후보 선정 및
-고정 checkpoint 독립 검증을 통과하기 전까지 최종 성능이나 배포본으로 사용하지 않는다.
-`probe_fixed_force_ppo.py` / `finish_fixed_force_ppo.py`가 Isaac 검증 진입점이며,
-원본 실험은 selection seed 3141, 독립 seed 3151·3152를 사용했다.
+## Git과 산출물
 
-```bash
-python -m unittest discover -s scripts -p 'test_*.py'
-```
+`logs/`, `outputs/`, checkpoint, NumPy 배열 덤프, TensorBoard, 녹화, 빌드·캐시 등은
+`.gitignore`로 제외한다. 실험 결과는 작업 공간의 `logs/experiments/`,
+그래프는 `logs/polishing_results/`, PDF는 `reports/`에 보관하며 Git에 올리지 않는다.
+필수 소형 기준 경로 HDF5와 기존 하위 힘 제어기 가중치 1개만 명시적으로 예외 처리한다.
+이미 추적 중인 대용량 로그가 없는지도 확인한다. 과거 실험의 소스 스냅샷은 결과 자료로 보존한다.
 
-## 보존한 이전 강화학습
-
-`nrs_rl_env_cfg.py`, `mdp/action.py`, `mdp/observation.py`, `mdp/rewards.py`,
-`mdp/terminations.py`는 기존 Isaac/14D adaptive-velocity 환경 및 하위 제어기다.
-현재 16D 공간 CV PPO의 reward는 `mdp/removal_rewards.py`다.
-`agents/skrl/`, `agents/velocity_actor.py`, `agents/train_velocity_gsde.py`는 이전의
-실제 SKRL/SB3 PPO 구현이며 비-PPO 최적화 코드와 구분해 이 경로에 보존했다.
-Gym 등록은 명시적으로 수행하며 import 시 학습·Isaac·ROS 프로세스를 자동 실행하지 않는다.
-
-코드 이동 전 원본은 실험 폴더 `source_before_reorganization/`에 보존했다.
-이후 새 PPO 학습은 전체 Python/C++/설정 소스와 해시를 `package_source_snapshot/`에 남긴다.
+기존 GUI 고정 정책은 **비-PPO**다. 새 PPO 연구 모델로 자동 교체하지 않는다.
+`model_based/runtime/fixed_force_12p59_source/`는 해시를 보존하는 배포 의존 사본이다.
+새 학습은 별도 checkpoint를 생성하고, 원래 세이브본 파일을 덮어쓰지 않는다.

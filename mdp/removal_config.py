@@ -1,6 +1,6 @@
 """Frozen fixed-force PPO process contract, separate from legacy profile optimization."""
-from ..paths import REFERENCE
-from ..utils.removal_metrics import sha
+from nrs_rl.tasks.manager_based.nrs_rl.paths import REFERENCE
+from nrs_rl.tasks.manager_based.nrs_rl.utils.removal_metrics import sha
 
 CONTRACT = {'action_mapping': ['6 + 6*a0 mm/s'],
  'action_names': ['feed'],
@@ -65,7 +65,7 @@ CONTRACT['source_path_sha256'] = sha(REFERENCE)
 
 def check_ppo_or_baseline(contract):
     if contract.get('backend') != CONTRACT['backend']:
-        from nrs_rl.tasks.model_based.policies.fixed_force_refinement import check_contract as check_baseline_contract
+        from nrs_rl.tasks.manager_based.nrs_rl.model_based.policies.fixed_force_refinement import check_contract as check_baseline_contract
         return check_baseline_contract(contract)
     for key, value in CONTRACT.items():
         if contract.get(key) != value:

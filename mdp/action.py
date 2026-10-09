@@ -22,7 +22,7 @@ from isaaclab.utils import configclass
 
 from ..utils import debug as local_debug, visualization as local_vis
 from ..utils.adaptive_velocity_debug import EpisodeDebugPrinter, arc_to_index, format_polishing_live
-from ..utils.velocity_policy import ProcessState, PathTurnPreview, OBSERVATION_SIZE
+from .velocity_policy import ProcessState, PathTurnPreview, OBSERVATION_SIZE
 
 y2_cfg = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.y2_control_pybind.y2_control_py.config"

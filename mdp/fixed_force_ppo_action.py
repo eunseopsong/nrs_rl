@@ -7,9 +7,9 @@ if not __package__:
                         if (p / 'source/nrs_rl/nrs_rl').is_dir())
     _bootstrap_sys.path.insert(0, str(_source_root))
 
-from nrs_rl.tasks.model_based.runtime.fixed_force_refinement_action import FixedForceRefinementAction
-from nrs_rl.tasks.model_based.policies.fixed_force_refinement import ForwardSpeedLimiter
-from nrs_rl.tasks.manager_based.nrs_rl.agents.fixed_force_ppo import check_ppo_or_baseline
+from nrs_rl.tasks.manager_based.nrs_rl.model_based.runtime.fixed_force_refinement_action import FixedForceRefinementAction
+from nrs_rl.tasks.manager_based.nrs_rl.model_based.policies.fixed_force_refinement import ForwardSpeedLimiter
+from nrs_rl.tasks.manager_based.nrs_rl.mdp.agents.fixed_force_ppo import check_ppo_or_baseline
 
 
 class FixedForcePPOAction(FixedForceRefinementAction):

@@ -35,6 +35,53 @@ Thumbs.db
 logs/
 outputs/
 *.log
+output/
+runs/
+wandb/
+tensorboard/
+recordings/
+videos/
+/evaluation_results/
+checkpoints/
+# Keep the small, required lower force-controller dependency already in Git.
+!/y2_control_pybind/checkpoints/
+/y2_control_pybind/checkpoints/*
+!/y2_control_pybind/checkpoints/ContextNAF_MDGradi/
+/y2_control_pybind/checkpoints/ContextNAF_MDGradi/*
+policy_artifacts/
+package_source_snapshot/
+source_snapshot/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+!/y2_control_pybind/checkpoints/ContextNAF_MDGradi/contextNAF_mdGradi_policy_script.pt
+*.npz
+*.npy
+*.hdf5
+*.h5
+# Small, versioned reference trajectories required by the task.
+!/datasets/cmd_continue9D_convex_2.h5
+!/datasets/cmd_continue9D_convex_2_tmp.h5
+!/datasets/cmd_continue9D_flat.h5
+!/datasets/cmd_continue9D_tail_lamp_proxy_run2.h5
+!/datasets/target_positions.h5
+events.out.tfevents.*
+*.bag
+*.db3
+*.mcap
+*.mp4
+*.avi
+*.zip
+*.tar
+*.tar.gz
+*.dmp
+*.backup_*
+/reports/
+/datasets/generated/
+/datasets/cache/
+/.agents/
+/.codex/
 
 # -----------------------------
 # Binary build artifacts

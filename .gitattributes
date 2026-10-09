@@ -1,0 +1,2 @@
+# Deployment-pinned sources must retain their original bytes, including EOF.
+model_based/runtime/fixed_force_12p59_source/** -text whitespace=-blank-at-eof
