@@ -13,12 +13,25 @@ from nrs_rl.tasks.manager_based.nrs_rl.utils.removal_metrics import sha, save
 from nrs_rl.tasks.manager_based.nrs_rl.paths import ROOT
 
 
-def preserve(study, name):
+def validate_selection(report, user_selected=False):
+    """A user may accept a small gain, while numerical/process checks remain mandatory."""
+    if report['algorithm'] != 'PPO' or not report['numerical_audit_passed']:
+        raise ValueError('Saving requires an audited neural PPO candidate')
+    if not report['accepted']:
+        if not user_selected:
+            raise ValueError('Candidate missed automatic selection; explicit user selection is required')
+        rows = [values['selected'] for values in report['per_seed'].values()]
+        if len(rows) < 2 or not all(row['eligible'] for row in rows):
+            raise ValueError('User selection cannot bypass full-path process eligibility')
+        if not all(min(row['mode6_volume_ratios'].values()) >= .5 for row in rows):
+            raise ValueError('User selection cannot bypass the Mode 6 removal floor')
+
+
+def preserve(study, name, user_selected=False):
     study = Path(study).resolve()
     candidate = study / 'candidate'
     report = json.loads((candidate / 'validation.json').read_text())
-    assert report['accepted'] and report['algorithm'] == 'PPO'
-    assert report['numerical_audit_passed']
+    validate_selection(report, user_selected)
     source_manifest = json.loads((candidate / 'manifest.json').read_text())
     for relative, digest in source_manifest.items():
         assert sha(candidate / relative) == digest, relative
@@ -54,6 +67,9 @@ def preserve(study, name):
         'validation': str(destination / 'candidate/validation.json'),
         'mean_heldout_metrics': report['mean_heldout_metrics'],
         'comparison_baseline': 'matched Mode 6 only',
+        'automatic_acceptance_passed': bool(report['accepted']),
+        'selection_authority': ('explicit_user_selection_of_eligible_candidate'
+                                if user_selected else 'user_save_of_automatically_accepted_candidate'),
         'automatic_replacement_allowed': False, 'gui_deployed': False,
         'deployment_manifest_unchanged': True,
     }
@@ -68,5 +84,7 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--study', type=Path, required=True)
     p.add_argument('--name', required=True)
+    p.add_argument('--user-selected', action='store_true',
+                   help='Use only when the user explicitly selects a candidate below the practical gain threshold')
     args = p.parse_args()
-    print(json.dumps(preserve(args.study, args.name), indent=2))
+    print(json.dumps(preserve(args.study, args.name, args.user_selected), indent=2))

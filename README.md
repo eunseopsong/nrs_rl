@@ -53,6 +53,12 @@ PPO는 회전 제거량·이송 명령 응답 근사 환경에서 stochastic PPO
 비-PPO profile을 teacher로 사용하지 않는다. MDP 정의는 `mdp/removal_config.py`,
 `removal_observation.py`, `removal_action.py`, `removal_rewards.py`에서 확인한다.
 
+보상 격자는 `--reward-cell-mm`으로 2 mm(기존), 1 mm, 0.5 mm를 선택할 수 있다.
+`mdp/removal_reward_surface.py`가 별도 보상 표면의 CV와 제거량을 계산한다.
+정책 관측은 기존 2 mm 표면에서 계산하므로 배포용 16D 입력 의미를 유지한다.
+촘촘한 보상 격자도 80 ms·기준 경로의 근사 환경이며, 실제 TCP·접촉력으로
+8 ms마다 적분하는 별도 Isaac 검증을 대체하지 않는다.
+
 ## 실행
 
 `~/nrs_rl` 작업 공간과 `env_isaaclab` 환경에서 실행한다. 이미 사용한 결과 폴더는 덮어쓰지 않는다.
@@ -64,9 +70,9 @@ python -m nrs_rl.tasks.manager_based.nrs_rl.mdp.agents.train_fixed_force_ppo \
   --output logs/experiments/ppo_new/training_seed3201 --seed 3201 --updates 192
 ```
 
-사용자가 지정한 mode 6 대비 CV **10.812%** 개선 세이브본의 actor, 학습 재개 상태,
+사용자가 지정한 mode 6 대비 CV **11.135%** 개선 세이브본의 actor, 학습 재개 상태,
 검증 자료 위치는 `logs/experiments/uniformity_saves/PPO_FIXED.json`에 기록되어 있다.
-이전 8.90% 세이브본도 별도 디렉터리에 보존한다.
+이전 10.81%, 8.90% 세이브본도 별도 디렉터리에 보존한다.
 학습을 이어갈 때는 `--resume <ppo_training_state.pt>`를 지정한다.
 `mdp/evaluation/refine_fixed_force_ppo.py`는 세이브본 보존, 추가 학습, 후보 선정,
 독립 Isaac 검증을 수행한다. `utils/reporting/export_ppo_refinement_results.py`는 수치 감사와
@@ -123,9 +129,37 @@ Isaac 후보 선정 seed 3341에서는 seed 3301의 추가 update 304가 선정�
 제거량 수치 적분 검증도 통과했다. 다만 같은 실행의 세이브본과 비교한
 mode 6 기준 개선율 차이가 사전에 정한 최소 0.5%p에 못 미쳐 채택하지 않았다.
 이 0.5%p는 교체 판단 기준이며 통계적 유의성을 뜻하지 않는다.
-10.81% 세이브본을 유지하고, 추가 후보와 전체 검증 자료는
+당시에는 10.81% 세이브본을 유지했으며, 추가 후보와 전체 검증 자료는
 `logs/experiments/ppo_fixed_force_refinement_20261009_1700/`, 그래프는
 `logs/polishing_results/20261009_1938/`에 보존한다.
+
+후속 사용자 지시로 11.13% 후보를 새 세이브본으로 지정했다.
+저장 위치는 `logs/experiments/uniformity_saves/ppo_fixed20_virtual1000_cv11p13_20261009_2200/`,
+actor SHA-256은 `363abffb65b4a6078a63baffa9ac864f0609ede73a55605df09e7e1862aa1d0c`다.
+원래 자동 교체 판정은 `accepted: false`로 보존하고 `SAVE.json`에 사용자 선택 근거를 기록했다.
+`save_ppo_checkpoint --user-selected`는 사용자가 명시적으로 후보를 선택했을 때 사용한다.
+이 옵션도 수치 감사, 전체 경로 완주 조건과 mode 6 대비 제거량 50% 하한을 요구한다.
+
+11.13% 세이브본에서 이어 학습한 다음 실험은 보상 격자를 비교했다.
+2 mm·1 mm 설정은 각각 320 update(32환경×512 step), 0.5 mm 설정은
+192 update(16환경×512 step)로 총 12,058,624 전이를 추가 학습했다.
+계산 비용에 따라 학습량과 학습률도 달라 순수한 격자 효과의 인과 비교는 아니다.
+관측·힘·궤적이 원래 환경과 동일하고, 0.5 mm 보상 적분이 독립 표면 계산과
+일치하는 것을 확인했다. 모든 후보의 actor·critic 초기값은 세이브본과 정확히 같았다.
+
+후보 선정 seed 3541에서 mode 6 대비 CV 개선은 세이브본 11.21%,
+추가 2 mm 후보 11.20%, 1 mm 후보 11.10%, 0.5 mm 후보 11.04%였다.
+추가 후보 중 최고인 seed 3501의 update 272를 고정한 뒤 seed 3551·3552로 검증했다.
+
+| 정책 | 공간 CV 개선, mode 6 대비 | 총 제거량 유지, mode 6 대비 |
+| --- | ---: | ---: |
+| 11.13% 세이브본의 이번 재검증 | 10.94% | 103.94% |
+| 추가 학습 선정 후보 | 10.82% | 103.44% |
+
+이번 추가 후보는 채택하지 않았고 11.13% 세이브본을 유지했다.
+고정 목표 힘 20 N, action 범위·전진·가속도·jerk와 제거량 재적분 검증은 통과했다.
+실험 자료는 `logs/experiments/ppo_fixed_force_refinement_20261009_2216/`,
+최종 그래프는 `logs/polishing_results/20261010_0121/`에 보존한다.
 
 ```bash
 python -m unittest discover -s source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/utils/tests -p 'test_*.py'

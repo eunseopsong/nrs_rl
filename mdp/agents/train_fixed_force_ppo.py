@@ -78,8 +78,8 @@ def learn(args):
     output.mkdir(parents=True, exist_ok=False)
     (output/'checkpoints').mkdir()
     model = PPOActorCritic().to(args.device)
-    env = RemovalEnv(args.num_envs, args.device, args.seed, True)
-    evaluation = RemovalEnv(4, args.device, args.seed+100, False)
+    env = RemovalEnv(args.num_envs, args.device, args.seed, True, reward_cell_mm=args.reward_cell_mm)
+    evaluation = RemovalEnv(4, args.device, args.seed+100, False, reward_cell_mm=args.reward_cell_mm)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, eps=1.e-5)
     parent = restore_training(model, optimizer, args.resume, args.learning_rate) if args.resume else None
     baseline = evaluate(model, evaluation, baseline=True)
@@ -91,6 +91,7 @@ def learn(args):
         'learning_rate':args.learning_rate, 'epochs':4, 'minibatch_size':2048,
         'max_grad_norm':.5, 'target_kl':.025, 'entropy_coefficient':args.entropy_coefficient,
         'rollout_steps':args.rollout_steps, 'num_envs':args.num_envs, 'updates':args.updates,
+        'reward_cell_mm':args.reward_cell_mm, 'observation_cell_mm':2.,
         'seed':args.seed, 'device':args.device, 'reference_sha256':sha(CONTRACT_REFERENCE),
         'initialization':('continue saved neural PPO actor, critic, log_std and Adam moments; no teacher or profile'
                           if parent else 'random neural features, zero action output weights, nominal 6 mm/s mean; no teacher or profile'),
@@ -227,6 +228,7 @@ if __name__=='__main__':
     p.add_argument('--resume',type=Path)
     p.add_argument('--gae-lambda',type=float,default=.98)
     p.add_argument('--entropy-coefficient',type=float,default=.0002)
+    p.add_argument('--reward-cell-mm',type=float,choices=[.5,1.,2.],default=2.)
     p.add_argument('--isaac-selection-seed',type=int,default=3141)
     p.add_argument('--isaac-holdout-seeds',type=int,nargs='+',default=[3151,3152])
     learn(p.parse_args())

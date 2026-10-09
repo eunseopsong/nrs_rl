@@ -41,7 +41,7 @@ def normalize_plan(plan=None):
                              for s, g, lr in VARIANTS],
                 'selection_seed': SELECTION_SEED, 'heldout_seeds': HELDOUT_SEEDS}
     defaults = {'updates': 192, 'eval_interval': 16, 'num_envs': 64,
-                'rollout_steps': 512, 'entropy_coefficient': .0001}
+                'rollout_steps': 512, 'entropy_coefficient': .0001, 'reward_cell_mm': 2.}
     result = {**plan, 'variants': [{**defaults, **run} for run in plan['variants']]}
     seeds = [run['seed'] for run in result['variants']]
     validation_seeds = [result['selection_seed'], *result['heldout_seeds']]
@@ -59,6 +59,8 @@ def normalize_plan(plan=None):
             raise ValueError('Invalid GAE lambda or learning rate')
         if not math.isfinite(run['entropy_coefficient']) or run['entropy_coefficient'] < 0.:
             raise ValueError('Invalid entropy coefficient')
+        if run['reward_cell_mm'] not in (.5, 1., 2.):
+            raise ValueError('Reward cells must be 0.5, 1 or 2 mm')
     return result
 
 
@@ -133,6 +135,7 @@ def train(root, plan=None):
                    '--gae-lambda', str(gae), '--learning-rate', str(lr),
                    '--num-envs', str(run['num_envs']), '--rollout-steps', str(run['rollout_steps']),
                    '--entropy-coefficient', str(run['entropy_coefficient']), '--device', 'cpu',
+                   '--reward-cell-mm', str(run['reward_cell_mm']),
                    '--isaac-selection-seed', str(protocol['selection_seed']),
                    '--isaac-holdout-seeds', *map(str, protocol['heldout_seeds'])]
         save(root / f'training_seed{seed}_command.json', command)

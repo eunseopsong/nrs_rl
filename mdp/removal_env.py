@@ -15,8 +15,11 @@ class RemovalEnv:
     Features reproduce the existing 16D schema on a 2 mm grid. The training
     deposition uses a .5 mm reference-footprint table, one midpoint per 80 ms
     decision. Final Isaac measurements use actual TCP motion at 8 ms / .5 mm.
+    Optional 1 or .5 mm reward surfaces leave observations and control unchanged.
     """
-    def __init__(self, count=64, device='cpu', seed=3101, randomize=True):
+    def __init__(self, count=64, device='cpu', seed=3101, randomize=True, *, reward_cell_mm=2.):
+        if reward_cell_mm not in (.5, 1., 2.):
+            raise ValueError('Reward cells must be 0.5, 1 or 2 mm')
         self.count, self.device, self.randomize = count, torch.device(device), randomize
         self.rng = torch.Generator(device=self.device).manual_seed(seed)
         geometry = FixedForceGeometry()
@@ -52,6 +55,11 @@ class RemovalEnv:
         self.force_scale = torch.ones(count, device=self.device)
         self.force_bias = torch.zeros(count, device=self.device)
         self.delay = torch.zeros(count, device=self.device, dtype=torch.long)
+        self.reward_cell_mm = reward_cell_mm
+        self.reward_surface = None
+        if reward_cell_mm != 2.:
+            from .removal_reward_surface import RemovalRewardSurface
+            self.reward_surface = RemovalRewardSurface(count, self.device, reward_cell_mm)
         self.reset(torch.arange(count, device=self.device))
 
     def reset(self, ids):
@@ -64,12 +72,16 @@ class RemovalEnv:
         else:
             self.force_scale[ids] = 1.; self.force_bias[ids] = 0.; self.delay[ids] = 0
         self.force[ids] = 20.*self.force_scale[ids]+self.force_bias[ids]
+        if self.reward_surface is not None:
+            self.reward_surface.reset(ids)
         self.potential[ids] = self.predicted_cv2()[ids]
 
     def index(self, cursor):
         return torch.searchsorted(self.arc, cursor.contiguous(), right=True).sub(1).clamp(0, len(self.arc)-2)
 
     def predicted_cv2(self):
+        if self.reward_surface is not None:
+            return self.reward_surface.predicted_cv2(self.cursor)
         return predicted_cv2(self)
     def observation(self):
         return removal_observation(self)
@@ -84,16 +96,21 @@ class RemovalEnv:
         self.depth.scatter_add_(1, ids, values)
         self.processing.scatter_add_(1, ids, values*(self.elapsed >= 2.-1.e-5)[:, None])
         self.residence.scatter_add_(1, ids, (weights > 0).float()*.08)
+        if self.reward_surface is not None:
+            self.reward_surface.deposit(previous, self.cursor, self.force, self.elapsed)
         self.elapsed += .08
         potential = self.predicted_cv2()
         reward = step_reward(self.potential, potential, action, self.previous_action)
         self.previous_action = action.clone()
         self.potential = potential
         completed, done = episode_ends(self.cursor, self.length, self.elapsed)
-        pvalues = self.processing[:, self.mask]
-        cv = pvalues.std(1, unbiased=False)/pvalues.mean(1).clamp_min(1.e-6)
-        volume_ratio = pvalues.sum(1)*4./self.baseline_processing_volume
-        full_ratio = self.depth.sum(1)*4./self.baseline_full_volume
+        if self.reward_surface is None:
+            pvalues = self.processing[:, self.mask]
+            cv = pvalues.std(1, unbiased=False)/pvalues.mean(1).clamp_min(1.e-6)
+            volume_ratio = pvalues.sum(1)*4./self.baseline_processing_volume
+            full_ratio = self.depth.sum(1)*4./self.baseline_full_volume
+        else:
+            cv, volume_ratio, full_ratio = self.reward_surface.metrics()
         reward -= terminal_penalty(done, completed, volume_ratio, full_ratio)
         self.episode_reward += reward
         info = {'done': done.clone(), 'completed': completed.clone(), 'cv': cv.clone(),

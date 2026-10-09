@@ -51,7 +51,8 @@ def finish(root):
         protocol=read(folder/'protocol.json')
         evaluations=[read(p) for p in sorted(folder.glob('evaluation_*.json'))]
         steps=[v['update'] for v in evaluations]
-        label=f"seed {protocol['seed']}, GAE lambda {protocol['gae_lambda']}"
+        label=(f"seed {protocol['seed']}, reward {protocol.get('reward_cell_mm', 2.):g} mm, "
+               f"GAE {protocol['gae_lambda']}")
         axes[0].plot(steps,[v['cv_improvement_percent_vs_mode6'] for v in evaluations],label=label)
         axes[1].plot(steps,[100.*np.mean([r['full_ratio'] for r in v['ppo']]) /
                            np.mean([r['full_ratio'] for r in v['mode6']]) for v in evaluations],label=label)
@@ -61,8 +62,10 @@ def finish(root):
     axes[0].set_ylabel('Spatial CV improvement vs Mode 6 (%)')
     axes[1].set_ylabel('Full removal vs Mode 6 (%)');axes[1].axhline(50,color='red',ls='--')
     axes[2].set_ylabel('Actor weight change from saved PPO (L2)')
-    axes[0].legend(fontsize=8)
-    fig.suptitle('PPO continuation: approximate training environment, not Isaac validation')
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels, fontsize=8, ncol=3,
+               loc='upper center', bbox_to_anchor=(.5, -.02))
+    fig.suptitle('PPO continuation: approximate training environment\nEach curve uses Mode 6 on its own reward grid; final selection uses common Isaac evaluation')
     fig.savefig(plots/'01_ppo_learning_curves.png',bbox_inches='tight');plt.close(fig)
     names=['constant','ppo_saved','selected'];labels=['Mode 6','Saved PPO','New PPO']
     fig,axes=plt.subplots(1,3,figsize=(13,4),layout='constrained')
