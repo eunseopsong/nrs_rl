@@ -50,6 +50,7 @@ class CMakeBuild(build_ext):
 
         build_args = [
             "--config", cfg,
+            "--target", ext.name.rsplit(".", 1)[-1],
             "--parallel",
         ]
 
@@ -67,8 +68,10 @@ ext_modules = [
     Extension(
         name="y2_control_py._y2_control_pybind",
         sources=[],
-    )
+    ),
 ]
+if os.environ.get("NRS_BUILD_RUCKIG", "0") == "1":
+    ext_modules.append(Extension(name="y2_control_py._velocity_ruckig", sources=[]))
 
 setup(
     name="y2_control_pybind",

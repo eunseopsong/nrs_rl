@@ -7,6 +7,17 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11 REQUIRED CONFIG)
+find_package(ruckig QUIET CONFIG
+    HINTS /opt/ros/humble/lib/x86_64-linux-gnu/cmake/ruckig)
+
+# Separate module so the velocity OTG does not link the force controller or
+# Torch libraries. ROS Humble supplies the same Ruckig library for deployment.
+if(ruckig_FOUND)
+    pybind11_add_module(_velocity_ruckig cpp/src/bindings/velocity_ruckig_module.cpp)
+    target_include_directories(_velocity_ruckig PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+    target_link_libraries(_velocity_ruckig PRIVATE ruckig::ruckig)
+    install(TARGETS _velocity_ruckig LIBRARY DESTINATION y2_control_py)
+endif()
 
 set(Y2_CONTROL_SOURCE_DIR "/home/eunseop/dev_ws/src/y2_ur10skku_control" CACHE PATH
     "Path to the live y2_ur10skku_control source tree")

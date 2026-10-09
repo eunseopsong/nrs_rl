@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Production-parity force control with a deliberately narrow RL interface.
 
-The policy controls only a bounded residual on path speed.  Cartesian force
+The policy controls a bounded feed-speed multiplier. Cartesian force
 control and inverse kinematics are compiled from the same C++ sources used by
 Y2RobMotion.  Removal is measured from realized TCP motion, never from the
 scheduled command velocity.
@@ -14,6 +14,7 @@ import math
 import os
 
 import h5py
+import numpy as np
 import torch
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
@@ -21,6 +22,7 @@ from isaaclab.utils import configclass
 
 from ..utils import debug as local_debug, visualization as local_vis
 from ..utils.adaptive_velocity_debug import EpisodeDebugPrinter, arc_to_index, format_polishing_live
+from ..utils.velocity_policy import ProcessState, PathTurnPreview, OBSERVATION_SIZE
 
 y2_cfg = importlib.import_module(
     "nrs_rl.tasks.manager_based.nrs_rl.y2_control_pybind.y2_control_py.config"
@@ -92,14 +94,26 @@ class ActionIntegrationCfg:
     action_dim: int = 1
 
     nominal_speed_mm_s: float = 6.0
-    residual_speed_fraction: float = 0.67
+    residual_speed_fraction: float = 0.50
+    target_normal_force_n: float | None = 20.0
+    target_mrr_n_mm_s: float = 120.0
+    force_rate_compensation: bool = False
+    # Preston volume-rate proxy K*F*v. RPM is unknown, not inferred from 30 V.
+    tool_diameter_mm: float = 30.0
+    spindle_rpm: float | None = None
+    policy_signal_tau_s: float = 0.08
+    # At 20 N the TCP lagged 6.7-7.8 mm behind the commanded corner, so a
+    # 6 mm physical preview arrived after the speed transient. Cover the
+    # 10 mm tracking envelope plus ~0.3 s of command lag and a margin.
+    turn_preview_mm: float = 16.0
     min_speed_mm_s: float = 1.0
     max_speed_mm_s: float = 12.0
     action_filter_tau_s: float = 0.08
     action_slew_per_s: float = 4.0
     max_speed_acceleration_mm_s2: float = 16.0
     max_speed_jerk_mm_s3: float = 160.0
-    # Reward-only causal band-pass: reject sensor-scale noise and slow trends.
+    speed_limiter_type: str = "legacy"
+    # Legacy fluctuation diagnostics / optional auxiliary reward.
     removal_noise_tau_s: float = 0.024
     removal_trend_tau_s: float = 0.20
 
@@ -150,6 +164,7 @@ class AdmittanceControlAction(ActionTerm):
         self.robot = env.scene[cfg.asset_name]
         self._num_envs_local = env.num_envs
         self._step_dt_local = float(env.step_dt)
+        self._control_tick_pending = False
         self._debug_printer = None
         if self.int_cfg.enable_debug_print:
             if not 0 <= self.int_cfg.debug_env_id < env.num_envs:
@@ -167,6 +182,21 @@ class AdmittanceControlAction(ActionTerm):
         if not body_ids:
             raise ValueError(f"body '{self.int_cfg.body_name}' was not found")
         self.ee_idx = int(body_ids[0])
+
+        # Validate the actual collision face, not just the removal-model
+        # parameter. Older USDs exposed the 56 mm housing as the working face.
+        import omni.usd
+        from pxr import UsdGeom
+        tool_path = self._env.scene.env_prim_paths[0] + "/Robot/spindle_link/collisions/polishing_tool"
+        tool = UsdGeom.Cylinder(omni.usd.get_context().get_stage().GetPrimAtPath(tool_path))
+        if not tool:
+            raise ValueError(f"Missing cylindrical working-face collision geometry: {tool_path}")
+        self.physical_tool_diameter_mm = float(tool.GetRadiusAttr().Get()) * 2000.0
+        if not math.isclose(self.physical_tool_diameter_mm, self.int_cfg.tool_diameter_mm, abs_tol=1e-5):
+            raise ValueError(
+                f"Physical contact diameter {self.physical_tool_diameter_mm} mm differs from "
+                f"configured tool diameter {self.int_cfg.tool_diameter_mm} mm"
+            )
 
         self._raw_actions = torch.zeros((env.num_envs, 1), device=self.device)
         self._processed_actions = torch.zeros_like(self._raw_actions)
@@ -187,6 +217,9 @@ class AdmittanceControlAction(ActionTerm):
         )
         self.path_length_mm = float(self.arc_mm[-1])
         self._diagnostic_arc_mm = self.arc_mm.detach().cpu().tolist()
+        self._turn_preview = (PathTurnPreview(self.traj_positions[:, :3].detach().cpu().numpy(),
+                                             self._diagnostic_arc_mm, self.int_cfg.turn_preview_mm)
+                              if self.int_cfg.turn_preview_mm > 0 else None)
 
         n, bins = env.num_envs, int(self.int_cfg.surface_bins)
         self.path_cursor_mm = torch.zeros(n, device=self.device)
@@ -208,8 +241,14 @@ class AdmittanceControlAction(ActionTerm):
         self.mrr_fluctuation_n_mm_s = torch.zeros(n, device=self.device)
         self._mrr_trend = torch.zeros(n, device=self.device)
         self._mrr_filter_valid = torch.zeros(n, dtype=torch.bool, device=self.device)
+        limiter_type = y2_pb.PpoSpeedLimiter
+        if self.int_cfg.speed_limiter_type == "ruckig":
+            from ..y2_control_pybind.y2_control_py._velocity_ruckig import PpoRuckigSpeedLimiter
+            limiter_type = PpoRuckigSpeedLimiter
+        elif self.int_cfg.speed_limiter_type != "legacy":
+            raise ValueError("speed_limiter_type must be legacy or ruckig")
         self.speed_limiters = [
-            y2_pb.PpoSpeedLimiter(self._step_dt_local, self.int_cfg.max_speed_mm_s,
+            limiter_type(self._step_dt_local, self.int_cfg.max_speed_mm_s,
                                  self.int_cfg.max_speed_acceleration_mm_s2,
                                  self.int_cfg.max_speed_jerk_mm_s3)
             for _ in range(n)
@@ -233,7 +272,11 @@ class AdmittanceControlAction(ActionTerm):
         self.safety_fault_reason = torch.zeros(n, dtype=torch.long, device=self.device)
         self._shield_steps = torch.zeros(n, dtype=torch.long, device=self.device)
         self._safety_fault_steps = torch.zeros(n, dtype=torch.long, device=self.device)
-        self.policy_state = torch.zeros((n, 12), device=self.device)
+        self.policy_state = torch.zeros((n, OBSERVATION_SIZE), device=self.device)
+        self.process_states = [ProcessState(self._step_dt_local, self.int_cfg.policy_signal_tau_s)
+                               for _ in range(n)]
+        self.rate_squared_error_sum = torch.zeros(n, device=self.device)
+        self.polishing_steps = torch.zeros(n, device=self.device)
         self.polishing_active = torch.zeros(n, dtype=torch.bool, device=self.device)
 
         self._filtered_action = torch.zeros(n, device=self.device)
@@ -294,6 +337,13 @@ class AdmittanceControlAction(ActionTerm):
         with h5py.File(path, "r") as stream:
             position = stream[self.int_cfg.position_dataset_key][:, :6]
             force = stream[self.int_cfg.force_dataset_key][:, :3]
+        target = self.int_cfg.target_normal_force_n
+        if target is not None:
+            if not math.isfinite(target) or target <= 0:
+                raise ValueError("target_normal_force_n must be positive or None (use trajectory force)")
+            # Preserve the sign and scheduled zero-force waypoints. Do not
+            # overwrite the source HDF5 or introduce tangential force targets.
+            force[:, 2] = np.sign(force[:, 2]) * target
         if position.shape[0] != force.shape[0]:
             raise ValueError("position and force trajectories have different lengths")
         return (
@@ -320,6 +370,21 @@ class AdmittanceControlAction(ActionTerm):
         pose = torch.lerp(self.traj_positions[lower], self.traj_positions[lower + 1], fraction)
         force = torch.lerp(self.traj_forces[lower], self.traj_forces[lower + 1], fraction)
         return pose, force, lower
+
+    def _control_reference(self, env_id):
+        """Default reference; experimental actions may specialize force targets."""
+        return self._trajectory_at(float(self.path_cursor_mm[env_id]))
+
+    def _requested_feed(self, env_id, reference_speed):
+        return reference_speed * (
+            1.0 + self.int_cfg.residual_speed_fraction * float(self._filtered_action[env_id])
+        )
+
+    def _bounded_feed(self, speed):
+        return min(self.int_cfg.max_speed_mm_s, max(self.int_cfg.min_speed_mm_s, speed))
+
+    def _advance_cursor(self, env_id, distance_delta):
+        return min(self.path_length_mm, float(self.path_cursor_mm[env_id]) + distance_delta)
 
     def _nearest_physical_index(self, env_id: int, tcp_mm: torch.Tensor) -> int:
         center = int(self.physical_path_index[env_id])
@@ -375,9 +440,12 @@ class AdmittanceControlAction(ActionTerm):
             self.requested_speed_mm_s, self.command_acceleration_mm_s2, self.command_jerk_mm_s3,
             self.command_smoothness_valid, self._previous_speed_enabled, self.action_delta, self._previous_clipped_action,
             self.filtered_mrr_n_mm_s, self.mrr_fluctuation_n_mm_s, self._mrr_trend, self._mrr_filter_valid,
+            self.rate_squared_error_sum, self.polishing_steps,
         )
         for tensor in tensors_zero:
             tensor[env_ids] = 0
+        for i in env_ids.tolist():
+            self.process_states[i].reset()
         self.path_done[env_ids] = False
         self.polishing_active[env_ids] = False
         self.safety_shield_active[env_ids] = False
@@ -470,6 +538,7 @@ class AdmittanceControlAction(ActionTerm):
 
     @torch.no_grad()
     def process_actions(self, actions: torch.Tensor):
+        self._control_tick_pending = True
         self._raw_actions.copy_(torch.nan_to_num(actions, nan=0.0, posinf=1.0, neginf=-1.0))
         clipped = self._raw_actions[:, 0].clamp(-1.0, 1.0)
         self.action_delta.copy_(clipped - self._previous_clipped_action)
@@ -485,6 +554,12 @@ class AdmittanceControlAction(ActionTerm):
 
     @torch.no_grad()
     def apply_actions(self):
+        # Isaac calls apply_actions on every physics substep. Mode 3, IK, FT
+        # sampling, path integration and diagnostics run exactly once per
+        # 8 ms control tick; the position target is held between control ticks.
+        if not self._control_tick_pending:
+            return
+        self._control_tick_pending = False
         q_all = self.robot.data.joint_pos
         q = q_all[:, :6]
         wrench = local_ft_sensor.get_6axis_ft_fixed_joint(
@@ -532,6 +607,12 @@ class AdmittanceControlAction(ActionTerm):
             actual_speed = tangent_distance / self._step_dt_local
             self.current_sliding_velocity_mm_s[env_id] = actual_speed
             previous_mrr = float(self.current_mrr_n_mm_s[env_id])
+            process = self.process_states[env_id]
+            if approach:
+                process.reset()
+            else:
+                process.update(abs_force, actual_speed,
+                               abs_force * actual_speed if abs_force >= self.int_cfg.contact_force_n else 0.0)
 
             physical_index = self._nearest_physical_index(env_id, tcp_mm)
             self.physical_path_index[env_id] = physical_index
@@ -550,9 +631,7 @@ class AdmittanceControlAction(ActionTerm):
                 )
                 command_pose = reference_pose
             else:
-                reference_pose, desired_force, target_index = self._trajectory_at(
-                    float(self.path_cursor_mm[env_id])
-                )
+                reference_pose, desired_force, target_index = self._control_reference(env_id)
                 self.path_index[env_id] = target_index
                 self.current_target_index[env_id] = target_index
                 target_force = abs(float(desired_force[2]))
@@ -560,10 +639,10 @@ class AdmittanceControlAction(ActionTerm):
                 self.current_path_tracking_error_mm[env_id] = tracking_error
                 self.force_error_n[env_id] = abs_force - target_force
 
-                speed = self.int_cfg.nominal_speed_mm_s * (
-                    1.0 + self.int_cfg.residual_speed_fraction * float(self._filtered_action[env_id])
-                )
-                speed = min(self.int_cfg.max_speed_mm_s, max(self.int_cfg.min_speed_mm_s, speed))
+                reference_speed = process.reference_speed(
+                    self.int_cfg.nominal_speed_mm_s, self.int_cfg.target_mrr_n_mm_s,
+                    self.int_cfg.contact_force_n, self.int_cfg.force_rate_compensation)
+                speed = self._bounded_feed(self._requested_feed(env_id, reference_speed))
                 overload = target_force > 0.0 and abs_force > self.int_cfg.force_overload_ratio * target_force
                 tracking_stop = tracking_error > self.int_cfg.tracking_stop_mm
                 shield = overload or tracking_stop
@@ -633,7 +712,7 @@ class AdmittanceControlAction(ActionTerm):
             distance_delta = speed * self._step_dt_local
             self.commanded_speed_mm_s[env_id] = speed
             self.current_index_delta[env_id] = distance_delta
-            self.path_cursor_mm[env_id] = min(self.path_length_mm, float(self.path_cursor_mm[env_id]) + distance_delta)
+            self.path_cursor_mm[env_id] = self._advance_cursor(env_id, distance_delta)
             self.path_done[env_id] = (
                 not bool(self.safety_terminated[env_id])
                 and float(self.path_cursor_mm[env_id]) >= self.path_length_mm - 1.0e-6
@@ -646,6 +725,9 @@ class AdmittanceControlAction(ActionTerm):
             self.prev_mrr_n_mm_s[env_id] = previous_mrr
             self.current_mrr_n_mm_s[env_id] = actual_mrr
             self.current_mrr_delta_n_mm_s[env_id] = actual_mrr - previous_mrr
+            if not approach:
+                self.polishing_steps[env_id] += 1
+                self.rate_squared_error_sum[env_id] += (actual_mrr / self.int_cfg.target_mrr_n_mm_s - 1.0) ** 2
             # Filtering affects the vibration reward only. Raw removal and all
             # performance metrics retain every measured sample and dropout.
             if not approach and not fault_reason:
@@ -669,33 +751,30 @@ class AdmittanceControlAction(ActionTerm):
                 self.surface_last_index[env_id] = max(int(self.surface_last_index[env_id]), bin_index)
 
             if not approach:
-                visited = self.surface_removal_by_index[env_id, : max(1, bin_index + 1)]
-                positive = visited[visited > 0.0]
-                deficit = 0.0
-                if positive.numel() > 1:
-                    deficit = float((positive.mean() - visited[bin_index]) / positive.mean().clamp_min(1.0e-6))
                 tangent_change = 0.0
-                if 0 < target_index < self.traj_length - 2:
+                if self._turn_preview is not None:
+                    tangent_change = self._turn_preview.at(float(self.arc_mm[physical_index]))
+                elif 0 < target_index < self.traj_length - 1:
                     before = self.traj_positions[target_index, :3] - self.traj_positions[target_index - 1, :3]
                     after = self.traj_positions[target_index + 1, :3] - self.traj_positions[target_index, :3]
                     tangent_change = float(1.0 - torch.dot(before, after) /
                                            (torch.linalg.norm(before) * torch.linalg.norm(after)).clamp_min(1.0e-6))
-                values = (
-                    float(self.force_error_n[env_id]) / max(target_force, 1.0),
-                    abs_force / max(target_force, 1.0), force_delta / 100.0,
-                    actual_speed / max(self.int_cfg.max_speed_mm_s, 1.0),
-                    tracking_error / max(self.int_cfg.tracking_stop_mm, 1.0),
-                    float(self._filtered_action[env_id]),
-                    float(self._raw_actions[env_id, 0].clamp(-1.0, 1.0) - self._filtered_action[env_id]),
-                    float(self.path_cursor_mm[env_id]) / max(self.path_length_mm, 1.0e-6),
-                    deficit, tangent_change,
-                    1.0 if abs_force >= self.int_cfg.contact_force_n else 0.0,
-                    float(self.safety_shield_active[env_id]),
+                values = process.observation(
+                    target_force=target_force, max_speed=self.int_cfg.max_speed_mm_s,
+                    tracking_error=tracking_error, tracking_stop=self.int_cfg.tracking_stop_mm,
+                    filtered_action=float(self._filtered_action[env_id]), applied_speed=speed,
+                    progress=float(self.path_cursor_mm[env_id]) / self.path_length_mm,
+                    target_rate=self.int_cfg.target_mrr_n_mm_s, curvature=tangent_change,
+                    contact=abs_force >= self.int_cfg.contact_force_n,
+                    shield=bool(self.safety_shield_active[env_id]),
+                    acceleration=limiter.acceleration, max_acceleration=self.int_cfg.max_speed_acceleration_mm_s2,
+                    clipped_action=float(self._raw_actions[env_id, 0].clamp(-1.0, 1.0)),
                 )
                 self.policy_state[env_id] = torch.tensor(values, device=self.device)
                 if fault_reason:
                     self.policy_state[env_id].zero_()
-                    self.policy_state[env_id, -1] = 1.0
+                    self.policy_state[env_id, 11] = 1.0
+                    process.reset()
             self._previous_q_command[env_id] = q_next
             self._previous_command_pose[env_id] = command_pose
             self._previous_q_valid[env_id] = True

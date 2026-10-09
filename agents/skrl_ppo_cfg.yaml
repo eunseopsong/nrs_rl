@@ -7,11 +7,16 @@ models:
   separate: False
   policy:  # see gaussian_model parameters
     class: GaussianMixin
-    clip_actions: True
+    # Preserve Gaussian samples and their probability density in PPO memory.
+    # The action term clips commands before delay/filter/physical limits.
+    clip_actions: False
     clip_log_std: True
-    min_log_std: -20.0
-    max_log_std: 2.0
-    initial_log_std: 0.0
+    min_log_std: -4.0
+    max_log_std: -1.0
+    # The first direct-policy pilot barely explored beyond nominal speed after
+    # both command filters. Increase exploration at 125 Hz; physical A/J limits
+    # still apply and evaluation uses the deterministic mean.
+    initial_log_std: -1.0
     network:
       - name: net
         input: OBSERVATIONS
@@ -40,19 +45,21 @@ memory:
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html
 agent:
   class: PPO
-  rollouts: 64
+  # Timing is specified at the default 125 Hz decision rate. train.py converts
+  # counts and gamma/lambda if --policy-action-repeat is explicitly requested.
+  rollouts: 512  # 4.096 s
   learning_epochs: 4
   mini_batches: 4
-  discount_factor: 0.99
-  lambda: 0.95
-  learning_rate: 3.0e-04
+  discount_factor: 0.999
+  lambda: 0.99
+  learning_rate: 1.0e-04
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:
     kl_threshold: 0.008
     # The scheduler otherwise defaults to 1e-2. The 20260908_233822 run
     # reached a logged mean LR of 0.0081 despite the configured 3e-4 start.
     min_lr: 1.0e-05
-    max_lr: 3.0e-04
+    max_lr: 1.0e-04
   state_preprocessor: RunningStandardScaler
   state_preprocessor_kwargs: null
   value_preprocessor: RunningStandardScaler
@@ -63,22 +70,24 @@ agent:
   ratio_clip: 0.2
   value_clip: 0.2
   clip_predicted_values: True
-  entropy_loss_scale: 0.001
+  entropy_loss_scale: 0.0
   value_loss_scale: 2.0
   kl_threshold: 0.016
   rewards_shaper_scale: 1.0
-  time_limit_bootstrap: False
+  time_limit_bootstrap: True
   # logging and checkpoint
   experiment:
     directory: "adaptive_velocity"
     experiment_name: ""
-    write_interval: auto
-    checkpoint_interval: auto
+    # Save before a long first episode ends so early runs can be evaluated
+    # without exploration or mid-episode policy updates.
+    write_interval: 1000
+    checkpoint_interval: 4096
 
 
 # Sequential trainer
 # https://skrl.readthedocs.io/en/latest/api/trainers/sequential.html
 trainer:
   class: SequentialTrainer
-  timesteps: 1000000
+  timesteps: 1000000  # control ticks; converted to decisions for action holds
   environment_info: log

@@ -94,9 +94,16 @@ class ActionsCfg:
 
             action_dim=1,
 
-            # Keep the exact scheduler envelope used by Y2RobMotion.
+            # Direct learned feed-speed multiplier; constant baseline shares
+            # the same 20 N Mode-3 controller and native speed limiter.
             nominal_speed_mm_s=6.0,
-            residual_speed_fraction=0.67,
+            residual_speed_fraction=0.50,
+            target_normal_force_n=20.0,
+            target_mrr_n_mm_s=120.0,
+            force_rate_compensation=False,
+            tool_diameter_mm=30.0,
+            spindle_rpm=None,
+            policy_signal_tau_s=0.08,
             min_speed_mm_s=1.0,
             max_speed_mm_s=12.0,
             action_filter_tau_s=0.08,
@@ -160,26 +167,34 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    # Uniform rate at useful throughput is the objective. A throughput-only
+    # Preston F*v at useful throughput is the requested training objective.
+    # K is unknown and constant in this proxy, so it cancels in the rate CV.
+    # Spatial accumulated depth/volume is independently evaluated on a fixed
+    # surface ROI; temporal rate CV is not a physical depth-uniformity claim.
+    # A throughput-only
     # reward favors the maximum speed, while a trend penalty misses slow drift.
-    realized_removal = RewTerm(func=local_rewards.realized_removal_reward, weight=0.25)
+    realized_removal = RewTerm(func=local_rewards.realized_removal_reward, weight=0.0)
     removal_rate_tracking = RewTerm(
         func=local_rewards.removal_rate_tracking_penalty, weight=4.0,
-        params={"target_mrr_n_mm_s": 60.0},
     )
-    force_tracking = RewTerm(func=local_rewards.force_tracking_reward, weight=1.0)
+    force_tracking = RewTerm(func=local_rewards.force_tracking_reward, weight=0.1)
     force_overshoot = RewTerm(func=local_rewards.force_overshoot_penalty, weight=0.5)
-    spatial_uniformity = RewTerm(func=local_rewards.spatial_uniformity_reward, weight=0.25)
-    removal_variation = RewTerm(func=local_rewards.removal_variation_penalty, weight=0.5)
-    action_rate = RewTerm(func=local_rewards.action_rate_penalty, weight=0.02)
-    command_acceleration = RewTerm(func=local_rewards.command_acceleration_penalty, weight=0.05)
-    command_jerk = RewTerm(func=local_rewards.command_jerk_penalty, weight=0.02)
+    # F*ds integrated in equal path bins is almost independent of feed speed.
+    # It cannot supply credit for the requested temporal F*v uniformity.
+    spatial_uniformity = RewTerm(func=local_rewards.spatial_uniformity_reward, weight=0.0)
+    removal_variation = RewTerm(func=local_rewards.removal_variation_penalty, weight=0.0)
+    # Penalizing consecutive raw Gaussian samples penalizes exploration even
+    # when the applied command is smooth. Use the applied derivatives below.
+    action_rate = RewTerm(func=local_rewards.action_rate_penalty, weight=0.0)
+    command_acceleration = RewTerm(func=local_rewards.command_acceleration_penalty, weight=0.1)
+    command_jerk = RewTerm(func=local_rewards.command_jerk_penalty, weight=0.05)
     safety_shield = RewTerm(func=local_rewards.safety_shield_penalty, weight=2.0)
-    completion_quality = RewTerm(func=local_rewards.completion_quality_reward, weight=20.0)
+    completion_quality = RewTerm(func=local_rewards.completion_rate_quality_reward, weight=1.0)
 
 @configclass
 class TerminationsCfg:
     control_failed = DoneTerm(func=local_terms.control_failed)
+    polishing_timeout = DoneTerm(func=local_terms.polishing_timeout, time_out=True)
     trajectory_finished = DoneTerm(
         func=local_terms.trajectory_finished,
     )
@@ -205,13 +220,15 @@ class NrsRlEnvCfg(ManagerBasedRLEnvCfg):
     visualization: VisualizationCfg = VisualizationCfg()
 
     def __post_init__(self):
-        self.decimation = 1
+        # Resolve stiff contact at 500 Hz while holding UR10 CB3 targets for
+        # four substeps. The action term executes Mode 3 / IK only at 125 Hz.
+        self.decimation = 4
         self.sim.render_interval = self.decimation
 
         self.episode_length_s = 9999.0
 
         self.viewer.eye = (3.5, 3.5, 3.5)
-        self.sim.dt = 1.0 / 125.0
+        self.sim.dt = 1.0 / 500.0
 
         self.sim.physx.gpu_max_rigid_patch_count = 1024 * 1024 * 16
         self.sim.physx.gpu_max_rigid_contact_count = 1024 * 1024 * 16

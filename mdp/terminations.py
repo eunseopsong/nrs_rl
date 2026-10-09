@@ -41,3 +41,10 @@ def trajectory_finished(env, action_term_name: str = "arm_action") -> torch.Tens
 def control_failed(env, action_term_name: str = "arm_action") -> torch.Tensor:
     """Failed control is terminal, but must never count as path completion."""
     return _get_action_term(env, action_term_name).safety_terminated
+
+
+def polishing_timeout(env, action_term_name: str = "arm_action") -> torch.Tensor:
+    """Bound failed progress at twice the nominal processing time."""
+    term = _get_action_term(env, action_term_name)
+    budget_s = 2.0 * term.path_length_mm / term.int_cfg.nominal_speed_mm_s + 5.0
+    return term.polishing_steps * env.step_dt >= budget_s

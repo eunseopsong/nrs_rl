@@ -16,7 +16,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import distance_transform_edt, gaussian_filter
 import torch
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
@@ -322,9 +322,10 @@ def _removal_heatmap_display(x, y, removal, extent, bins):
 def _mean_rate_heatmap_display(x, y, rate, extent, bins):
     """Cell-mean rate in N mm/s, independent of time-sample density.
 
-    Smooth occupied cell means with a normalized spatial kernel. Empty space is
-    masked, never multiplied into rate/color. A constant rate therefore stays
-    constant even where the robot dwells or the path bends.
+    Smooth occupied cell means with a normalized spatial kernel. Return rate
+    and a separate opacity map for the legacy soft footprint. Opacity depends
+    on distance to the observed path, never on dwell/sample density. It is not
+    multiplied into the rate, its color normalization, or any CV calculation.
     """
     weights = np.asarray(rate, dtype=float)
     valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(weights)
@@ -337,7 +338,7 @@ def _mean_rate_heatmap_display(x, y, rate, extent, bins):
     cell_size_x = (extent[1] - extent[0]) / max(bins, 1)
     cell_size_y = (extent[3] - extent[2]) / max(bins, 1)
     mean_cell_size = max(0.5 * (cell_size_x + cell_size_y), 1.0e-6)
-    smoothing_sigma_cells = max(0.5, 2.0 / mean_cell_size)
+    smoothing_sigma_cells = max(0.5, HEATMAP_SMOOTHING_SIGMA_MM / mean_cell_size)
     count_smoothed = gaussian_filter(occupied.astype(float), sigma=smoothing_sigma_cells)
     rate_sum_smoothed = gaussian_filter(cell_mean, sigma=smoothing_sigma_cells)
     grid_smoothed = np.divide(
@@ -346,9 +347,26 @@ def _mean_rate_heatmap_display(x, y, rate, extent, bins):
         out=np.zeros_like(rate_sum_smoothed, dtype=float),
         where=count_smoothed > 1.0e-9,
     )
-    support = count_smoothed > max(float(count_smoothed.max()) * 0.05, 1.0e-9)
-    grid_display = np.ma.array(grid_smoothed, mask=~support)
-    return grid_display, grid_smoothed
+    support = count_smoothed > 1.0e-9
+    if occupied.any():
+        distance = distance_transform_edt(~occupied, sampling=(cell_size_y, cell_size_x))
+        opacity = np.exp(-0.5 * np.square(distance / HEATMAP_SMOOTHING_SIGMA_MM))
+        # Fade the tail to zero continuously instead of tinting the full plane.
+        opacity = np.clip((opacity - 0.05) / 0.95, 0.0, 1.0)
+        opacity[~support] = 0.0
+    else:
+        opacity = np.zeros_like(grid_smoothed)
+    grid_display = np.ma.array(grid_smoothed, mask=~support | (opacity == 0.0))
+    return grid_display, opacity
+
+
+def _draw_rate_heatmap(ax, grid, opacity, extent, upper):
+    """Restore the purple, smoothly shaded footprint without changing rates."""
+    ax.set_facecolor(plt.get_cmap("viridis")(0.0))
+    return ax.imshow(
+        grid.filled(0.0), origin="lower", extent=extent, cmap="viridis",
+        vmin=0.0, vmax=upper, alpha=opacity, interpolation="bilinear",
+    )
 
 
 def _rate_heatmap_upper(*grids):
@@ -1010,8 +1028,10 @@ def process_episode():
         "02/05/07 use measured adaptive rates, with no ideal-mean mixing.\n"
         "The same-force constant-speed reference is analytical, not an independent\n"
         "rollout. No measured RL improvement percentage is inferred from it.\n"
-        "Rate heatmaps use cell means with density-normalized spatial smoothing,\n"
-        "a common physical color scale, and masked unobserved space. They are NOT\n"
+        "Rate heatmaps use cell means with density-normalized 8 mm smoothing,\n"
+        "a common physical color scale, and a separate soft path-opacity map.\n"
+        "Purple background outside the path is unobserved, not zero removal.\n"
+        "Opacity depends on path distance, not time-sample density. Maps are NOT\n"
         "accumulated removal maps. Displayed rate CV is temporal\n"
         "over the displayed window, including zero-rate samples.\n"
         "Contact CV excludes zero-removal samples. 08_control_trace.npz retains\n"
@@ -1110,8 +1130,8 @@ def _save_velocity_comparison_plots(
     constant_rate = profiles["constant_rate"]
     reward_action_rate = profiles["reward_action_rate"]
 
-    constant_display, _ = _mean_rate_heatmap_display(x, y, constant_rate, extent, bins)
-    reward_display, _ = _mean_rate_heatmap_display(x, y, reward_action_rate, extent, bins)
+    constant_display, constant_opacity = _mean_rate_heatmap_display(x, y, constant_rate, extent, bins)
+    reward_display, reward_opacity = _mean_rate_heatmap_display(x, y, reward_action_rate, extent, bins)
     constant_display *= PLOT_MM_TO_M
     reward_display *= PLOT_MM_TO_M
     rate_upper = _rate_heatmap_upper(constant_display, reward_display)
@@ -1121,28 +1141,24 @@ def _save_velocity_comparison_plots(
     constant_rate_cv = profiles["constant_rate_cv"]
     reward_rate_cv = profiles["reward_rate_cv"]
 
-    fig_hm, axes_hm = plt.subplots(1, 2, figsize=(7.2, 3.45), facecolor="white", sharex=True, sharey=True)
+    fig_hm, axes_hm = plt.subplots(1, 2, figsize=(7.6, 4.2), facecolor="white", sharex=True, sharey=True)
+    fig_hm.subplots_adjust(left=0.075, right=0.92, bottom=0.18, top=0.82, wspace=0.20)
     heatmap_items = [
-        ("Same-force reference (analytic)", constant_display, constant_cell_cv, mean_variable_speed),
+        ("Fixed-speed reference (analytic)", constant_display, constant_opacity,
+         constant_cell_cv, mean_variable_speed, "Analytic CV"),
         (
             "Measured adaptive velocity",
             reward_display,
+            reward_opacity,
             reward_cell_cv,
             _mean(variable_speed_plot[profiles["analysis_mask"]]),
+            "Measured CV",
         ),
     ]
     im = None
-    for ax, (title, display_grid, cell_cv, speed_value) in zip(axes_hm, heatmap_items):
-        im = ax.imshow(
-            display_grid,
-            origin="lower",
-            extent=extent,
-            cmap="viridis",
-            vmin=0.0,
-            vmax=rate_upper,
-            interpolation="nearest",
-        )
-        ax.set_title(title, pad=6)
+    for ax, (title, display_grid, opacity, cell_cv, speed_value, cv_label) in zip(axes_hm, heatmap_items):
+        im = _draw_rate_heatmap(ax, display_grid, opacity, extent, rate_upper)
+        ax.set_title(title, pad=6, fontsize=10)
         ax.set_xlabel("X [mm]")
         ax.set_aspect("equal", adjustable="box")
         ax.tick_params(direction="in", length=3.0, width=0.7)
@@ -1150,7 +1166,7 @@ def _save_velocity_comparison_plots(
         ax.text(
             0.018,
             0.982,
-            f"Temporal CV = {cell_cv:.3f}\n$\\bar{{v}}$ = {speed_value * PLOT_MM_TO_M:.4f} m/s",
+            f"{cv_label} = {cell_cv:.3f}\n$\\bar{{v}}$ = {speed_value * PLOT_MM_TO_M:.4f} m/s",
             transform=ax.transAxes,
             va="top",
             ha="left",
@@ -1166,7 +1182,10 @@ def _save_velocity_comparison_plots(
         cbar = fig_hm.colorbar(im, ax=axes_hm.ravel().tolist(), fraction=0.035, pad=0.025)
         cbar.set_label("Mean Preston rate [N m s$^{-1}$]")
         cbar.ax.tick_params(direction="in", length=3.0, width=0.7)
-    fig_hm.suptitle("Local Mean Preston Rate (2 mm spatial smoothing)")
+    fig_hm.suptitle("Spatial Projection of Preston Rate")
+    fig_hm.text(0.5, 0.025, "Reference reuses measured force with ideal constant speed; no tracking dynamics.\n"
+                "Both CVs use raw time samples. Soft edges show path support.",
+                ha="center", va="bottom", fontsize=6.5)
     fig_hm.savefig(out_dir / "05_preston_rate_comparison.png", dpi=300, bbox_inches="tight")
     plt.close(fig_hm)
 
@@ -1193,7 +1212,9 @@ def _save_velocity_comparison_plots(
     _paper_grid(ax_amt)
     ax_amt.legend(loc="best", frameon=True)
     _set_contact_time_xlim(ax_amt, t_plot)
-    fig_amt.tight_layout()
+    fig_amt.tight_layout(rect=(0, 0.07, 1, 1))
+    fig_amt.text(0.5, 0.01, "Analytic reference is not a measured constant-speed rollout.",
+                 ha="center", fontsize=7)
     fig_amt.savefig(out_dir / "07_preston_rate_profile_comparison.png", dpi=300)
     plt.close(fig_amt)
 
@@ -1261,23 +1282,15 @@ def save_plots(out_dir, t, state6, force3, dremoval, removal_rate, vxyz, sliding
 
     # --- 1. Local Preston Rate Heatmap ---
     bins = min(220, max(96, int(np.sqrt(len(x)) * 4)))
-    grid_display, _ = _mean_rate_heatmap_display(x, y, removal_rate_plot, extent, bins)
+    grid_display, opacity = _mean_rate_heatmap_display(x, y, removal_rate_plot, extent, bins)
     grid_display *= PLOT_MM_TO_M
 
     fig, ax = plt.subplots(figsize=(5.4, 4.35), facecolor="white")
-    im = ax.imshow(
-        grid_display,
-        origin="lower",
-        extent=extent,
-        cmap="viridis",
-        vmin=0.0,
-        vmax=_rate_heatmap_upper(grid_display),
-        interpolation="nearest",
-    )
+    im = _draw_rate_heatmap(ax, grid_display, opacity, extent, _rate_heatmap_upper(grid_display))
     colorbar = fig.colorbar(im, ax=ax, fraction=0.048, pad=0.035)
     colorbar.set_label("Mean Preston rate [N m s$^{-1}$]")
     colorbar.ax.tick_params(direction="in", length=3.0, width=0.7)
-    ax.set_title("Local Mean Preston Rate (2 mm smoothing)")
+    ax.set_title("Spatial Preston Rate")
     ax.set_xlabel("X [mm]")
     ax.set_ylabel("Y [mm]")
     ax.set_aspect("equal", adjustable="box")

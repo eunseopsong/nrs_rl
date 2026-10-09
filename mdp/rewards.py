@@ -28,18 +28,20 @@ def realized_removal_reward(
 
 
 def removal_rate_tracking_penalty(
-    env, target_mrr_n_mm_s: float = 60.0, action_term_name: str = "arm_action"
+    env, target_mrr_n_mm_s: float | None = None, action_term_name: str = "arm_action"
 ) -> torch.Tensor:
     """Track a fixed process rate; a moving mean cannot hide slow speed drift.
 
-    Use the causal 24 ms estimate for credit assignment, with zero motion still
-    incurring an error. Raw CV and removal accounting remain unchanged. This
-    target is a force/motion proxy (10 N * 6 mm/s), not a calibrated volume rate.
+    E[(rate/target - 1)^2] equals variance/target^2 plus squared mean bias.
+    Penalizing the raw samples therefore targets both CV and useful throughput;
+    filtering before squaring would hide high-frequency variation. This target
+    is the Preston volume-rate proxy F*v (default 20 N * 6 mm/s). Without a
+    calibrated K it is in N mm/s; the definition of v is measured TCP sliding.
     """
     term = _term(env, action_term_name)
-    target = max(target_mrr_n_mm_s, 1.0e-6)
-    relative_error = (term.filtered_mrr_n_mm_s - target) / target
-    valid = term.polishing_active & ~term.safety_fault_active
+    target = max(term.int_cfg.target_mrr_n_mm_s if target_mrr_n_mm_s is None else target_mrr_n_mm_s, 1.0e-6)
+    relative_error = (term.current_mrr_n_mm_s - target) / target
+    valid = term.polishing_active
     return -torch.square(relative_error) * valid.float()
 
 
@@ -130,3 +132,14 @@ def completion_quality_reward(
     coverage = visited.float().mean(dim=1)
     quality = coverage * torch.exp(-cv / max(cv_scale, 1.0e-6))
     return quality * term.path_done.float()
+
+
+def completion_rate_quality_reward(env, action_term_name: str = "arm_action") -> torch.Tensor:
+    """One completion bonus for the same raw-rate objective as the dense loss.
+
+    Isaac multiplies all reward terms by step_dt, including terminal terms.
+    Divide here so a configured weight of 1 really is a bonus of at most 1.
+    """
+    term = _term(env, action_term_name)
+    mse = term.rate_squared_error_sum / term.polishing_steps.clamp_min(1)
+    return torch.exp(-mse) * term.path_done.float() / env.step_dt
