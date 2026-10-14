@@ -1,2 +1,5 @@
 # Deployment-pinned sources must retain their original bytes, including EOF.
 model_based/runtime/fixed_force_12p59_source/** -text whitespace=-blank-at-eof
+mdp/saved_models/ppo_final_cv11p15/** -text whitespace=-blank-at-eof
+validation/ppo_final_cv11p15_gui_20261014/** -text whitespace=-blank-at-eof
+validation/ppo_final_cv11p15_gui_20261014/*.csv -text whitespace=cr-at-eol

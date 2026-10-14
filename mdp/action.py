@@ -100,6 +100,10 @@ class ActionIntegrationCfg:
     force_rate_compensation: bool = False
     # Preston volume-rate proxy K*F*v. RPM is unknown, not inferred from 30 V.
     tool_diameter_mm: float = 30.0
+    # A copied GUI scene may use a different physical contact shape from its
+    # virtual removal estimator. Defaults preserve the existing training asset.
+    physical_tool_collision_relpath: str = "spindle_link/collisions/polishing_tool"
+    physical_tool_diameter_mm: float | None = None
     spindle_rpm: float | None = None
     policy_signal_tau_s: float = 0.08
     # At 20 N the TCP lagged 6.7-7.8 mm behind the commanded corner, so a
@@ -187,15 +191,17 @@ class AdmittanceControlAction(ActionTerm):
         # parameter. Older USDs exposed the 56 mm housing as the working face.
         import omni.usd
         from pxr import UsdGeom
-        tool_path = self._env.scene.env_prim_paths[0] + "/Robot/spindle_link/collisions/polishing_tool"
+        tool_path = self._env.scene.env_prim_paths[0] + "/Robot/" + self.int_cfg.physical_tool_collision_relpath
         tool = UsdGeom.Cylinder(omni.usd.get_context().get_stage().GetPrimAtPath(tool_path))
         if not tool:
             raise ValueError(f"Missing cylindrical working-face collision geometry: {tool_path}")
         self.physical_tool_diameter_mm = float(tool.GetRadiusAttr().Get()) * 2000.0
-        if not math.isclose(self.physical_tool_diameter_mm, self.int_cfg.tool_diameter_mm, abs_tol=1e-5):
+        expected_diameter = (self.int_cfg.tool_diameter_mm if self.int_cfg.physical_tool_diameter_mm is None
+                             else self.int_cfg.physical_tool_diameter_mm)
+        if not math.isclose(self.physical_tool_diameter_mm, expected_diameter, abs_tol=1e-5):
             raise ValueError(
                 f"Physical contact diameter {self.physical_tool_diameter_mm} mm differs from "
-                f"configured tool diameter {self.int_cfg.tool_diameter_mm} mm"
+                f"configured physical tool diameter {expected_diameter} mm"
             )
 
         self._raw_actions = torch.zeros((env.num_envs, 1), device=self.device)

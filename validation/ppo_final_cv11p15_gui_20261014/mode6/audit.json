@@ -1,0 +1,55 @@
+{
+  "run_directory": "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516",
+  "session_directory": "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/removal/session_20261014_134421_523481",
+  "command_log": "/home/eunseop/.ros/log/singleArm_cmd_147720_1791953058589.log",
+  "valid_completed_processing_run": true,
+  "home_return_completed": true,
+  "saved_home_mm_rad": [
+    864.570887,
+    346.971606,
+    164.366774,
+    0.000407,
+    0.001743,
+    1.570796
+  ],
+  "samples": 14666,
+  "missing_control_ticks": 0,
+  "policy_missing_samples": 0,
+  "hard_fault_samples": 0,
+  "reverse_mm": 0.0,
+  "target_force_min_max_n": [
+    20.0,
+    20.0
+  ],
+  "requested_feed_min_max_mm_s": [
+    6.0,
+    6.0
+  ],
+  "cursor_mm": 697.5332572808865,
+  "whole_active_duration_s": 117.328,
+  "force_entry_pose_mm": [
+    870.6877330209618,
+    340.1813314077415,
+    99.85944659881832
+  ],
+  "measured_force_mean_after_entry_n": 20.01415571983036,
+  "action_age_max_s": 0.063548164,
+  "action_age_over_250ms_samples": 0,
+  "worker_latency_p99_ms": 0.9083539500352344,
+  "raw_active_window_matches_telemetry": true,
+  "replayed_summary_matches": true,
+  "replayed_arrays_max_errors": {
+    "surface": 0.0,
+    "processing_surface": 0.0,
+    "derived_signals": 0.0
+  },
+  "source_hashes": {
+    "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/deployment.json": "9355fddd53db86735cae429e5cc8da2e9bcc76777b36bc11e16be17cfe949e8e",
+    "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/policy.csv": "ca4924cc6df845e378a8f341ac60290813ff10b80ff618c42c8946ae39801b1a",
+    "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/removal/session_20261014_134421_523481/telemetry.csv": "2a77e1ad2c2f04047561c12004ec75e646c29b2b8507abdcbdfe2590f410c525",
+    "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/removal/session_20261014_134421_523481/summary.json": "dfa61fd62c4ab5db56f29a356d1ef6abfdcd1b0b0473ada49c3627642b971d18",
+    "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/removal/session_20261014_134421_523481/surface.npz": "cf1a85416bf37a462970b3743ad934af26a2f5d21350ab58cecc4dd5ec1cc46c",
+    "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/removal/session_20261014_134421_523481/processing_surface.npz": "5695d07d1431cc924dba4e613ad506e33553ad8d24235cf122880c7ad74c986b",
+    "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/removal/session_20261014_134421_523481/derived_signals.npz": "e385a601c1ba26c36562183be042f7e8141159c08cb117950a3d1c13dc5a6b4a"
+  }
+}

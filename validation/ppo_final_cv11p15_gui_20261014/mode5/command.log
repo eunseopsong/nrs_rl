@@ -1,0 +1,19 @@
+[INFO] [1791952509.571245299] [singleArm_cmd]: Loaded setup YAML: /home/eunseop/dev_ws/install/Y2RobMotion/share/Y2RobMotion/config/ppo_fixed_force.yaml (robot=ur10skku, kinematics=ur10, period=0.008000s, PTP velocity=20.000 mm/s)
+[INFO] [1791952509.600647929] [singleArm_cmd]: UrCmd node initialized for robot: ur10skku
+[INFO] [1791952509.600662387] [singleArm_cmd]: State topic  : ur10skku/cmdState  (String)
+[INFO] [1791952509.602040829] [singleArm_cmd]: singleArm_cmd service server is ready: /singleArm_cmd/single_arm_command
+[INFO] [1791952509.602050467] [singleArm_cmd]: Polishing removal trigger clients are ready: /polishing_removal_node/start, /polishing_removal_node/end
+[INFO] [1791952509.835300155] [singleArm_cmd]: CurrentP received! Robot initialized.
+[INFO] [1791952510.602138602] [singleArm_cmd]: Robot current position received. Command service is now available.
+[INFO] [1791952531.802181954] [singleArm_cmd]: Service command received: TxtLoad
+[INFO] [1791952531.802212877] [singleArm_cmd]: TxtLoad home saved (mm/rad): 864.570887 346.971606 164.366774 0.000407 0.001743 1.570796
+[INFO] [1791952531.802873275] [singleArm_cmd]: /polishing_removal_node/start response: success=true, message=Recording started. Output dir: /home/eunseop/evaluation/rl_best/ppo_final11p15_20261014_133504_283396/removal/session_20261014_133531_802491
+[INFO] [1791952531.805888928] [singleArm_cmd]: Published complete trajectory: rows=17440 cols=9
+[INFO] [1791952531.819826448] [singleArm_cmd]: Connecting current pose -> first point (Position mode)...
+[INFO] [1791952543.769959672] [singleArm_cmd]: Mode 5 trajectory handed off after legacy connect path; waiting for completion.
+[INFO] [1791952846.745941732] [singleArm_cmd]: Mode 5 trajectory completed.
+[INFO] [1791952850.795624778] [singleArm_cmd]: /polishing_removal_node/end response: success=true, message=Saved completed paired measurement to /home/eunseop/evaluation/rl_best/ppo_final11p15_20261014_133504_283396/removal/session_20261014_133531_802491
+[INFO] [1791952850.795664145] [singleArm_cmd]: Returning to saved TxtLoad home via 10.0 mm +Z clearance.
+[INFO] [1791952878.612372781] [singleArm_cmd]: TxtLoad home pose reached; Idling.
+[INFO] [1791952878.612407445] [singleArm_cmd]: Command executed: TxtLoad. TxtLoad motion loaded from: /home/eunseop/dev_ws/install/Y2RobMotion/share/Y2RobMotion/txtcmd/cmd_continue9D_preston_d14_20n.txt as cmd_continue9D | polishing_start: /polishing_removal_node/start response: success=true, message=Recording started. Output dir: /home/eunseop/evaluation/rl_best/ppo_final11p15_20261014_133504_283396/removal/session_20261014_133531_802491 | polishing_end: /polishing_removal_node/end response: success=true, message=Saved completed paired measurement to /home/eunseop/evaluation/rl_best/ppo_final11p15_20261014_133504_283396/removal/session_20261014_133531_802491 | home returned; Idling
+[INFO] [1791952904.800893972] [rclcpp]: signal_handler(SIGINT/SIGTERM)

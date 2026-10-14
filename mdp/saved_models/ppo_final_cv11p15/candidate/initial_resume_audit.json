@@ -1,0 +1,18 @@
+{
+  "passed": true,
+  "actor_exact": true,
+  "critic_exact": true,
+  "log_std_exact": true,
+  "optimizer_exact": true,
+  "model_exact": true,
+  "parent_training_state": "/home/eunseop/nrs_rl/logs/experiments/uniformity_saves/ppo_steady_cv11p01_20261013_171436/candidate/checkpoints/ppo_training_state.pt",
+  "parent_training_state_sha256": "7dfc40438624644fe71ec2569b9e626cc70820ff4fea15d7cbe9928f10892266",
+  "initial_training_state": "/home/eunseop/nrs_rl/logs/experiments/ppo_11p01_volume10_final_20261013/training/checkpoints/initial_training_state.pt",
+  "initial_training_state_sha256": "c8368b597f07705574ffdb1ef7a5c34945b0ff1b37c41f367043d391484de69a",
+  "log_std": -1.8035025596618652,
+  "critic_reset": false,
+  "warmup_updates": 0,
+  "parent_rollout_batches": 9,
+  "new_rollout_rng": true,
+  "scope": "Actual initialization before any PPO optimizer step"
+}

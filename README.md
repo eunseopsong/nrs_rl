@@ -4,6 +4,69 @@
 새 소스와 수정은 이 저장소 안에서 관리한다. 실제 신경망 강화학습은 `mdp/`,
 비강화학습 정책 최적화는 `model_based/`, 공통 계산·시각화·디버깅은 `utils/`에 둔다.
 
+## 현재 확정 버전과 GUI 검증 (2026-10-14)
+
+현재 모델은 **`ppo_final_cv11p15` + steady v3 gain 0.2**다. Mode 5는 PPO의
+전진 속도 조절을 적용하고, Mode 6는 같은 제어기로 6 mm/s 기준을 사용한다.
+목표 힘은 모두 20 N이다. 아래 과거 학습 기록의 11.13% 모델과 구분한다.
+
+- actor: `mdp/saved_models/ppo_final_cv11p15/candidate/checkpoints/actor.pt`
+- actor SHA-256: `8e666770e9c8530305cc61b0ffe74439510b815425431339db27b19d1cfb89c8`
+- 학습 재개 상태: 같은 폴더의 `ppo_training_state.pt`
+- 학습·검증 출처: `mdp/saved_models/ppo_final_cv11p15/SAVE.json`
+- ROS 제어 repo: `~/dev_ws/src/y2_ur10skku_control`, commit `2244fb91a2656aa913a5c9f8bb46eec89b6c64d9`
+- 두 repo와 검증 자료의 연결: [VERSION.json](validation/ppo_final_cv11p15_gui_20261014/VERSION.json)
+
+이번 GUI 비교는 10월 14일 13:35 Mode 5와 13:44 Mode 6의 완주 기록 각 1회다.
+초기 2초 기여와 기준 첫 18 mm footprint를 제외한 동일 ROI 기준이다.
+
+| 지표 | Mode 5 | Mode 6 | Mode 5 변화 |
+| --- | ---: | ---: | ---: |
+| 제거 깊이 공간 CV | 0.49808790 | 0.55278676 | 9.89511% 개선 |
+| 추정 제거량 V/K | 2,718,159.36 | 2,267,196.50 | +19.89077% |
+| 가공 시간 | 137.504 s | 115.328 s | +19.22863% |
+| 목표 힘 대비 RMSE | 0.623261 N | 0.491681 N | +26.76105% |
+
+양쪽 모두 완주·제거량 저장·홈 복귀, 제어 순번 누락 및 fault 0을 확인했다.
+원시 재적분 결과는 저장된 깊이맵과 정확히 일치한다. 명목 headless 개선율
+11.14960%와 이번 GUI 개선율 9.89511%는 서로 다른 검증 실행의 결과다.
+제거량은 미교정 가상 회전 Preston 추정치이며, 한 쌍의 비교로 통계적 유의성이나
+완전한 초기 물리 상태 일치까지 확인한 것은 아니다. 13:42에 중단된 Mode 6는
+접촉력 238.655 N에서 fault가 발생해 비교에서 제외했다.
+
+[비교 결과](validation/ppo_final_cv11p15_gui_20261014/comparison.json),
+[제어 진단](validation/ppo_final_cv11p15_gui_20261014/diagnostics/control_diagnostics.json),
+[깊이맵](validation/ppo_final_cv11p15_gui_20261014/02_normalized_depth_maps.png)을 함께 보존한다.
+
+Isaac 장면을 Play하고 `y2_isaac_bridge joint_command_bridge`를 하나 실행한 상태에서:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/dev_ws/install/setup.bash
+ros2 launch Y2RobMotion ppo_fixed_force.launch.py mode:=5 backend:=isaac
+```
+
+다른 ROS 터미널에서 준비 완료 후 가공을 시작한다.
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/dev_ws/install/setup.bash
+ros2 service call /singleArm_cmd/single_arm_command \
+  y2_rob_motion_interfaces/srv/SingleArmCommand \
+  "{command_mode: 'TxtLoad', target_pose: [], target_velocity: 0.0, load_file: ''}"
+```
+
+완주·홈 복귀 뒤 launch를 종료하고 동일 초기 장면을 복원한 다음 `mode:=6`으로 실행한다.
+위 launch는 ROS repo에 커밋된 동일 actor를 자동으로 선택한다.
+
+최신 학습은 `mdp/agents/train_latest_force_ppo.py`와
+`mdp/isaac_latest_force_env.py`의 Isaac 물리 환경을 사용했다. 저장 번들의
+`candidate/training_source_snapshot/`에는 당시 steady v3 학습 어댑터를 보존한다.
+원본 `SAVE.json`과 `runtime_requirement.json`의 당시 상태와 경로는 그대로 유지했으며,
+현재 ROS 배포와 GUI 검증 상태는 위 `VERSION.json`에서 확인한다. 저장 번들만으로
+전체 학습 환경이 구성되지는 않으며 원본 장면, native binding, 기준 제어기 등의 외부
+의존성은 `candidate/runtime_requirement.json`에 기록되어 있다.
+
 ```text
 nrs_rl/                         # Git 루트
 ├── mdp/
@@ -47,7 +110,7 @@ nrs_rl/                         # Git 루트
 - processing ROI, full ROI, whole grid 제거량이 각각 mode 6의 50% 이상이어야 한다.
 - 제거량 단위는 미보정 Preston 모델의 `h/K`, `V/K`다. 100 N 초과 즉시 정지 조건을 유지한다.
 
-PPO는 회전 제거량·이송 명령 응답 근사 환경에서 stochastic PPO-Clip으로 학습하고,
+아래 2026-10-09~10의 기존 PPO는 회전 제거량·이송 명령 응답 근사 환경에서 stochastic PPO-Clip으로 학습하고,
 별도 Isaac 로봇·접촉 물리 실행으로 검증한다. Isaac에서 직접 학습했다고 표현하지 않는다.
 16D 관측과 progress Fourier 특징, 128×128 actor/critic을 사용하며 actor 파라미터는 20,865개다.
 비-PPO profile을 teacher로 사용하지 않는다. MDP 정의는 `mdp/removal_config.py`,
@@ -166,12 +229,36 @@ python -m unittest discover -s source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/u
 python -m unittest discover -s source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/model_based/tests -p 'test_*.py'
 ```
 
+## 이전 PPO ROS 실증 launch 보관 기록 (2026-10-12)
+
+이전 11.13% 세이브본을 사용하는 별도 ROS launch는
+`~/nrs_rl/deployment/ppo_fixed_force_11p13/ppo_fixed_force.launch.py`다.
+현재 고정 힘 제어기는 **Isaac backend**를 지원하며 실제 로봇 backend는 지원하지 않는다.
+PPO 전용 추론 노드는 학습과 같은 16D 관측으로 80 ms마다 추론하고,
+8 ms마다 epoch·sequence를 포함한 단일 속도 action을 전달한다.
+Mode 6에서는 같은 관측·추론을 유지하면서 적용 action을 0(6 mm/s)으로 고정한다.
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/dev_ws/install/setup.bash
+ros2 launch ~/nrs_rl/deployment/ppo_fixed_force_11p13/ppo_fixed_force.launch.py mode:=5 backend:=isaac
+```
+
+기존 Isaac 장면과 `y2_isaac_bridge joint_command_bridge`를 준비한 뒤 실행한다.
+launch는 Idling에서 기다린다. `PPO cv11p13 ready`와 command server 준비 메시지를
+확인한 후 별도 터미널에서 기존 `TxtLoad` 서비스를 호출하면 가공·기록·home 복귀가 진행된다.
+상세 명령과 로그 위치는 해당 배포 폴더의 `README.txt`를 참고한다.
+기존 비-PPO 배포는 그대로 유지하며 새 launch에서 PPO 체크포인트를 명시적으로 선택한다.
+
 ## Git과 산출물
 
 `logs/`, `outputs/`, checkpoint, NumPy 배열 덤프, TensorBoard, 녹화, 빌드·캐시 등은
 `.gitignore`로 제외한다. 실험 결과는 작업 공간의 `logs/experiments/`,
 그래프는 `logs/polishing_results/`, PDF는 `reports/`에 보관하며 Git에 올리지 않는다.
-필수 소형 기준 경로 HDF5와 기존 하위 힘 제어기 가중치 1개만 명시적으로 예외 처리한다.
+필수 소형 기준 경로 HDF5와 기존 하위 힘 제어기 가중치를 명시적으로 예외 처리한다.
+현재 버전 보존을 위해 `mdp/saved_models/ppo_final_cv11p15/`의 확정 actor·학습 상태와
+소규모 출처 자료, `validation/ppo_final_cv11p15_gui_20261014/`의 GUI 비교 요약·그래프도
+예외로 커밋한다. 전체 CSV·NPZ 원시 로그, 장면, 빌드 결과는 기존 작업 공간에 보존한다.
 이미 추적 중인 대용량 로그가 없는지도 확인한다. 과거 실험의 소스 스냅샷은 결과 자료로 보존한다.
 
 기존 GUI 고정 정책은 **비-PPO**다. 새 PPO 연구 모델로 자동 교체하지 않는다.

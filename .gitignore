@@ -66,6 +66,13 @@ source_snapshot/
 !/datasets/cmd_continue9D_flat.h5
 !/datasets/cmd_continue9D_tail_lamp_proxy_run2.h5
 !/datasets/target_positions.h5
+# Finalized 2026-10-14 version: preserve the selected actor and resume state.
+!/mdp/saved_models/ppo_final_cv11p15/candidate/checkpoints/
+!/mdp/saved_models/ppo_final_cv11p15/candidate/checkpoints/actor.pt
+!/mdp/saved_models/ppo_final_cv11p15/candidate/checkpoints/ppo_training_state.pt
+!/mdp/saved_models/ppo_final_cv11p15/candidate/initial_training_state.pt
+!/validation/ppo_final_cv11p15_gui_20261014/mode5/command.log
+!/validation/ppo_final_cv11p15_gui_20261014/mode6/command.log
 events.out.tfevents.*
 *.bag
 *.db3

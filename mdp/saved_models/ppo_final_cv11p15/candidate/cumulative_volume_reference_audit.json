@@ -1,0 +1,22 @@
+{
+  "passed": true,
+  "baseline_gain_percent": 10.517157296475565,
+  "canonical_slot": 3,
+  "raw_volume_values": {
+    "processing_roi": 2679961.678517889,
+    "full_path_whole_grid": 2887198.6279156115
+  },
+  "minimum_values": {
+    "processing_roi": 2411965.5106661003,
+    "full_path_whole_grid": 2598478.7651240504
+  },
+  "cumulative_not_stage_relative": true,
+  "evidence_sha256": {
+    "/home/eunseop/nrs_rl/logs/experiments/ppo_steady10p52_continue_20261013/branch_b/validation_slot_matched/selection_reference/summary.json": "f943922383bd1f94814877fa5dcba38e04bafd32c8790281016b0551d6e2820d",
+    "/home/eunseop/nrs_rl/logs/experiments/ppo_steady10p52_continue_20261013/branch_b/validation_slot_matched/selection_reference/processing_summary.json": "c57f5a84dcecdd28eb0ac83189cd85561b5494d573f5a4b522c788eaeff6308c",
+    "/home/eunseop/nrs_rl/logs/experiments/ppo_steady10p52_continue_20261013/branch_b/validation_slot_matched/selection_reference/selected_trace.npz": "17db33cd4fc953434b576bf264fa0ae07f8deadee5906e130cc195e688e0e738",
+    "/home/eunseop/nrs_rl/logs/experiments/ppo_steady10p52_continue_20261013/branch_b/validation_slot_matched/selection_reference/selected_processing_surface.npz": "102bdb0962ed6e2078bf80d1f5293078562ff3da3ab76d87b7a1bb5c079327da",
+    "/home/eunseop/nrs_rl/logs/experiments/ppo_steady10p52_continue_20261013/branch_b/validation_slot_matched/selection_reference/selected_surface.npz": "bca32a871c2ec56d744d0a847bf564a7d767a2bd8a784b222d106342a6e02b26",
+    "/home/eunseop/nrs_rl/logs/experiments/uniformity_saves/ppo_steady_cv11p01_20261013_171436/cumulative_volume_reference.json": "421915eb1c4ed1c903f18671308e6b74934516e24d453ab266fca1e1e6261e35"
+  }
+}

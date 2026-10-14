@@ -1,0 +1,125 @@
+{
+  "resume_state_chain": [
+    {
+      "training_state": "/home/eunseop/nrs_rl/logs/experiments/ppo_11p01_volume10_final_20261013/validation/candidate/checkpoints/ppo_training_state.pt",
+      "training_state_sha256": "c2d47ff99c010c0c97d6a983feec079e611abb96c4ecb6b33a09f411bb0ab484",
+      "update": 8,
+      "algorithm": "PPO-Clip",
+      "seed": 4601,
+      "parent_training": {
+        "training_state": "/home/eunseop/nrs_rl/logs/experiments/uniformity_saves/ppo_steady_cv11p01_20261013_171436/candidate/checkpoints/ppo_training_state.pt",
+        "training_state_sha256": "7dfc40438624644fe71ec2569b9e626cc70820ff4fea15d7cbe9928f10892266",
+        "previous_stage_updates": 9,
+        "previous_stage_seed": 4502,
+        "optimizer_moments_restored": true,
+        "rollout_rng": "new independent seed",
+        "parent_critic_potential_residual": true,
+        "resumed_critic_potential_residual": true,
+        "critic_semantics_changed": false
+      }
+    },
+    {
+      "training_state": "/home/eunseop/nrs_rl/logs/experiments/uniformity_saves/ppo_steady_cv11p01_20261013_171436/candidate/checkpoints/ppo_training_state.pt",
+      "training_state_sha256": "7dfc40438624644fe71ec2569b9e626cc70820ff4fea15d7cbe9928f10892266",
+      "update": 9,
+      "algorithm": "PPO-Clip",
+      "seed": 4502,
+      "parent_training": {
+        "training_state": "/home/eunseop/nrs_rl/logs/experiments/uniformity_saves/ppo_steady_cv10p52_20261013_144541/candidate/checkpoints/ppo_training_state.pt",
+        "training_state_sha256": "4f01b8d6a6be5c627f2aad3c579c6651217c7ff94d20f7310e69fe3633160c70",
+        "previous_stage_updates": 7,
+        "previous_stage_seed": 4401,
+        "optimizer_moments_restored": false,
+        "rollout_rng": "new independent seed",
+        "parent_critic_potential_residual": true,
+        "resumed_critic_potential_residual": true,
+        "critic_semantics_changed": false,
+        "actor_optimizer_moments_restored": true,
+        "critic_output_reset": true,
+        "critic_optimizer_moments_restored": false,
+        "critic_reset_reason": "explicit_reset",
+        "critic_output_initial_bias": -20.61128855
+      }
+    },
+    {
+      "training_state": "/home/eunseop/nrs_rl/logs/experiments/uniformity_saves/ppo_steady_cv10p52_20261013_144541/candidate/checkpoints/ppo_training_state.pt",
+      "training_state_sha256": "4f01b8d6a6be5c627f2aad3c579c6651217c7ff94d20f7310e69fe3633160c70",
+      "update": 7,
+      "algorithm": "PPO-Clip",
+      "seed": 4401,
+      "parent_training": {
+        "training_state": "/home/eunseop/nrs_rl/logs/experiments/ppo_latest_force_continue_20261013/reference_9p623/checkpoints/ppo_training_state.pt",
+        "training_state_sha256": "f3d661ad098b1e7117a4d565bfb8d6c71e872d2add6cbecc35ff103bbc0c546e",
+        "previous_stage_updates": 5,
+        "previous_stage_seed": 4302,
+        "optimizer_moments_restored": true,
+        "rollout_rng": "new independent seed",
+        "parent_critic_potential_residual": true,
+        "resumed_critic_potential_residual": true,
+        "critic_semantics_changed": false
+      }
+    },
+    {
+      "training_state": "/home/eunseop/nrs_rl/logs/experiments/ppo_latest_force_continue_20261013/reference_9p623/checkpoints/ppo_training_state.pt",
+      "training_state_sha256": "f3d661ad098b1e7117a4d565bfb8d6c71e872d2add6cbecc35ff103bbc0c546e",
+      "update": 5,
+      "algorithm": "PPO-Clip",
+      "seed": 4302,
+      "parent_training": {
+        "training_state": "/home/eunseop/nrs_rl/logs/experiments/uniformity_saves/ppo_latest_force_cv7p80_20261012_215113/checkpoints/ppo_training_state.pt",
+        "training_state_sha256": "bf9e0909a7740d0871160d292ba34fc0136d2eeed824508ac7d63c57daa91919",
+        "previous_stage_updates": 304,
+        "previous_stage_seed": 3301,
+        "optimizer_moments_restored": false,
+        "rollout_rng": "new independent seed",
+        "parent_critic_potential_residual": false,
+        "resumed_critic_potential_residual": true,
+        "critic_semantics_changed": true,
+        "actor_optimizer_moments_restored": true,
+        "critic_output_reset": true,
+        "critic_optimizer_moments_restored": false,
+        "critic_reset_reason": "value_semantics_changed",
+        "critic_output_initial_bias": -22.0929677
+      }
+    },
+    {
+      "training_state": "/home/eunseop/nrs_rl/logs/experiments/uniformity_saves/ppo_latest_force_cv7p80_20261012_215113/checkpoints/ppo_training_state.pt",
+      "training_state_sha256": "bf9e0909a7740d0871160d292ba34fc0136d2eeed824508ac7d63c57daa91919",
+      "update": 304,
+      "algorithm": "PPO-Clip",
+      "seed": 3301,
+      "parent_training": {
+        "training_state": "/home/eunseop/nrs_rl/logs/experiments/uniformity_saves/ppo_fixed20_virtual1000_cv10p81_20261009_1700/candidate/checkpoints/ppo_training_state.pt",
+        "training_state_sha256": "bfd4e518c8786cd1b636756aa72cb9f9c04ede33e5c7dfc5affa6076412cfe6e",
+        "previous_stage_updates": 176,
+        "previous_stage_seed": 3203,
+        "optimizer_moments_restored": true,
+        "rollout_rng": "new independent seed"
+      }
+    },
+    {
+      "training_state": "/home/eunseop/nrs_rl/logs/experiments/uniformity_saves/ppo_fixed20_virtual1000_cv10p81_20261009_1700/candidate/checkpoints/ppo_training_state.pt",
+      "training_state_sha256": "bfd4e518c8786cd1b636756aa72cb9f9c04ede33e5c7dfc5affa6076412cfe6e",
+      "update": 176,
+      "algorithm": "PPO-Clip",
+      "seed": 3203,
+      "parent_training": {
+        "training_state": "/home/eunseop/nrs_rl/logs/experiments/uniformity_saves/ppo_fixed20_virtual1000_cv8p90_20261009_1606/candidate/checkpoints/ppo_training_state.pt",
+        "training_state_sha256": "86edc9ffaabc3c23f6869ca7dd2223255827220ac83b79531f375f342f61f3ca",
+        "previous_stage_updates": 64,
+        "previous_stage_seed": 3101,
+        "optimizer_moments_restored": true,
+        "rollout_rng": "new independent seed"
+      }
+    },
+    {
+      "training_state": "/home/eunseop/nrs_rl/logs/experiments/uniformity_saves/ppo_fixed20_virtual1000_cv8p90_20261009_1606/candidate/checkpoints/ppo_training_state.pt",
+      "training_state_sha256": "86edc9ffaabc3c23f6869ca7dd2223255827220ac83b79531f375f342f61f3ca",
+      "update": 64,
+      "algorithm": "PPO-Clip",
+      "seed": 3101,
+      "parent_training": {}
+    }
+  ],
+  "warm_start_transforms": []
+}

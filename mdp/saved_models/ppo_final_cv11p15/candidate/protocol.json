@@ -1,0 +1,49 @@
+{
+  "request": "Improve beyond the preserved 9.623% headless actor; no 13.3% target",
+  "protected_save": "/home/eunseop/nrs_rl/logs/experiments/uniformity_saves/ppo_latest_force_cv7p80_20261012_215113",
+  "native_dir": "/home/eunseop/nrs_rl/logs/experiments/ppo_latest_force_retrain_20261012/native",
+  "controller_source": "/home/eunseop/nrs_rl/logs/experiments/uniformity_saves/ppo_latest_force_cv7p80_20261012_215113/controller_source",
+  "scene_profile": "/home/eunseop/nrs_rl/logs/experiments/ppo_latest_force_retrain_20261012/gui_scene",
+  "reward_forecast": "/home/eunseop/nrs_rl/logs/experiments/ppo_latest_force_retrain_20261012/calibrated_reward_0p5/forecast.npz",
+  "reference_actor": "/home/eunseop/nrs_rl/logs/experiments/ppo_latest_force_continue_20261013/reference_9p623/checkpoints/actor.pt",
+  "reference_actor_sha256": "fe1d1ac131f503bb5380125ca34d5d8cdb35ab655d9f0d32f053b4edc8d48754",
+  "reference_bundle": "/home/eunseop/nrs_rl/logs/experiments/ppo_latest_force_continue_20261013/reference_9p623",
+  "reference_label": "9.6225606% headless candidate; 7.80% ROS actor protected separately",
+  "reference_training_state": "/home/eunseop/nrs_rl/logs/experiments/ppo_latest_force_continue_20261013/reference_9p623/checkpoints/ppo_training_state.pt",
+  "selection_seed": 4410,
+  "heldout_seeds": [
+    4411,
+    4412
+  ],
+  "selection_nominal_sensors": true,
+  "heldout_nominal_sensors": true,
+  "minimum_selection_gain_pp": 0.1,
+  "training_seeds": [
+    4401
+  ],
+  "force_controller_changed": false,
+  "position_to_force_transition_changed": false,
+  "user_authorization": {
+    "steady_force_control_changes_permitted_if_needed": true,
+    "position_to_force_transition_changes_permitted": false
+  },
+  "first_training_plan": {
+    "rho": 0.9,
+    "log_std": -2.0,
+    "learning_rate": 5e-05,
+    "rollout_steps": 2048,
+    "updates": 7,
+    "critic_warmup_updates": 1,
+    "restart_episodes_each_update": true,
+    "nominal_sensors": true,
+    "critic_potential_residual": true,
+    "max_marginal_kl": 0.025,
+    "candidate_rollout_batches": [
+      2,
+      3,
+      5,
+      7
+    ]
+  },
+  "no_ros_performance_claim_from_headless": true
+}

@@ -279,7 +279,7 @@ def main():
     report = {
         'created_at': timestamp.isoformat(), 'checkpoint_sha256': a['deployment']['checkpoint_sha256'],
         'comparison_baseline': 'Mode 6 GUI at 20 N / 6 mm/s / virtual 1000 RPM',
-        'primary_mode5_selection': 'Latest completed Mode 5 run, selected before reading Mode 6 results',
+        'primary_mode5_selection': 'Explicit --mode5 input; this analysis does not search for the best run',
         'comparison': comparison(a, b), 'entry_protocol': a['summary']['entry_protocol'],
         'matching': {'configuration_and_pinned_files_match': True, 'pinned_files_verified': len(pinned),
             'measurement_model_and_grid_match': True, 'target_force_fixed_20n_both_modes': True,
@@ -289,7 +289,9 @@ def main():
             'exact_initial_state_match_verified': False},
         'runs': {f'mode{r["mode"]}': r['diagnostics'] for r in (a, b)},
         'limits': ['One primary GUI run per mode; repeated paired trials are not yet available.',
-                   'Saved home positions differ; exact scene/physics reset equality is not logged.',
+                   ('Saved home positions differ; exact scene/physics reset equality is not logged.'
+                    if np.linalg.norm(home_delta[:3]) > 1.e-6 else
+                    'Saved home positions match at recorded precision; exact scene/physics reset equality is not logged.'),
                    'Removal is the uncalibrated rotating-disk Preston estimate, not physically measured volume.',
                    'Spatial final-depth CV and temporal instantaneous-rate CV are separate metrics.'],
     }

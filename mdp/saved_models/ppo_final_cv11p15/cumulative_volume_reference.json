@@ -1,0 +1,42 @@
+{
+  "user_requirement": "Final additional training: cumulative total-removal decrease at most10% relative to10.52% saved model",
+  "baseline_save": "/home/eunseop/nrs_rl/logs/experiments/uniformity_saves/ppo_steady_cv10p52_20261013_144541",
+  "baseline_manifest_sha256": "f8a6572c743c89e0b634f12eb5d66f6ff6f92256f4455d78baf7bfe3a10b3bdf",
+  "canonical_environment_slot": 3,
+  "baseline_is_not_rebased_to11p01": true,
+  "units": "surface-integrated removal divided by Preston coefficient K; same deposition and ROI definitions required",
+  "nominal_seed_references": [
+    4521,
+    4522
+  ],
+  "also_exactly_matches_original10p52_seed": 4423,
+  "metrics": {
+    "roi_volume_over_k": {
+      "saved10p52_value": 2679961.678517889,
+      "saved11p01_value": 2541805.860305489,
+      "minimum_at_90percent_of10p52": 2411965.5106661003,
+      "current_ratio_to10p52": 0.9484485844257277,
+      "current_decrease_percent": 5.155141557427234,
+      "remaining_decrease_allowance_relative_to11p01_percent": 5.108193023985863
+    },
+    "full_roi_volume_over_k": {
+      "saved10p52_value": 2887198.6279156115,
+      "saved11p01_value": 2742357.203225669,
+      "minimum_at_90percent_of10p52": 2598478.7651240504,
+      "current_ratio_to10p52": 0.9498332316697901,
+      "current_decrease_percent": 5.016676833020995,
+      "remaining_decrease_allowance_relative_to11p01_percent": 5.246524337981318
+    },
+    "whole_grid_volume_over_k": {
+      "saved10p52_value": 2887198.6279156115,
+      "saved11p01_value": 2742357.203225669,
+      "minimum_at_90percent_of10p52": 2598478.7651240504,
+      "current_ratio_to10p52": 0.9498332316697901,
+      "current_decrease_percent": 5.016676833020995,
+      "remaining_decrease_allowance_relative_to11p01_percent": 5.246524337981318
+    }
+  },
+  "whole_path_definition": "full_roi_volume_over_k includes entry and processing; whole_grid_volume_over_k exposes all grid cells",
+  "processing_definition": "roi_volume_over_k excludes entry deposition and uses the common processing ROI",
+  "suggested_validation": "Declare fixed cumulative floors before training; filter candidate eligibility before CV selection. Keep same seed/slot3 paired CV references, background exact checks, original force/step/completion gates. No per-stage10% rebasing; final fallback remains11.012488036581802% if no validated CV improvement."
+}

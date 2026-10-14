@@ -1,0 +1,722 @@
+{
+  "schema_version": 1,
+  "created_at_utc": "2026-10-13T02:53:50.112820+00:00",
+  "scope": "read-only code audit plus proposed isolated steady-force experiment; no implementation, execution, controller or deployment change",
+  "control_repository": "/home/eunseop/dev_ws/src/y2_ur10skku_control",
+  "control_repository_head": "28cecf8ab21053c9bcc6166bc319322fb63648e1",
+  "user_constraints": {
+    "steady_force_changes_permitted_if_needed": true,
+    "position_to_force_transition_changes_permitted": false,
+    "preserve_existing_transition_conditions_ramps_settle_and_reset": true
+  },
+  "critical_findings": [
+    "Mode5/6/7 takes force_control.cpp294-340 shared-core branch and returns before normal_contact_transition handling; ordinary Mode3 keeps the latter.",
+    "Do not newly route PPO modes through NormalContactTransition: that would change position-to-force behavior.",
+    "PPO spatial scheduler requests20N from initial Force execution; do not invent or replace this existing behavior with the ordinaryMode3 ramp.",
+    "nrsContinue9DTxtLoad uses the existing Position blend start/rest timing then Force acknowledgement; waitForPose200ms is home-return-specific and not called in this handoff.",
+    "TangentialMode3 constructor D/K overrides are applied during reset and returnToInitial; those are not steady-only parameters.",
+    "Existing TangentTrackingCompensation changes the core reference before step and can activate at first force request; do not reuse it unmodified."
+  ],
+  "preserved_current_values": {
+    "normal_force_target_n": 20.0,
+    "control_period_s": 0.008,
+    "policy_period_s": 0.08,
+    "core_desired_force_threshold_n": 0.01,
+    "core_actual_force_threshold_n": 1.5,
+    "core_precontact_hold_n": 15.0,
+    "core_return_tau_s": 0.2,
+    "core_initial_tangent_mass_kg": 2.0,
+    "core_initial_tangent_damping_ns_m": 6000.0,
+    "core_initial_tangent_stiffness_n_m": 2000.0,
+    "legacy_normal_transition": {
+      "contact_off_n": 1.2,
+      "contact_confirm_s": 0.024,
+      "contact_loss_confirm_s": 0.08,
+      "capture_stop_s": 0.08,
+      "position_to_force_s": 0.5,
+      "force_to_position_s": 0.5,
+      "force_slew_n_s": 30.0,
+      "position_reference_speed_mm_s": 10.0,
+      "mass_slew_kg_s": 10.0,
+      "damping_slew_ns_m_s": 10000.0,
+      "withdraw_motion_mm": 2.0
+    }
+  },
+  "files": [
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2RobMotion/include/Y2RobMotion/normal_contact_transition.hpp",
+      "relative_path": "Y2RobMotion/include/Y2RobMotion/normal_contact_transition.hpp",
+      "sha256": "0d5d41c3c53f2c5d94edf72147e670d89aa939cbbbf3397448104771be1233db",
+      "bytes": 8521,
+      "line_count": 192,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Legacy normal-axis capture/release, quintic blend, force/reference slew, contact confirmation and adaptive activation; modes5/6 currently bypass it.",
+      "sections": [
+        {
+          "function_or_section": "NormalContactTransitionConfig",
+          "start_line": 9,
+          "end_line_inclusive": 23,
+          "sha256": "41e48f2aed3175606bf09244fc8d1bf5b98cf4a579e56c008009cb3f3419bc15"
+        },
+        {
+          "function_or_section": "NormalContactTransition::step",
+          "start_line": 45,
+          "end_line_inclusive": 162,
+          "sha256": "106872fa335914ba7cf8bcf67aaea11889a7722063e97b6c22e468ed8c39927b"
+        },
+        {
+          "function_or_section": "NormalContactTransition::reset and phase definitions",
+          "start_line": 29,
+          "end_line_inclusive": 43,
+          "sha256": "e2d50e595613d96a7ef9abf415a142feb5e66db40d5b1ef97e9d4b04cfeea6da"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2RobMotion/src/force_control.cpp",
+      "relative_path": "Y2RobMotion/src/force_control.cpp",
+      "sha256": "95e53c343a8ec4e3897353a4ebfa08e8e8e562d458e9c839c11fca0e2aa4ddf2",
+      "bytes": 34358,
+      "line_count": 818,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve mode dispatch, first-Force reset, position/force branch, normal handover and core invocation. No rerouting mode5/6 through legacy transition.",
+      "sections": [
+        {
+          "function_or_section": "robot_motion::initialize_force_control_state",
+          "start_line": 214,
+          "end_line_inclusive": 261,
+          "sha256": "ca7921c963f20f45cf88f66428d276b4391cb24808c933aa550a23de79f9cfe2"
+        },
+        {
+          "function_or_section": "execute_force_control shared NRS mode5/6/7 early-return branch",
+          "start_line": 283,
+          "end_line_inclusive": 341,
+          "sha256": "bb0c3ddfff888bcb16267913bd322867deb730867f2c98afeeb620630e8cd874"
+        },
+        {
+          "function_or_section": "NormalContactTransition enable, reset, normal-axis integration",
+          "start_line": 405,
+          "end_line_inclusive": 548,
+          "sha256": "2742e8e2b77d756d68fab69aa45e272206c0cba6a0031b9ecb14c45fbf5490fb"
+        },
+        {
+          "function_or_section": "execute_mode5_control dispatch and shared-core handoff",
+          "start_line": 722,
+          "end_line_inclusive": 785,
+          "sha256": "da7b67ae82f03fdd9bfc7ee149520a8c14f3b6dec1d471f4b1d0a4344f8b657a"
+        },
+        {
+          "function_or_section": "robot_motion::control_force",
+          "start_line": 801,
+          "end_line_inclusive": 818,
+          "sha256": "2914a6ce071d26e2c9ac252b45a273043b3987c85064383574d40dc10d82e2cc"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2RobMotion/src/robot_motion.cpp",
+      "relative_path": "Y2RobMotion/src/robot_motion.cpp",
+      "sha256": "c65588572603d83eded468ca296203b6f5249c321de37852a107794b394552ab",
+      "bytes": 38300,
+      "line_count": 941,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve current control-mode selection, force thresholds/time constants, first-position output initialization and trajectory epoch reset.",
+      "sections": [
+        {
+          "function_or_section": "shared-force constructor configuration",
+          "start_line": 258,
+          "end_line_inclusive": 275,
+          "sha256": "a293bc83478628d83d97c0a93acf02194026012657fc86319a82711c18bd2438"
+        },
+        {
+          "function_or_section": "robot_motion::cmdModeCB",
+          "start_line": 357,
+          "end_line_inclusive": 361,
+          "sha256": "b07f3d30974408abcbf5efffa52d41cf36cb1b6ebbcbc0c7aad02d0496d63a1a"
+        },
+        {
+          "function_or_section": "trajectory reset and action reset",
+          "start_line": 482,
+          "end_line_inclusive": 506,
+          "sha256": "3e35b0ae1fef13502e30ff9f884258d8f0a3cedd36430b040b39d4b23e0041f9"
+        },
+        {
+          "function_or_section": "robot_motion::control_position",
+          "start_line": 769,
+          "end_line_inclusive": 793,
+          "sha256": "aef7d2178fb9277734d4874c6bc2dfdec6b0e243ef97a4cd836ed8382af79978"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2RobMotion/src/robot_command.cpp",
+      "relative_path": "Y2RobMotion/src/robot_command.cpp",
+      "sha256": "be06f7f54cc8a1e166738bd4dd8582d249fefd988819da9bf5612a4bdcecb8fa",
+      "bytes": 57051,
+      "line_count": 1340,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve Position connection, MotionBlender timing, Force acknowledgement, replay/handoff and existing settle semantics. The200ms waitForPose is home-return-specific, not an extra NRS pre-Force settle.",
+      "sections": [
+        {
+          "function_or_section": "robot_command::setModeAndWait/requireMode",
+          "start_line": 388,
+          "end_line_inclusive": 410,
+          "sha256": "99ef4990849c7dfcef7e6e4d5bae88d442c10a744b38c9b68dd67e1a6e1b39d7"
+        },
+        {
+          "function_or_section": "holdPosition/waitForPose",
+          "start_line": 412,
+          "end_line_inclusive": 428,
+          "sha256": "eb90411b844164546edad11ed376e124bcb890f9bfbb5dc5ed3f0355f6bd342b"
+        },
+        {
+          "function_or_section": "robot_command::nrsContinue9DTxtLoad",
+          "start_line": 1209,
+          "end_line_inclusive": 1340,
+          "sha256": "68be0a73108916ff4ddfd5906ea680d11774959019d7f25213649f812c1e7304"
+        },
+        {
+          "function_or_section": "Continue9D measured-contact force gate and slew",
+          "start_line": 283,
+          "end_line_inclusive": 295,
+          "sha256": "4cba50d28336dc2207e860b019ec96dcd8e87971fa483fcc0fe76ba259a4949c"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2RobMotion/include/Y2RobMotion/robot_command.hpp",
+      "relative_path": "Y2RobMotion/include/Y2RobMotion/robot_command.hpp",
+      "sha256": "062e96c8d1595efa5b011ca71d0874fa96507aedf2020342f454de67192c3612",
+      "bytes": 8974,
+      "line_count": 186,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Do not alter other command paths or their force ramping while evaluating a private wrapper.",
+      "sections": [
+        {
+          "function_or_section": "existing streaming force slew configuration",
+          "start_line": 156,
+          "end_line_inclusive": 159,
+          "sha256": "1dbaba9e37c52f129bf537cdc092efc1d9002f3de7eb0f9ce378b2235a1195f3"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2RobMotion/src/ppo_fixed_force_control.cpp",
+      "relative_path": "Y2RobMotion/src/ppo_fixed_force_control.cpp",
+      "sha256": "cf74aaddcfa61fe946c5474ce3bbb0edcba4c3f0897d55ae6743efa310f82806",
+      "bytes": 6356,
+      "line_count": 131,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve force targets, fault branch, command and joint guards, hold and core reset. Any future correction belongs before existing guards and IK validation.",
+      "sections": [
+        {
+          "function_or_section": "execute_spatial_policy_control command, core, guards and IK result",
+          "start_line": 71,
+          "end_line_inclusive": 105,
+          "sha256": "56f3584125de50ab14cf5d090cc1372b136e7ec725779956507611eb6d2b77e0"
+        },
+        {
+          "function_or_section": "holdSpatialFault",
+          "start_line": 116,
+          "end_line_inclusive": 131,
+          "sha256": "bfae96cc273f8dab4b5b30cef3f6d4962ab39c4c543ed74f03b5754b2f31f269"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2RobMotion/src/ppo_trajectory_scheduler.cpp",
+      "relative_path": "Y2RobMotion/src/ppo_trajectory_scheduler.cpp",
+      "sha256": "0ef1f831909f18d3a732cc974b8ea8d1101e7641143e53c2a7ec53dfb77bbbe8",
+      "bytes": 13676,
+      "line_count": 332,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve trajectory/reference timing, action filtering, guards and fixed20N request, rather than changing force ramp or cursor semantics.",
+      "sections": [
+        {
+          "function_or_section": "interpolateReference including scheduled force",
+          "start_line": 112,
+          "end_line_inclusive": 127,
+          "sha256": "8e312f71fbb24d6e2012dab98bc15e26ff5cf486a1317d85f08d226e019256b3"
+        },
+        {
+          "function_or_section": "step reference and spatial fixed-force target",
+          "start_line": 135,
+          "end_line_inclusive": 179,
+          "sha256": "ea667d128dd26b764d283e784ef9ea28bdfef2eea86e0ed228b1d4bbc04cde7c"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2RobMotion/src/runtime_config.cpp",
+      "relative_path": "Y2RobMotion/src/runtime_config.cpp",
+      "sha256": "af56dc7d8344785fa892dce83fccee70593574a6aad60b948d814299c431ff6e",
+      "bytes": 18661,
+      "line_count": 457,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve normal switch/transition parameters and validation, including values omitted from YAML that use header defaults.",
+      "sections": [
+        {
+          "function_or_section": "force-switch and contact-transition config loading",
+          "start_line": 304,
+          "end_line_inclusive": 355,
+          "sha256": "f0227ad27fc539843cf69525f416c9051f300f0a5556c1977356fda190399008"
+        },
+        {
+          "function_or_section": "contact-transition validation",
+          "start_line": 432,
+          "end_line_inclusive": 445,
+          "sha256": "bebafe44ccfcf31ec33203874de457a7a694f4b50af911f6a797e805a5fbeca1"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2RobMotion/include/Y2RobMotion/runtime_config.hpp",
+      "relative_path": "Y2RobMotion/include/Y2RobMotion/runtime_config.hpp",
+      "sha256": "aae3ebb16c64de51142551b63d68fe3f075b56a6fc436d78658f144ff777cb01",
+      "bytes": 2557,
+      "line_count": 73,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Retain current defaults and NormalContactTransitionConfig inclusion.",
+      "sections": [
+        {
+          "function_or_section": "force-mode and transition defaults",
+          "start_line": 47,
+          "end_line_inclusive": 59,
+          "sha256": "6533b4a56b6f874e10c86d9fe8e8ddc2dde137b3e2561ff1657f4b08d08b1abe"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2RobMotion/config/ppo_fixed_force.yaml",
+      "relative_path": "Y2RobMotion/config/ppo_fixed_force.yaml",
+      "sha256": "5f8801621d917709c7bf625bf2d05850db154d3b2966cb80290bc530cd9cb797",
+      "bytes": 1830,
+      "line_count": 83,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Current PPO entry connection uses5s default travel,15mm/s transfer,2s start/2s rest/1s acceleration; force desired.01N, actual1.5N, hold15N, returntau.2s.",
+      "sections": [
+        {
+          "function_or_section": "trajectory timing",
+          "start_line": 61,
+          "end_line_inclusive": 67,
+          "sha256": "88afcebcf5ee929bcf0d17609c5782b2e921c3435c3d8d58a42b31bc44f5ec63"
+        },
+        {
+          "function_or_section": "force switching and return constants",
+          "start_line": 68,
+          "end_line_inclusive": 74,
+          "sha256": "24df25b2bb99fd2aac9a27c2fc80ff7aec9a58bf6f180e4fdb5421c78d07852f"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2ForceCon/include/Y2ForceCon/mode3_force_control_core.hpp",
+      "relative_path": "Y2ForceCon/include/Y2ForceCon/mode3_force_control_core.hpp",
+      "sha256": "562ff97af8c123c18ea0f8fc762e68b4d6074199aeabdfa1c08843c9da8c59ab",
+      "bytes": 2660,
+      "line_count": 76,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve initial MDK, per-axis state and normal force activation inputs.",
+      "sections": [
+        {
+          "function_or_section": "Mode3ForceControlConfig",
+          "start_line": 10,
+          "end_line_inclusive": 23,
+          "sha256": "a7e2ead9c86c78be341c177db4b3c0ae731af476e3537494db9ac1d30ce23d36"
+        },
+        {
+          "function_or_section": "core state and API",
+          "start_line": 49,
+          "end_line_inclusive": 76,
+          "sha256": "24e5c2569afd7b6b414ec94be1722d183b68b0fdbf55030d04a377b8599e8c1e"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2ForceCon/src/mode3_force_control_core.cpp",
+      "relative_path": "Y2ForceCon/src/mode3_force_control_core.cpp",
+      "sha256": "7ed0a2714ec7ba973564931b2a70de80e1887869fbcd4e732082f82b86036f04",
+      "bytes": 8567,
+      "line_count": 217,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Actual mode5/6 transition core: desired>.01 and actual>1.5 trigger NAF, precontact force hold15N, otherwise originalMDK return. Full core stays immutable in post-core experiment.",
+      "sections": [
+        {
+          "function_or_section": "Mode3ForceControlCore::reset",
+          "start_line": 65,
+          "end_line_inclusive": 83,
+          "sha256": "d9ba685d5ade5e3c762e50b5d7faa82bf8664e70adf1f12c467918693cf22f7b"
+        },
+        {
+          "function_or_section": "returnToInitial and returnMdToInitialWithZeroStiffness",
+          "start_line": 85,
+          "end_line_inclusive": 124,
+          "sha256": "0bc9f767fb8d681b1ce86156f0ba2130315ebedd97f5c7b62c030afef05f976d"
+        },
+        {
+          "function_or_section": "Mode3ForceControlCore::step including force-switch logic",
+          "start_line": 126,
+          "end_line_inclusive": 203,
+          "sha256": "6f537f194d225d699a238b6bcb0d3f0bdeee713fb0a31e76f13b9aef7065e8e5"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2ForceCon/include/Y2ForceCon/admittance_control.hpp",
+      "relative_path": "Y2ForceCon/include/Y2ForceCon/admittance_control.hpp",
+      "sha256": "610793d3b0f61fce142fcf7796ec2ee082a475f0f55ed80821af32c294fd637e",
+      "bytes": 1327,
+      "line_count": 51,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Admittance API and internal state must remain unchanged.",
+      "sections": []
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2ForceCon/src/admittance_control.cpp",
+      "relative_path": "Y2ForceCon/src/admittance_control.cpp",
+      "sha256": "6cca04b8ad5a606a31efacef686762c4f336f9ebbe25bc9acb0249f5529c7245",
+      "bytes": 2624,
+      "line_count": 111,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve Tustin update and position/force history. Do not write corrected output back into admittance history.",
+      "sections": [
+        {
+          "function_or_section": "Yadmittance_control::adm_1D_control",
+          "start_line": 31,
+          "end_line_inclusive": 67,
+          "sha256": "7654fbbd391f307b94af28229e6d50c66a0c07ca1aadd46304806a5591ab7a26"
+        },
+        {
+          "function_or_section": "reset/rebase/track/hardReset",
+          "start_line": 69,
+          "end_line_inclusive": 111,
+          "sha256": "1848c82d0e95b4a758c6dfe4f130ca5e225a1fb7dcd836903b86ee19dde1d122"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2ForceCon/include/Y2ForceCon/Naf_mdGradi.hpp",
+      "relative_path": "Y2ForceCon/include/Y2ForceCon/Naf_mdGradi.hpp",
+      "sha256": "9daa0ae2b533311d07e09438ebe3c40bbcbd48091bc4d7bde02689c080691062",
+      "bytes": 3171,
+      "line_count": 97,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Normal adaptive-force policy interface remains unchanged.",
+      "sections": []
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2ForceCon/src/Naf_mdGradi.cpp",
+      "relative_path": "Y2ForceCon/src/Naf_mdGradi.cpp",
+      "sha256": "3c1839dc65aa3b021544d0b2ac95b532db8c57bd383ddf6185b89552ec9d842e",
+      "bytes": 9281,
+      "line_count": 292,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Normal adaptive-force network inference, history and applied damping remain unchanged.",
+      "sections": []
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2ForceCon/src/checkpoints/NAF_MDGradi/NAF_mdGradi_policy_script.pt",
+      "relative_path": "Y2ForceCon/src/checkpoints/NAF_MDGradi/NAF_mdGradi_policy_script.pt",
+      "sha256": "c3e269b5e2c8073e6b7815188e82e54fc5fec5d36e0476f94748c9ed4999ac23",
+      "bytes": 292069,
+      "line_count": 1778,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Normal-axis NAF weights remain unchanged.",
+      "sections": []
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2Trajectory/src/MotionBlender6D.cpp",
+      "relative_path": "Y2Trajectory/src/MotionBlender6D.cpp",
+      "sha256": "4ac11f949fa50a7ed54e5b41fe49cf6cbc1d7731a6698f8b3b4c37d09c8dfbb2",
+      "bytes": 6908,
+      "line_count": 156,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve connection trajectory start/rest and acceleration/force blending implementation.",
+      "sections": []
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2Trajectory/include/Y2Trajectory/MotionBlender6D.hpp",
+      "relative_path": "Y2Trajectory/include/Y2Trajectory/MotionBlender6D.hpp",
+      "sha256": "2df4e61e6c91eeed8802873afa87fe35746c7af0992ffcfc88df25bfb24b5e7b",
+      "bytes": 1009,
+      "line_count": 24,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve connection trajectory start/rest and acceleration/force blending implementation.",
+      "sections": []
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2Trajectory/src/MotionBlender9D.cpp",
+      "relative_path": "Y2Trajectory/src/MotionBlender9D.cpp",
+      "sha256": "ec8bf81040fdd70a31fec532c7c5de2ff25cdd440a7b6709b6c445db4656bcf0",
+      "bytes": 6941,
+      "line_count": 157,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve connection trajectory start/rest and acceleration/force blending implementation.",
+      "sections": []
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2Trajectory/include/Y2Trajectory/MotionBlender9D.hpp",
+      "relative_path": "Y2Trajectory/include/Y2Trajectory/MotionBlender9D.hpp",
+      "sha256": "b50592a061609ac7e5823742be57588dfff777ad10c61be41c5b5d2632f3df2e",
+      "bytes": 1015,
+      "line_count": 24,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve connection trajectory start/rest and acceleration/force blending implementation.",
+      "sections": []
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2Trajectory/src/AccProfiler.cpp",
+      "relative_path": "Y2Trajectory/src/AccProfiler.cpp",
+      "sha256": "6b1a13880ab3898fdd670128e8ea1bc53b063675b195dae54116a53fe389490a",
+      "bytes": 2895,
+      "line_count": 84,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve connection trajectory start/rest and acceleration/force blending implementation.",
+      "sections": []
+    },
+    {
+      "path": "/home/eunseop/dev_ws/src/y2_ur10skku_control/Y2Trajectory/include/Y2Trajectory/AccProfiler.hpp",
+      "relative_path": "Y2Trajectory/include/Y2Trajectory/AccProfiler.hpp",
+      "sha256": "986f2574df1308dc343a508739882de1130de7217814786ca60b0a8975f4aa84",
+      "bytes": 1241,
+      "line_count": 49,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve connection trajectory start/rest and acceleration/force blending implementation.",
+      "sections": []
+    },
+    {
+      "path": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/mdp/action.py",
+      "relative_path": "source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/mdp/action.py",
+      "sha256": "2412121dc10ea17603435f3fcc49f5353f70827f7dec9a246f2c1dde0b4f813a",
+      "bytes": 44234,
+      "line_count": 805,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve Isaac position approach/calibration, Force entry, core invocation, guards, reset and125Hz schedule.",
+      "sections": [
+        {
+          "function_or_section": "configured approach duration",
+          "start_line": 138,
+          "end_line_inclusive": 138,
+          "sha256": "4560f51b9b6fc6f025ff820b6b7cd34d70ef59fb0abf9d241aaef82697eba952"
+        },
+        {
+          "function_or_section": "approach step count",
+          "start_line": 300,
+          "end_line_inclusive": 300,
+          "sha256": "228b50312449f19c965d106253394e9107032e191bb63b55753a8315b60c6ebb"
+        },
+        {
+          "function_or_section": "calibration and approach state",
+          "start_line": 580,
+          "end_line_inclusive": 599,
+          "sha256": "49ff3e06cc9c5813054a84f006e41826d99a19983a729572c7516c74ba98a1b7"
+        },
+        {
+          "function_or_section": "approach commands and per-tick original core reset",
+          "start_line": 628,
+          "end_line_inclusive": 638,
+          "sha256": "b73df4508860ef341972bc9d304b847fd86ee59b18dd9ed51effd8d402355d68"
+        },
+        {
+          "function_or_section": "original core call",
+          "start_line": 664,
+          "end_line_inclusive": 671,
+          "sha256": "7a382e37718833485c1c24f5b377e3989c72668572a5e4dd5cf7279f69f9d321"
+        },
+        {
+          "function_or_section": "command/IK guards and fault reset",
+          "start_line": 673,
+          "end_line_inclusive": 704,
+          "sha256": "a3797c5211df2ee8b37379fbc900e76f09f32c66b0f0e8d8fb5142c6f87a440a"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/y2_control_pybind/cpp/src/api/calibrated_mode3.cpp",
+      "relative_path": "source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/y2_control_pybind/cpp/src/api/calibrated_mode3.cpp",
+      "sha256": "4edb893dc0a1746d7acb7ff4dd570bc2b8dcee50bf9c1e2b1582f2894049b849",
+      "bytes": 3142,
+      "line_count": 60,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Changing constructor damping/stiffness changes initialMDK at reset and during transitions; do not use constructor D/K sweeps for a steady-only experiment.",
+      "sections": [
+        {
+          "function_or_section": "TangentialMode3 constructor",
+          "start_line": 20,
+          "end_line_inclusive": 39,
+          "sha256": "a204f7b29e6e96efe0e45fb38a930b800abd97616ac843a3d7c85b7e974805d6"
+        },
+        {
+          "function_or_section": "reset/step bridge",
+          "start_line": 40,
+          "end_line_inclusive": 53,
+          "sha256": "7d5f55af25b17872cd650de1bc74066401fd0487e29f9ebe9412343306f75f1a"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/mdp/evaluation/build_latest_force_control.py",
+      "relative_path": "source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/mdp/evaluation/build_latest_force_control.py",
+      "sha256": "bf8824f5c6feef9ace0b9e6cc412aad0a971d1ec7209386e648388cfac1b99ff",
+      "bytes": 2518,
+      "line_count": 48,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Retain original private native module and strict fixed-controller build evidence.",
+      "sections": [
+        {
+          "function_or_section": "source hash check and private build",
+          "start_line": 15,
+          "end_line_inclusive": 30,
+          "sha256": "cb8f14f39a62c7151aab6d7f0421d94f24f6976c7924e2f15244f0fc0491a729"
+        },
+        {
+          "function_or_section": "native fixed-profile smoke contract",
+          "start_line": 31,
+          "end_line_inclusive": 46,
+          "sha256": "fc408d9ec8cd1e0c43c798c2231624ecabf5fe8c43636b8371ffea4eb36a61c9"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/mdp/isaac_latest_force_env.py",
+      "relative_path": "source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/mdp/isaac_latest_force_env.py",
+      "sha256": "c7e4469b9db1495e778ac688e235c553037df46869d709da154e6092dda9bb36",
+      "bytes": 10849,
+      "line_count": 212,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Existing training environment remains on original controller while a separate experimental harness uses a wrapper.",
+      "sections": [
+        {
+          "function_or_section": "nominal source and frozen core injection",
+          "start_line": 31,
+          "end_line_inclusive": 60,
+          "sha256": "835598ed1447de0004f43e9efdf0e862e4badc7767dba9fc411788f8c438bb6c"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/utils/tcp_tracking_compensation.py",
+      "relative_path": "source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/utils/tcp_tracking_compensation.py",
+      "sha256": "4ac429ee5ff30d9ee532fc38a3a179dbbfe4b08aed8d29a139ef1bb99a5f17a5",
+      "bytes": 3459,
+      "line_count": 72,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Existing wrapper is PRE-core and enabled by force request alone; it is not suitable unmodified for post-transition-only compensation.",
+      "sections": [
+        {
+          "function_or_section": "existing pre-core correction",
+          "start_line": 20,
+          "end_line_inclusive": 55,
+          "sha256": "b50d9df473bae63ef544c7f99888f493a8db20f8e2c74ff08aa711e98c12a332"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/mdp/evaluation/probe_latest_force_ppo.py",
+      "relative_path": "source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/mdp/evaluation/probe_latest_force_ppo.py",
+      "sha256": "e53b2ce2a38800853e57452b278198ccdb26977caf8d0c289c8d97334f1a40db",
+      "bytes": 18767,
+      "line_count": 321,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Keep original strict zero-compensation evaluation contract; use a separately named private probe for experimental controller variants.",
+      "sections": [
+        {
+          "function_or_section": "fixed D/K, zero tracking contract and controller injection",
+          "start_line": 99,
+          "end_line_inclusive": 125,
+          "sha256": "e33e9625fcf32b7111f9439d4c93d0db67d44db66e2fd694d713699a8f8d9e90"
+        }
+      ]
+    },
+    {
+      "path": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/mdp/agents/latest_force_ppo.py",
+      "relative_path": "source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/mdp/agents/latest_force_ppo.py",
+      "sha256": "2cd4f7231f6eefb763777808cb12064f072122ac6f498a9a9905d9bc40fcd8af",
+      "bytes": 1453,
+      "line_count": 32,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve existing actor/controller contract and fixed-controller performance assessment; experimental controller results require explicit separate provenance.",
+      "sections": []
+    },
+    {
+      "path": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/utils/assess_latest_force_ppo.py",
+      "relative_path": "source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/utils/assess_latest_force_ppo.py",
+      "sha256": "b23bf7afb9a0ae981726c666df92251c0309111a84728c9e0e5140be8372ff86",
+      "bytes": 6541,
+      "line_count": 112,
+      "preservation_scope": "preserve entire file during isolated experiment",
+      "reason": "Preserve existing actor/controller contract and fixed-controller performance assessment; experimental controller results require explicit separate provenance.",
+      "sections": []
+    }
+  ],
+  "proposed_experiment": {
+    "implemented": false,
+    "executed": false,
+    "current_source_modified": false,
+    "location": "new study-private Python wrapper and separately named probe only; do not patch production controller or original validation contracts",
+    "type": "bounded post-core TCP-tangent-plane tracking correction",
+    "trial_parameters": {
+      "gain": 0.3,
+      "correction_limit_mm": 1.5,
+      "filter_tau_s": 0.08,
+      "control_period_s": 0.008
+    },
+    "preserve_core": "Call original core exactly once with identical measured/reference/force/wrench/rotation inputs. Copy its output and modify only returned Cartesian translation after step. Never call core.reset/rebase/track_output to inject compensation.",
+    "equation": "e=reference_position-measured_position; e_t=e-n*(e dot n); requested=clip_norm(0.3*e_t,1.5mm); c=project_tangent(c+(1-exp(-dt/.08))*(requested-c)); output_xyz=core_output_xyz+c. Output orientation and mass/damping/stiffness remain original.",
+    "coordinates": "Use instantaneous TCP normal n=rotation[:,2], not unqualified baseXY. BaseXY may contain a normal component if TCP tilts. Validate n is finite and unit length.",
+    "gate_is_auxiliary_only": true,
+    "gate_proposal": {
+      "minimum_force_epoch_s": 2.0,
+      "stable_measured_normal_force_range_n": [
+        18.0,
+        22.0
+      ],
+      "stable_continuous_s": 0.5,
+      "required_fixed_normal_request_n": 20.0,
+      "require_zero_tangential_force_request": true,
+      "require_original_force_active": true,
+      "require_original_fault_false": true,
+      "require_original_shield_false": true,
+      "require_original_approach_false": true,
+      "require_original_action_freshness_and_progression_ok": true,
+      "stability_break_resets_auxiliary_timer_only": true,
+      "note": "These are experimental eligibility conditions for the extra correction, not changes to the original contact thresholds, mode switch, ramp, settle or normal-force response. Mode5/6 has no existing explicit transition-complete flag; this gate is a conservative observable proxy, not proof of the legacy transition phase."
+    },
+    "timing": "Count first2s from the first original core Force step after reset, not from total simulation time or start of the2s Position approach. Reset auxiliary counters on existing core reset/new trajectory; after force request withdrawal or contact loss, require fresh stability before any re-enable.",
+    "inputs_available_at_step": [
+      "measured_pose[6]",
+      "reference_pose[6]",
+      "desired_force[3]",
+      "wrench_base[6]",
+      "tcp_rotation[9]",
+      "original_core_output[24]"
+    ],
+    "external_gate_inputs_available_on_Isaac_action": [
+      "env_id",
+      "polishing_active",
+      "_approach_step/_approach_steps",
+      "safety_fault_reason",
+      "safety_shield_active",
+      "safety_terminated",
+      "requested_speed or progression flag"
+    ],
+    "preferred_Isaac_connection": "The existing constructor injection in a study-private probe can wrap each original core. The wrapper step returns corrected first3 values before action.py673-704 existing command and IK checks. Bind term/env_id gate inputs after gym.make; reset mirrors original core reset exactly.",
+    "possible_future_ROS_connection": "For modes5/6 only, a private sidecar/wrapper around mode3_force_core_->step inside execute_force_control after line317 and before output-to-pose/IK at318-338, with original spatial fault branch and guards retained. This requires later explicit implementation review; do not add correction after IK or change normal transition branch.",
+    "fault_contact_loss_behavior": "Fault branch must bypass correction and retain existing hold/reset. Contact-loss/force-release ticks must return the original unmodified core output, with the original precontact/NAF switch untouched; clear only wrapper correction/timers. Switching off may expose a tangential command drop up to the correction limit, so log and reject discontinuity violations rather than changing original guards or reset state to hide them.",
+    "known_limits": [
+      "Post-core corrected Cartesian command is not written to core command_pose_internal_; the normal NAF previous-command state remains that of the original core. This is an outer-loop experimental variant and requires stability checks.",
+      "For identical replayed inputs the original core state/output can be preserved exactly. In closed-loop physics, changed tangential motion may change measured force/pose and thereby original switching event times; unchanged source alone cannot prove unchanged physical transition behavior.",
+      "Do not enable corrections during first2s or initial unstable contact; CPU prefix identity and headless entry traces must demonstrate this.",
+      "A nominal Mode5/6 success does not establish ROS equivalence or normal-axis physical force invariance."
+    ],
+    "required_before_GPU_tests": [
+      "Replay identical no-contact, threshold-boundary, Force request, stable-contact, contact-loss, force-release, fault and reset sequences through original core and wrapper; before eligibility and on loss/fault output24values must match original exactly.",
+      "Original core receives identical step arguments and call counts; validate subsequent raw outputs under identical replay inputs to detect accidental state writes.",
+      "Correction dot instantaneous TCP normal approximately0 to numerical tolerance, norm<=1.5mm, orientations andMDK unchanged; gain0 is exact original path.",
+      "Gate activation is later than2s of Force and.5s uninterrupted18..22N; approach duration/mode-ACK/ramp/reset code hashes remain unchanged.",
+      "Contact loss/release correction removal and reacquisition obey existing command/IK limits without suppressing faults."
+    ],
+    "paired_physics_design": "Separate controller0/controller1 x constant Mode6/reference9.623actor at identical nominal scene and seeds. Compare actor improvement to Mode6 under the SAME controller and separately report controller-only gains, force errors, tracking, processing time, completion and faults. Use new contract/provenance; do not reinterpret existingfixed-controller results.",
+    "gate_input_timing_caution": "Isaac updates safety_shield_active via _update_safety_status at action.py704, after the core call at664. A closure reading this field during step may see the previous tick. Derive current-tick overload/tracking eligibility from the same current wrench/reference/measured inputs and unchanged cfg thresholds(1.6x force,10mm tracking), or explicitly pass current locals in an isolated harness. Pre-core hard-fault branches already skip step; post-core command/IK faults invoke existing reset."
+  }
+}

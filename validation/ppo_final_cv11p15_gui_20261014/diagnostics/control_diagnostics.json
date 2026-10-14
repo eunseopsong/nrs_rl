@@ -1,0 +1,333 @@
+{
+  "completed_pair": "/home/eunseop/nrs_rl/logs/polishing_results/final11p15_gui_20261014_pair01",
+  "runs": {
+    "mode5": {
+      "processing_window": "Control index time >= 2 s; same sample mask as paired_measurement.py",
+      "force_processing_n": {
+        "min": 16.064912719319164,
+        "mean": 19.965091341325987,
+        "std": 0.6222821729713,
+        "max": 23.921589756167002,
+        "p05": 19.054482151675884,
+        "median": 19.962763063367,
+        "p95": 20.901607185730846,
+        "p99": 21.59916471656252
+      },
+      "force_processing_rmse_n": 0.6232605532586687,
+      "force_outside_18_22_processing_percent": 1.5417733302303933,
+      "force_peak_whole_n": 69.87436392627545,
+      "force_peak_control_time_s": 0.0,
+      "tracking_error_processing_mm": {
+        "min": 4.254072408253612,
+        "mean": 6.8457044772788835,
+        "std": 0.8129019685075377,
+        "max": 9.479577621269282,
+        "p05": 5.463635010803601,
+        "median": 6.874676481693172,
+        "p95": 8.198536053335605,
+        "p99": 9.015700331572534
+      },
+      "requested_feed_processing_mm_s": {
+        "min": 1.5021947622299194,
+        "mean": 4.994490731232716,
+        "std": 2.81043061916518,
+        "max": 11.981714844703674,
+        "p05": 1.6973462104797363,
+        "median": 4.308024823665619,
+        "p95": 11.1479613482952,
+        "p99": 11.96397864818573
+      },
+      "scheduled_feed_processing_mm_s": {
+        "min": 1.5038536406798289,
+        "mean": 5.014495255928976,
+        "std": 2.6557089200651127,
+        "max": 11.944103264944758,
+        "p05": 1.7740230155938812,
+        "median": 4.4122368289822615,
+        "p95": 10.637342196249223,
+        "p99": 11.853770249621679
+      },
+      "recorded_tcp_speed_processing_mm_s": {
+        "min": 0.0,
+        "mean": 4.748165425292164,
+        "std": 12.760290506886747,
+        "max": 152.26811975261464,
+        "p05": 0.0,
+        "median": 0.0,
+        "p95": 33.85643715297419,
+        "p99": 60.64693717140512
+      },
+      "recorded_zero_tcp_speed_processing_percent": 79.95112869443798,
+      "unchanged_tcp_rows_percent": 79.94036013304277,
+      "observed_tcp_change_interval_control_s": {
+        "min": 0.007999999999981355,
+        "mean": 0.039885616242493566,
+        "std": 0.023014475225740343,
+        "max": 0.2640000000000029,
+        "p05": 0.007999999999995566,
+        "median": 0.03999999999999204,
+        "p95": 0.0799999999999983,
+        "p99": 0.0800000000000125
+      },
+      "shield_whole_s": 0.736,
+      "shield_processing_s": 0.0,
+      "fault_rows": 0,
+      "progression_blocked_rows": 3,
+      "progression_blocked_after_entry_rows": 0,
+      "action_not_fresh_rows": 34,
+      "action_not_fresh_after_received_rows": 31,
+      "action_age_received_s": {
+        "min": 0.000377553,
+        "mean": 0.016418446945741322,
+        "std": 0.007894141997631467,
+        "max": 0.062553236,
+        "p05": 0.0082371684,
+        "median": 0.010306701,
+        "p95": 0.026353519199999995,
+        "p99": 0.029094985559999995
+      },
+      "action_age_over_250ms_rows": 0,
+      "inference_latency_on_decision_rows_ms": {
+        "min": 0.43339000148989726,
+        "mean": 0.7528804851016995,
+        "std": 0.7106550636495573,
+        "max": 29.753265000181273,
+        "p05": 0.5078304003291123,
+        "median": 0.7712964988968452,
+        "p95": 0.9321528508735355,
+        "p99": 1.0287335499197068
+      },
+      "duplicate_sim_clock_rows": 0,
+      "duplicate_sim_clock_control_times_s": [],
+      "sim_clock_duration_s": 139.504006626,
+      "control_tick_duration_s": 139.504,
+      "zero_depth_processing_roi_percent": 7.9246699414135815,
+      "base_wrench_hold": {
+        "unchanged_adjacent_rows_percent": 25.260924417937836,
+        "hold_duration_control_s": {
+          "min": 0.008,
+          "mean": 0.010703905470728152,
+          "std": 0.003784195947779606,
+          "max": 0.016,
+          "p05": 0.008,
+          "median": 0.008,
+          "p95": 0.016,
+          "p99": 0.016
+        },
+        "recorded_vector_segments": 13033,
+        "longest_hold_start_s": 0.0,
+        "interpretation": "Exact repeated base-frame six-axis wrench values seen by the controller; not a direct measurement of sensor message age."
+      }
+    },
+    "mode6": {
+      "processing_window": "Control index time >= 2 s; same sample mask as paired_measurement.py",
+      "force_processing_n": {
+        "min": 15.403193376290202,
+        "mean": 20.01415571983036,
+        "std": 0.49147762595369604,
+        "max": 23.184216917616503,
+        "p05": 19.431751694630933,
+        "median": 20.012995960789404,
+        "p95": 20.713844995293805,
+        "p99": 21.35215367030948
+      },
+      "force_processing_rmse_n": 0.4916814428234981,
+      "force_outside_18_22_processing_percent": 1.0127635960044397,
+      "force_peak_whole_n": 69.22951763003522,
+      "force_peak_control_time_s": 0.0,
+      "tracking_error_processing_mm": {
+        "min": 3.7254666340407283,
+        "mean": 6.681619122195734,
+        "std": 1.1071196548390128,
+        "max": 9.939440774219722,
+        "p05": 4.602442106847584,
+        "median": 6.918299203420966,
+        "p95": 8.317099404792698,
+        "p99": 9.41393510360586
+      },
+      "requested_feed_processing_mm_s": {
+        "min": 6.0,
+        "mean": 6.0,
+        "std": 0.0,
+        "max": 6.0,
+        "p05": 6.0,
+        "median": 6.0,
+        "p95": 6.0,
+        "p99": 6.0
+      },
+      "scheduled_feed_processing_mm_s": {
+        "min": 5.978039109060636,
+        "mean": 5.99996191576903,
+        "std": 0.000652124018511146,
+        "max": 5.999999999999989,
+        "p05": 5.999999999999989,
+        "median": 5.999999999999989,
+        "p95": 5.999999999999989,
+        "p99": 5.999999999999989
+      },
+      "recorded_tcp_speed_processing_mm_s": {
+        "min": 0.0,
+        "mean": 5.602026853864304,
+        "std": 13.129905894954097,
+        "max": 151.72013902509957,
+        "p05": 0.0,
+        "median": 0.0,
+        "p95": 36.9667456974246,
+        "p99": 58.15052035564389
+      },
+      "recorded_zero_tcp_speed_processing_percent": 79.29384017758046,
+      "unchanged_tcp_rows_percent": 79.3126960316378,
+      "observed_tcp_change_interval_control_s": {
+        "min": 0.007999999999995566,
+        "mean": 0.038665347840422026,
+        "std": 0.02266076993218815,
+        "max": 0.08799999999999386,
+        "p05": 0.007999999999995566,
+        "median": 0.03999999999999204,
+        "p95": 0.0799999999999983,
+        "p99": 0.0800000000000054
+      },
+      "shield_whole_s": 0.6960000000000001,
+      "shield_processing_s": 0.0,
+      "fault_rows": 0,
+      "progression_blocked_rows": 3,
+      "progression_blocked_after_entry_rows": 0,
+      "action_not_fresh_rows": 16,
+      "action_not_fresh_after_received_rows": 13,
+      "action_age_received_s": {
+        "min": 8.173e-05,
+        "mean": 0.01686339612514492,
+        "std": 0.008203541272430897,
+        "max": 0.063548164,
+        "p05": 0.008358385900000001,
+        "median": 0.010362026,
+        "p95": 0.0273964991,
+        "p99": 0.0303381433
+      },
+      "action_age_over_250ms_rows": 0,
+      "inference_latency_on_decision_rows_ms": {
+        "min": 0.42447099986020476,
+        "mean": 0.7263123783461467,
+        "std": 0.1695089060884907,
+        "max": 2.2520309994433774,
+        "p05": 0.4911668009299319,
+        "median": 0.7660739993298193,
+        "p95": 0.9316875997683383,
+        "p99": 1.0020210001675873
+      },
+      "duplicate_sim_clock_rows": 1,
+      "duplicate_sim_clock_control_times_s": [
+        0.016
+      ],
+      "sim_clock_duration_s": 117.32000557199997,
+      "control_tick_duration_s": 117.328,
+      "zero_depth_processing_roi_percent": 8.836920867535945,
+      "base_wrench_hold": {
+        "unchanged_adjacent_rows_percent": 25.71253238783581,
+        "hold_duration_control_s": {
+          "min": 0.008,
+          "mean": 0.010768976594768245,
+          "std": 0.003807404612628101,
+          "max": 0.024,
+          "p05": 0.008,
+          "median": 0.008,
+          "p95": 0.016,
+          "p99": 0.016
+        },
+        "recorded_vector_segments": 10895,
+        "longest_hold_start_s": 0.0,
+        "interpretation": "Exact repeated base-frame six-axis wrench values seen by the controller; not a direct measurement of sensor message age."
+      }
+    }
+  },
+  "comparison": {
+    "spatial_cv_improvement_percent": 9.895109873097951,
+    "processing_extra_time_s": 22.175999999999988,
+    "processing_volume_per_time_change_percent": 0.5553499395783312,
+    "force_rmse_change_percent": 26.76104871470699,
+    "nominal_headless_cv_improvement_percent": 11.149604204830998,
+    "gui_minus_headless_improvement_percentage_points": -1.2544943317330475,
+    "initialization_equivalence_verified": false
+  },
+  "aborted_mode6": {
+    "run": "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134219_424942",
+    "excluded_from_completed_pair": true,
+    "valid_completed_run": false,
+    "recorded_control_duration_s": 2.464,
+    "first_fault": {
+      "error": "Controller fault or invalid/over-limit contact force",
+      "checkpoint_sha256": "8e666770e9c8530305cc61b0ffe74439510b815425431339db27b19d1cfb89c8",
+      "telemetry": {
+        "schema": 2.0,
+        "epoch": 1.0,
+        "sequence": 293.0,
+        "simulation_time_s": 292.952013914,
+        "cursor_mm": 4.098513394629548,
+        "path_length_mm": 697.5332572808865,
+        "frontier_mm": 4.098513394629548,
+        "reverse_mm": 0.0,
+        "target_force_n": 20.0,
+        "return_allowed": 0.0,
+        "elapsed_s": 2.3440000000000016,
+        "shield": 1.0,
+        "fault": 1.0,
+        "actual_speed_mm_s": 0.0,
+        "tracking_error_mm": 7.878379679554957,
+        "tcp_x_mm": 868.386877697835,
+        "tcp_y_mm": 343.1191562091045,
+        "tcp_z_mm": 92.13208552562075,
+        "normal_x": -0.0048666085546571515,
+        "normal_y": -0.0021849556550467596,
+        "normal_z": 0.9999857709437475,
+        "normal_force_n": 238.6552803778747,
+        "done": 0.0
+      }
+    },
+    "max_recorded_force_n": 238.7917783602798,
+    "minimum_tcp_z_mm": 91.81009424833151,
+    "base_wrench_hold": {
+      "unchanged_adjacent_rows_percent": 95.45454545454545,
+      "hold_duration_control_s": {
+        "min": 0.008,
+        "mean": 0.17600000000000002,
+        "std": 0.1324235628579748,
+        "max": 0.392,
+        "p05": 0.008,
+        "median": 0.188,
+        "p95": 0.3764,
+        "p99": 0.38888
+      },
+      "recorded_vector_segments": 14,
+      "longest_hold_start_s": 1.304,
+      "interpretation": "Exact repeated base-frame six-axis wrench values seen by the controller; not a direct measurement of sensor message age."
+    },
+    "saved_home_matches_completed_mode6": true,
+    "first_tcp_pose_matches_completed_mode6": true,
+    "direct_stop_reason": "Normal force 238.655 N exceeded the controller hard force stop of 100 N; fault bit 1 latched, then policy exited and launch shut down.",
+    "root_cause": "Not established. Aborted controller wrench samples are held up to 392 ms (completed runs: 16/24 ms), consistent with delayed input refresh. Sensor message source stamps and receipt times were not recorded, so the location and cause of the delay cannot be established. Saved home and first TCP match the successful Mode 6 at logged precision."
+  },
+  "interpretation_limits": [
+    "One completed trial per mode; no repeated-trial confidence interval.",
+    "Removal is an uncalibrated fixed-footprint rotating Preston estimate (1000 RPM), not measured material volume.",
+    "Approximately 80% of adjacent TCP snapshots repeat. Apparent 8 ms finite-difference speed spikes do not by themselves establish physical acceleration.",
+    "Joint-state message receipt times and source stamps are not in this CSV; observed TCP change interval is not a measurement of publisher frequency.",
+    "Mode 6 contains one duplicated simulation timestamp. The official estimator uses control-index 8 ms time.",
+    "Pinned steady v3 configuration is identical, but its applied correction topic was not saved in these CSV files."
+  ],
+  "input_sha256": {
+    "/home/eunseop/nrs_rl/logs/polishing_results/final11p15_gui_20261014_pair01/comparison.json": "bd9a0c5280290b3fbd146bdee0040e89c3a9b529a0efba6125bee235bd11d2e3",
+    "/home/eunseop/nrs_rl/logs/polishing_results/final11p15_gui_20261014_pair01/artifact_manifest.json": "9c3412ae45b03b625067ba8fe89cd076335e7fae6bcb735b3f752a0462e6f016",
+    "/home/eunseop/nrs_rl/logs/polishing_results/final11p15_gui_20261014_pair01/mode5/policy.csv": "c6701e574b9b39e479fd5c14c1c9c8d1e182dfc8bc04bfb1bd302b26e7326a65",
+    "/home/eunseop/nrs_rl/logs/polishing_results/final11p15_gui_20261014_pair01/mode5/control_active.csv": "cbd190ab02c93fc5d93b15b8b5fa8fc10641b774069ae1e9753d755bc4dc4fed",
+    "/home/eunseop/nrs_rl/logs/polishing_results/final11p15_gui_20261014_pair01/mode5/summary.json": "c9568b13a00757ec87465ecf2890ee18c9f85beaae551866ed309169e8eb6b87",
+    "/home/eunseop/nrs_rl/logs/polishing_results/final11p15_gui_20261014_pair01/mode6/policy.csv": "ca4924cc6df845e378a8f341ac60290813ff10b80ff618c42c8946ae39801b1a",
+    "/home/eunseop/nrs_rl/logs/polishing_results/final11p15_gui_20261014_pair01/mode6/control_active.csv": "3833738e27068e23b6b01b15431a4ca8c775644e5adebffff1ae8f2ab388e4dd",
+    "/home/eunseop/nrs_rl/logs/polishing_results/final11p15_gui_20261014_pair01/mode6/summary.json": "dfa61fd62c4ab5db56f29a356d1ef6abfdcd1b0b0473ada49c3627642b971d18",
+    "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134219_424942/policy_failure.json": "cd9c24b683451d21fb8097125efbf201ed6113fd7113ec26e3372914c1997b59",
+    "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134219_424942/removal/session_20261014_134225_797132/summary.json": "3a5ef3d2ec8ce20b248c680f2ef703d0cd8cfc67f140af0d4e1c366a9cdb6b99",
+    "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134219_424942/removal/session_20261014_134225_797132/telemetry.csv": "905c4e910e1bfc7b4fc58db7d7616b74c758c479d7c65ab53b051068363e84bb",
+    "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134219_424942/raw.csv": "8a15382c5e096ec80c6997e94398847539d939f97bf27ea1ae9f51dbf252e003",
+    "/home/eunseop/.ros/log/singleArm_cmd_144910_1791952941821.log": "702242b21f57bdec41e25db4823315e31ceec81d818f74296c4267aecbb72df6",
+    "/home/eunseop/.ros/log/singleArm_motion_144908_1791952941780.log": "f26a8590199c330b4116105c843d7651eda2ce7e93c2ae5472af4a72a53176c8"
+  }
+}

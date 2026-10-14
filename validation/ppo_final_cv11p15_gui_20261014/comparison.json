@@ -1,0 +1,189 @@
+{
+  "created_at": "2026-10-14T13:50:18.045608+09:00",
+  "checkpoint_sha256": "8e666770e9c8530305cc61b0ffe74439510b815425431339db27b19d1cfb89c8",
+  "comparison_baseline": "Mode 6 GUI at 20 N / 6 mm/s / virtual 1000 RPM",
+  "primary_mode5_selection": "Explicit --mode5 input; this analysis does not search for the best run",
+  "comparison": {
+    "processing": {
+      "mode5": {
+        "spatial_depth_cv": 0.49808789857266045,
+        "roi_volume_over_k": 2718159.3630512967,
+        "processing_time_s": 137.504,
+        "raw_rate_cv": 0.031182657284796172
+      },
+      "mode6": {
+        "spatial_depth_cv": 0.5527867553816033,
+        "roi_volume_over_k": 2267196.4992294833,
+        "processing_time_s": 115.328,
+        "raw_rate_cv": 0.024547492623740327
+      },
+      "change_percent_vs_mode6": {
+        "spatial_depth_cv": -9.895109873097951,
+        "roi_volume_over_k": 19.89077100176695,
+        "processing_time_s": 19.228634850166458,
+        "raw_rate_cv": 27.029907953364063
+      },
+      "spatial_cv_improvement_percent_vs_mode6": 9.895109873097951,
+      "removal_retention_percent_vs_mode6": 119.89077100176694,
+      "volume_at_least_half_mode6": true
+    },
+    "full": {
+      "mode5": {
+        "spatial_depth_cv": 0.4939656895260825,
+        "roi_volume_over_k": 2937544.9272987633,
+        "processing_time_s": 139.50399999998663
+      },
+      "mode6": {
+        "spatial_depth_cv": 0.5420327830624424,
+        "roi_volume_over_k": 2483216.1016796627,
+        "processing_time_s": 117.32799999997849
+      },
+      "change_percent_vs_mode6": {
+        "spatial_depth_cv": -8.867931062173884,
+        "roi_volume_over_k": 18.29598420015841,
+        "processing_time_s": 18.90085912997086
+      },
+      "spatial_cv_improvement_percent_vs_mode6": 8.867931062173884,
+      "removal_retention_percent_vs_mode6": 118.29598420015841,
+      "volume_at_least_half_mode6": true
+    }
+  },
+  "entry_protocol": {
+    "seconds": 2.0,
+    "reference_footprint_mm": 18.0,
+    "zero_depth_cells_retained": true
+  },
+  "matching": {
+    "configuration_and_pinned_files_match": true,
+    "pinned_files_verified": 34,
+    "measurement_model_and_grid_match": true,
+    "target_force_fixed_20n_both_modes": true,
+    "mode6_learned_actions_not_applied": true,
+    "home_position_delta_mm": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "home_position_distance_mm": 0.0,
+    "force_entry_position_distance_mm": 0.02061999999141732,
+    "exact_initial_state_match_verified": false
+  },
+  "runs": {
+    "mode5": {
+      "run_directory": "/home/eunseop/evaluation/rl_best/ppo_final11p15_20261014_133504_283396",
+      "session_directory": "/home/eunseop/evaluation/rl_best/ppo_final11p15_20261014_133504_283396/removal/session_20261014_133531_802491",
+      "command_log": "/home/eunseop/.ros/log/singleArm_cmd_135149_1791952509560.log",
+      "valid_completed_processing_run": true,
+      "home_return_completed": true,
+      "saved_home_mm_rad": [
+        864.570887,
+        346.971606,
+        164.366774,
+        0.000407,
+        0.001743,
+        1.570796
+      ],
+      "samples": 17438,
+      "missing_control_ticks": 0,
+      "policy_missing_samples": 0,
+      "hard_fault_samples": 0,
+      "reverse_mm": 0.0,
+      "target_force_min_max_n": [
+        20.0,
+        20.0
+      ],
+      "requested_feed_min_max_mm_s": [
+        1.5021947622299194,
+        11.981714844703674
+      ],
+      "cursor_mm": 697.5332572808865,
+      "whole_active_duration_s": 139.504,
+      "force_entry_pose_mm": [
+        870.6769798362158,
+        340.1989255342365,
+        99.8594580155587
+      ],
+      "measured_force_mean_after_entry_n": 19.965091341325987,
+      "action_age_max_s": 0.062553236,
+      "action_age_over_250ms_samples": 0,
+      "worker_latency_p99_ms": 0.9138115705536621,
+      "raw_active_window_matches_telemetry": true,
+      "replayed_summary_matches": true,
+      "replayed_arrays_max_errors": {
+        "surface": 0.0,
+        "processing_surface": 0.0,
+        "derived_signals": 0.0
+      },
+      "source_hashes": {
+        "/home/eunseop/evaluation/rl_best/ppo_final11p15_20261014_133504_283396/deployment.json": "38175935388cb1cf38ba56cb122d538f2c09df576916407489270e718e5f0db9",
+        "/home/eunseop/evaluation/rl_best/ppo_final11p15_20261014_133504_283396/policy.csv": "c6701e574b9b39e479fd5c14c1c9c8d1e182dfc8bc04bfb1bd302b26e7326a65",
+        "/home/eunseop/evaluation/rl_best/ppo_final11p15_20261014_133504_283396/removal/session_20261014_133531_802491/telemetry.csv": "467124645053966fa5d6fdd90e83e23a5ab8a33047a9d13ab1aa75b1a5b03928",
+        "/home/eunseop/evaluation/rl_best/ppo_final11p15_20261014_133504_283396/removal/session_20261014_133531_802491/summary.json": "c9568b13a00757ec87465ecf2890ee18c9f85beaae551866ed309169e8eb6b87",
+        "/home/eunseop/evaluation/rl_best/ppo_final11p15_20261014_133504_283396/removal/session_20261014_133531_802491/surface.npz": "52f23f7e5828185fe64ac7123fe5cd4dbe4460e51480362ffe22ff3989964986",
+        "/home/eunseop/evaluation/rl_best/ppo_final11p15_20261014_133504_283396/removal/session_20261014_133531_802491/processing_surface.npz": "730f8be1ee20182bf2257f9ac3950cea22c82283482f4cc1e998b634d4a7bf4c",
+        "/home/eunseop/evaluation/rl_best/ppo_final11p15_20261014_133504_283396/removal/session_20261014_133531_802491/derived_signals.npz": "9736216e00e362f6bc1333f560a1dd96b96f6adc03ea5247ee855e4d36528194"
+      }
+    },
+    "mode6": {
+      "run_directory": "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516",
+      "session_directory": "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/removal/session_20261014_134421_523481",
+      "command_log": "/home/eunseop/.ros/log/singleArm_cmd_147720_1791953058589.log",
+      "valid_completed_processing_run": true,
+      "home_return_completed": true,
+      "saved_home_mm_rad": [
+        864.570887,
+        346.971606,
+        164.366774,
+        0.000407,
+        0.001743,
+        1.570796
+      ],
+      "samples": 14666,
+      "missing_control_ticks": 0,
+      "policy_missing_samples": 0,
+      "hard_fault_samples": 0,
+      "reverse_mm": 0.0,
+      "target_force_min_max_n": [
+        20.0,
+        20.0
+      ],
+      "requested_feed_min_max_mm_s": [
+        6.0,
+        6.0
+      ],
+      "cursor_mm": 697.5332572808865,
+      "whole_active_duration_s": 117.328,
+      "force_entry_pose_mm": [
+        870.6877330209618,
+        340.1813314077415,
+        99.85944659881832
+      ],
+      "measured_force_mean_after_entry_n": 20.01415571983036,
+      "action_age_max_s": 0.063548164,
+      "action_age_over_250ms_samples": 0,
+      "worker_latency_p99_ms": 0.9083539500352344,
+      "raw_active_window_matches_telemetry": true,
+      "replayed_summary_matches": true,
+      "replayed_arrays_max_errors": {
+        "surface": 0.0,
+        "processing_surface": 0.0,
+        "derived_signals": 0.0
+      },
+      "source_hashes": {
+        "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/deployment.json": "9355fddd53db86735cae429e5cc8da2e9bcc76777b36bc11e16be17cfe949e8e",
+        "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/policy.csv": "ca4924cc6df845e378a8f341ac60290813ff10b80ff618c42c8946ae39801b1a",
+        "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/removal/session_20261014_134421_523481/telemetry.csv": "2a77e1ad2c2f04047561c12004ec75e646c29b2b8507abdcbdfe2590f410c525",
+        "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/removal/session_20261014_134421_523481/summary.json": "dfa61fd62c4ab5db56f29a356d1ef6abfdcd1b0b0473ada49c3627642b971d18",
+        "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/removal/session_20261014_134421_523481/surface.npz": "cf1a85416bf37a462970b3743ad934af26a2f5d21350ab58cecc4dd5ec1cc46c",
+        "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/removal/session_20261014_134421_523481/processing_surface.npz": "5695d07d1431cc924dba4e613ad506e33553ad8d24235cf122880c7ad74c986b",
+        "/home/eunseop/evaluation/rl_no_speed_modulation/ppo_final11p15_20261014_134415_974516/removal/session_20261014_134421_523481/derived_signals.npz": "e385a601c1ba26c36562183be042f7e8141159c08cb117950a3d1c13dc5a6b4a"
+      }
+    }
+  },
+  "limits": [
+    "One primary GUI run per mode; repeated paired trials are not yet available.",
+    "Saved home positions match at recorded precision; exact scene/physics reset equality is not logged.",
+    "Removal is the uncalibrated rotating-disk Preston estimate, not physically measured volume.",
+    "Spatial final-depth CV and temporal instantaneous-rate CV are separate metrics."
+  ]
+}
