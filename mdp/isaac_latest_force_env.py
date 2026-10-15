@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from .agents.latest_force_ppo import CONTRACT, check_contract
+from .spike_dose_reward import PathAdvance, SpikeDoseReward
 from ..utils.rotary_geometry import FixedForceGeometry
 from ..utils.removal_metrics import processing_mask
 from ..paths import REFERENCE
@@ -14,7 +15,8 @@ from ..paths import REFERENCE
 
 class IsaacLatestForceEnv:
     def __init__(self, count, seed, native, controller_snapshot, output, reward_cell_mm=.5,
-                 gui_scene=None, reward_forecast=None, nominal_sensors=False):
+                 gui_scene=None, reward_forecast=None, nominal_sensors=False, *, steady_gain=0.,
+                 spike_reward_config=None):
         import gymnasium as gym
         from isaaclab_tasks.utils import parse_env_cfg
         from isaaclab.utils.io import dump_yaml
@@ -32,6 +34,13 @@ class IsaacLatestForceEnv:
         if gui_scene is not None:
             from .isaac_gui_scene import configure_scene
             self.scene_profile = configure_scene(cfg, gui_scene, randomize=not nominal_sensors)
+        if steady_gain:
+            from .robot_geometry import audit_scene_geometry
+            from .steady_postcore import SteadyPostCore, experimental_contract
+            (output / 'robot_geometry_audit.json').write_text(
+                json.dumps(audit_scene_geometry(gui_scene), indent=2))
+            (output / 'controller_experiment.json').write_text(
+                json.dumps(experimental_contract(steady_gain), indent=2))
         cfg.log_dir = str(output)
         integration = cfg.actions.arm_action.integration
         if nominal_sensors:
@@ -49,10 +58,17 @@ class IsaacLatestForceEnv:
         assert validation['tangent_damping_ns_m'] == 6000.
         assert validation['tangent_stiffness_n_m'] == 2000.
         original = action_module.y2_pb.Mode3ForceController
+        self.steady_controllers = []
         def make_controller(*values):
             values = list(values)
             values[0] = str(controller_snapshot / 'Y2ForceCon/src/checkpoints/NAF_MDGradi/NAF_mdGradi_policy_script.pt')
-            return TangentialMode3(*values, 6000., 2000.)
+            controller = TangentialMode3(*values, 6000., 2000.)
+            if steady_gain:
+                index = len(self.steady_controllers)
+                controller = SteadyPostCore(controller, steady_gain)
+                controller.bind_context(lambda index=index: self.steady_context(index))
+                self.steady_controllers.append(controller)
+            return controller
         action_module.y2_pb.Mode3ForceController = make_controller
         try:
             self.env = gym.make('Template-Nrs-Rl-v0', cfg=cfg)
@@ -98,10 +114,28 @@ class IsaacLatestForceEnv:
         self.episode_reward = np.zeros(count)
         self.previous_action = np.zeros(count)
         self.potential = np.zeros(count)
+        self.spike_rewards = ([SpikeDoseReward(spike_reward_config) for _ in range(count)]
+                              if spike_reward_config is not None else None)
+        self.path_advance = PathAdvance(self.fine_geometry.positions) if self.spike_rewards is not None else None
+        self.spike_step_reward = np.zeros(count)
+        self.spike_step_event = np.zeros(count, dtype=bool)
+        self.spike_collect = np.zeros(count, dtype=bool)
         self.term._record_visualization = self.capture
         self.env.reset(seed=seed)
+        if steady_gain:
+            from .robot_geometry import audit_live_geometry
+            (output / 'live_robot_geometry_audit.json').write_text(
+                json.dumps(audit_live_geometry(self.term), indent=2))
         for i in range(count):
             self.clear(i)
+
+    def steady_context(self, i):
+        term = self.term
+        return {'fault': bool(term.safety_terminated[i]) or bool(term.safety_fault_reason[i]),
+                'approach': bool(term._approach_step[i] < term._approach_steps),
+                'progression_allowed': bool(term.polishing_active[i]) and not bool(term.path_done[i]),
+                'normal_force_n': float(term.current_abs_fz[i]),
+                'tracking_error_mm': float(term.current_path_tracking_error_mm[i])}
 
     def reset_batch(self):
         """Start fresh training episodes at a rollout boundary."""
@@ -120,12 +154,25 @@ class IsaacLatestForceEnv:
         self.episode_reward[i] = 0.
         self.previous_action[i] = 0.
         self.potential[i] = self.predicted(i)
+        if self.spike_rewards is not None:
+            self.spike_rewards[i].reset()
+
+    def record_spike_reward(self, i, force, volume, advance, contact):
+        if self.spike_rewards is None or not self.spike_collect[i]:
+            return
+        result = self.spike_rewards[i].update(
+            force, volume, advance, contact=contact,
+            shield=bool(self.term.safety_shield_active[i]))
+        self.spike_step_reward[i] += result.reward
+        self.spike_step_event[i] |= result.event
 
     def capture(self, i, pose, normal_force):
         point = pose.detach().cpu().numpy().copy()
         previous = self.previous[i]
         self.previous[i] = point[:3].copy()
         if not bool(self.term.polishing_active[i]):
+            if not bool(self.term.path_done[i]):
+                self.record_spike_reward(i, abs(float(normal_force)), 0., 0., False)
             return
         delta = np.zeros(3) if previous is None else point[:3] - previous
         delta[2] = 0.
@@ -134,8 +181,12 @@ class IsaacLatestForceEnv:
         midpoint = point[:3] - .5 * delta
         force = abs(float(normal_force))
         contact = force >= 1.5 and int(self.term.safety_fault_reason[i]) == 0
+        volume_before = self.fine[i].integrated_volume
         for surface in (self.surface[i], self.fine[i]):
             surface.deposit(midpoint, velocity, force, .008, contact=contact)
+        if self.spike_rewards is not None:
+            advance = self.path_advance.project(delta, float(self.term.path_cursor_mm[i]))
+            self.record_spike_reward(i, force, self.fine[i].integrated_volume - volume_before, advance, contact)
         if contact:
             surface = self.surface[i]
             center = (midpoint - surface.origin) @ surface.basis.T
@@ -158,10 +209,14 @@ class IsaacLatestForceEnv:
     def metrics(self, i, completed):
         values = np.maximum(self.fine[i].depth - self.entry_depth[i], 0.)[self.mask]
         full = self.fine[i].depth[self.fine[i].roi]
-        return {'cv': float(values.std() / max(float(values.mean()), 1.e-6)),
+        metrics = {'cv': float(values.std() / max(float(values.mean()), 1.e-6)),
                 'volume_ratio': float(values.sum() / self.baseline_processing),
                 'full_ratio': float(full.sum() / self.baseline_full),
                 'seconds': float(self.samples[i] * .008), 'completed': bool(completed)}
+        if self.spike_rewards is not None:
+            metrics['spike_dose'] = self.spike_rewards[i].metrics()
+            metrics['full_active_cv'] = float(full.std() / max(float(full.mean()), 1.e-6))
+        return metrics
 
     def observation(self):
         t = self.term
@@ -183,6 +238,9 @@ class IsaacLatestForceEnv:
         records = [None] * self.count
         terminal = np.zeros(self.count)
         episode_returns = np.zeros(self.count)
+        self.spike_step_reward.fill(0.)
+        self.spike_step_event.fill(False)
+        self.spike_collect.fill(True)
         for _ in range(10):
             _, _, terminated, truncated, _ = self.env.step(action[:, None])
             finished = (terminated | truncated).cpu().numpy() & ~done
@@ -191,18 +249,27 @@ class IsaacLatestForceEnv:
                 records[i] = self.metrics(i, completed)
                 terminal[i] = self.predicted(i, terminal=True)
                 episode_returns[i] = self.episode_reward[i]
+                # A 10-tick action repeat can include auto-reset samples. Keep
+                # only this transition's terminating episode in the new reward.
+                self.spike_collect[i] = False
                 self.clear(i)
             done |= finished
         potential = np.array([self.predicted(i) for i in range(self.count)])
         current = np.where(done, terminal, potential)
         reward = 100. * (previous - current) - .0001 * .08
-        reward -= 1.e-5 * np.square(action.cpu().numpy() - previous_action)
+        smoothness = np.ones(self.count)
+        if self.spike_rewards is not None:
+            smoothness[self.spike_step_event] = self.spike_rewards[0].config.event_action_smoothness_scale
+            reward += self.spike_step_reward
+        reward -= 1.e-5 * smoothness * np.square(action.cpu().numpy() - previous_action)
         self.previous_action = action.cpu().numpy().copy()
         self.previous_action[done] = 0.
         for i in np.flatnonzero(done):
             row = records[i]
             violation = max(0., .5 - row['volume_ratio'], .5 - row['full_ratio'])
-            reward[i] -= 100. * violation ** 2 + 20. * (not row['completed'])
+            incomplete_penalty = (self.spike_rewards[i].config.incomplete_penalty
+                                  if self.spike_rewards is not None else 20.)
+            reward[i] -= 100. * violation ** 2 + incomplete_penalty * (not row['completed'])
             row['episode_reward'] = float(episode_returns[i] + reward[i])
         self.episode_reward += np.where(done, 0., reward)
         self.potential = potential

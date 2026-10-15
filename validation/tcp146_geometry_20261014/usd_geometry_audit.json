@@ -1,0 +1,27 @@
+{
+  "robot_usd": "/home/eunseop/nrs_rl/logs/experiments/ppo_latest_force_retrain_20261012/gui_scene/robot.usdc",
+  "robot_sha256": "03a77d17a68d72a341dcfbdd0a68e9984725420f62aa0aee412d0a5a2189c1d3",
+  "center_in_tool0_mm": [
+    -6.560830767554648e-07,
+    -2.6804529706936364e-06,
+    134.00000333786005
+  ],
+  "contact_face_in_tool0_mm": [
+    -7.14836784555507e-07,
+    -2.9204935230280827e-06,
+    146.00000344216818
+  ],
+  "height_mm": 24.000000208616257,
+  "usd_modified": false,
+  "ur10e_contact_face_fk_error_mm": 0.00029073971014924397,
+  "usd_contact_face_in_base_mm": [
+    869.848399900265,
+    339.91125621091146,
+    164.33282814588895
+  ],
+  "ur10e_contact_face_in_base_mm": [
+    869.8483651898167,
+    339.9115430702872,
+    164.33279595175324
+  ]
+}

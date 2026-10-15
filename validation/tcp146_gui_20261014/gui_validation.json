@@ -1,0 +1,312 @@
+{
+  "completed_at": "2026-10-14T21:30:44.071645+09:00",
+  "status": "gui_pair_complete_and_independently_reintegrated",
+  "checkpoint_sha256": "66ce218b8d4edd7387de31eca7855451ec247ce224e2b179de1da363d73fb8c0",
+  "robot_geometry": {
+    "robot_kinematics": "ur10e",
+    "tcp_length_mm": 146.0,
+    "ee2tcp": [
+      [
+        -1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        -1.0,
+        146.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "config_path": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_retrain_20261014/isaac_ur10e_robot.yaml",
+    "config_sha256": "1c70fea2130dfe2c19154a5086ae278c05ec07d63dafbe97a68af6cbe951188a",
+    "reference_frame": "/Robot/wrist_3_link/flange/tool0",
+    "contact_prim": "/Robot/spindle_link/collisions/mesh_3/cylinder"
+  },
+  "headless": false,
+  "ros_domain_id": 181,
+  "runs_per_mode": 1,
+  "source_usd": "/home/eunseop/isaac/isaac_save/ur10e_v6.usd",
+  "source_usd_sha256": "7314969427068562bf9cd8f1e9fa09962b8ae06b48b9a33af103ade0cbb30248",
+  "source_usd_modified": false,
+  "comparison": {
+    "processing": {
+      "mode5": {
+        "spatial_depth_cv": 0.45104394941332765,
+        "roi_volume_over_k": 2605621.4346782123,
+        "processing_time_s": 131.38400000000001,
+        "raw_rate_cv": 0.01165333835957161
+      },
+      "mode6": {
+        "spatial_depth_cv": 0.5084465097697439,
+        "roi_volume_over_k": 2283044.9729999714,
+        "processing_time_s": 114.648,
+        "raw_rate_cv": 0.015019182219565552
+      },
+      "change_percent_vs_mode6": {
+        "spatial_depth_cv": -11.289793371265688,
+        "roi_volume_over_k": 14.129220645810081,
+        "processing_time_s": 14.597725211080892,
+        "raw_rate_cv": -22.410300446380116
+      },
+      "spatial_cv_improvement_percent_vs_mode6": 11.289793371265688,
+      "removal_retention_percent_vs_mode6": 114.12922064581008,
+      "volume_at_least_half_mode6": true
+    },
+    "full": {
+      "mode5": {
+        "spatial_depth_cv": 0.4545548363712157,
+        "roi_volume_over_k": 2791998.2180227186,
+        "processing_time_s": 133.38399999997915
+      },
+      "mode6": {
+        "spatial_depth_cv": 0.5115407824790279,
+        "roi_volume_over_k": 2441405.9124156097,
+        "processing_time_s": 116.64799999997886
+      },
+      "change_percent_vs_mode6": {
+        "spatial_depth_cv": -11.140059221015974,
+        "roi_volume_over_k": 14.360262823326298,
+        "processing_time_s": 14.347438447297268
+      },
+      "spatial_cv_improvement_percent_vs_mode6": 11.140059221015974,
+      "removal_retention_percent_vs_mode6": 114.36026282332628,
+      "volume_at_least_half_mode6": true
+    }
+  },
+  "metrics": {
+    "mode5": {
+      "spatial_depth_cv": 0.45104394941332765,
+      "roi_volume_over_k": 2605621.4346782123,
+      "mean_depth_over_k": 170.08805487724348,
+      "zero_depth_fraction": 0.04765246340388726,
+      "roi_cells": 61277,
+      "processing_time_s": 131.38400000000001,
+      "force_mean_n": 19.99804451162497,
+      "distance_mm": 838.946668345502,
+      "raw_rate_cv": 0.01165333835957161,
+      "force_rmse_n": 0.233007324709966,
+      "force_peak_n": 22.761835464631137,
+      "std_depth_over_k": 76.7171880198627,
+      "audit": {
+        "run_directory": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01",
+        "session_directory": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/removal/session_20261014_211810_647571",
+        "command_log": "/home/eunseop/.ros/log/singleArm_cmd_461199_1791980286283.log",
+        "valid_completed_processing_run": true,
+        "home_return_completed": true,
+        "saved_home_mm_rad": [
+          873.191845,
+          340.27222,
+          161.692072,
+          0.000407,
+          0.001743,
+          1.570796
+        ],
+        "samples": 16673,
+        "missing_control_ticks": 0,
+        "policy_missing_samples": 0,
+        "hard_fault_samples": 0,
+        "reverse_mm": 0.0,
+        "target_force_min_max_n": [
+          20.0,
+          20.0
+        ],
+        "requested_feed_min_max_mm_s": [
+          1.505852222442627,
+          11.977097511291504
+        ],
+        "cursor_mm": 697.5332572808865,
+        "whole_active_duration_s": 133.38400000000001,
+        "force_entry_pose_mm": [
+          870.7185329529717,
+          339.91805004396343,
+          99.4956507637963
+        ],
+        "measured_force_mean_after_entry_n": 19.99804451162497,
+        "action_age_max_s": 0.08091954,
+        "action_age_over_250ms_samples": 0,
+        "worker_latency_p99_ms": 3.1266366419731506,
+        "raw_active_window_matches_telemetry": true,
+        "replayed_summary_matches": true,
+        "replayed_arrays_max_errors": {
+          "surface": 0.0,
+          "processing_surface": 0.0,
+          "derived_signals": 0.0
+        },
+        "source_hashes": {
+          "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/deployment.json": "2b01fed980f10e072cdb9f5b5bd6367514dbb8e84caf19c33a7752e2d50f9fd7",
+          "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/policy.csv": "1a22bcc90d05e819f1b7e867a157725b236bb096455071a17b70f8da16a288d7",
+          "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/removal/session_20261014_211810_647571/telemetry.csv": "109786f1d6f7b179795c96578d018970b16dea89c65122636f314214b9350257",
+          "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/removal/session_20261014_211810_647571/summary.json": "1750893110c241516bcfce23dc12aff38e1e70ec57254f3228217b7ad454e0ce",
+          "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/removal/session_20261014_211810_647571/surface.npz": "198579dc9b76bfad27c1eeeaef9719796e507c2e76897f9301e925a3abf5dd6c",
+          "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/removal/session_20261014_211810_647571/processing_surface.npz": "897ef5062c63c7dc7e065346885040d566422e528368bc0ecf3b6de4c0ff2aca",
+          "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/removal/session_20261014_211810_647571/derived_signals.npz": "45084169602f8b6602d5b0cc44bb96efcdea588bd323abfae90130e6b5cfd980"
+        }
+      }
+    },
+    "mode6": {
+      "spatial_depth_cv": 0.5084465097697439,
+      "roi_volume_over_k": 2283044.9729999714,
+      "mean_depth_over_k": 149.0311192127533,
+      "zero_depth_fraction": 0.052629861122443986,
+      "roi_cells": 61277,
+      "processing_time_s": 114.648,
+      "force_mean_n": 19.997395144193174,
+      "distance_mm": 819.592502870864,
+      "raw_rate_cv": 0.015019182219565552,
+      "force_rmse_n": 0.2998291858525837,
+      "force_peak_n": 23.22689141089737,
+      "std_depth_over_k": 75.77435241080305,
+      "audit": {
+        "run_directory": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01",
+        "session_directory": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/removal/session_20261014_212352_156661",
+        "command_log": "/home/eunseop/.ros/log/singleArm_cmd_465095_1791980627355.log",
+        "valid_completed_processing_run": true,
+        "home_return_completed": true,
+        "saved_home_mm_rad": [
+          873.191845,
+          340.27222,
+          161.692072,
+          0.000407,
+          0.001743,
+          1.570796
+        ],
+        "samples": 14581,
+        "missing_control_ticks": 0,
+        "policy_missing_samples": 0,
+        "hard_fault_samples": 0,
+        "reverse_mm": 0.0,
+        "target_force_min_max_n": [
+          20.0,
+          20.0
+        ],
+        "requested_feed_min_max_mm_s": [
+          6.0,
+          6.0
+        ],
+        "cursor_mm": 697.5332572808865,
+        "whole_active_duration_s": 116.648,
+        "force_entry_pose_mm": [
+          870.7185329529717,
+          339.91805004396343,
+          99.4956507637963
+        ],
+        "measured_force_mean_after_entry_n": 19.997395144193174,
+        "action_age_max_s": 0.07678553,
+        "action_age_over_250ms_samples": 0,
+        "worker_latency_p99_ms": 2.9738630008068925,
+        "raw_active_window_matches_telemetry": true,
+        "replayed_summary_matches": true,
+        "replayed_arrays_max_errors": {
+          "surface": 0.0,
+          "processing_surface": 0.0,
+          "derived_signals": 0.0
+        },
+        "source_hashes": {
+          "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/deployment.json": "907a385c6db76f24d2e65206e1f4a711a2c91ce074b52b909d13295e98e9482b",
+          "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/policy.csv": "edd3a6cdb8b73ed3e8804b0e54ecd4ea437e8ce90f3cb95d42c1cab0459d92f5",
+          "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/removal/session_20261014_212352_156661/telemetry.csv": "196bccbb41bb642e1e006e55c01c3eff15ded9bf43209ebff996f136488dd1cd",
+          "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/removal/session_20261014_212352_156661/summary.json": "c92b8517f4ea63890fbf0f7c70970a4c2a9ec12c64a1ef10bdc5a11bff57ee0c",
+          "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/removal/session_20261014_212352_156661/surface.npz": "d0da407a1a8f543ba18b285b6e1e396a8bf99312ae43310b7d5cc106095bdda1",
+          "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/removal/session_20261014_212352_156661/processing_surface.npz": "2a18fd331e6be8bdc31fcb817962229b0ef514c19f8d9f9ed39f8c439f560329",
+          "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/removal/session_20261014_212352_156661/derived_signals.npz": "b1bf4e0b0ec677bb661402c61cc32f017c47ae458cd3dcec686a48c5891f98c5"
+        }
+      }
+    }
+  },
+  "initial_state": {
+    "maximum_mode5_mode6_difference": {
+      "joint_positions_rad": 0.0,
+      "joint_velocities_rad_s": 0.0,
+      "contact_face_world_mm": 0.0
+    },
+    "logged_initial_joint_state_equal": true,
+    "all_hidden_physics_state_equality_proven": false,
+    "home_pose_position_distance_mm": 0.0,
+    "force_entry_position_distance_mm": 0.0,
+    "pre_run_ros_tcp_contact_face_error_mm": {
+      "5": 0.028603126534130333,
+      "6": 0.028603126534130333
+    }
+  },
+  "runtime_regression": {
+    "5": {
+      "ok": true,
+      "checks": [
+        "actual_checkpoint_16D_scalar_action_transport",
+        "fixed_target_20N_all_ticks",
+        "forward_only_no_return_actions",
+        "motion_advances_with_fresh_policy",
+        "observed_68_9N_entry_survives_and_normal_controller_unloads",
+        "steady_v3_active_after_qualification",
+        "tangent_correction_bounded_and_normal_free",
+        "steady_v3_soft_release_on_force_band_loss",
+        "worker_loss_clears_steady_correction",
+        "dead_worker_holds_cursor",
+        "foreign_epoch_and_replayed_action_rejected",
+        "legacy_force_action_packet_rejected",
+        "fresh_action_resumes_bounded_scheduler",
+        "force_above_100N_latches_and_holds",
+        "new_trajectory_resets_policy_epoch_force_and_cursor"
+      ],
+      "private_domain": 229,
+      "actual_robot_connected": false,
+      "mode": 5,
+      "samples": 450,
+      "action_messages": 450,
+      "run": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/runtime_validation/mode5/1791980953861271376",
+      "checkpoint_sha256": "66ce218b8d4edd7387de31eca7855451ec247ce224e2b179de1da363d73fb8c0"
+    },
+    "6": {
+      "ok": true,
+      "checks": [
+        "actual_checkpoint_16D_scalar_action_transport",
+        "fixed_target_20N_all_ticks",
+        "forward_only_no_return_actions",
+        "motion_advances_with_fresh_policy",
+        "observed_68_9N_entry_survives_and_normal_controller_unloads",
+        "steady_v3_active_after_qualification",
+        "tangent_correction_bounded_and_normal_free",
+        "steady_v3_soft_release_on_force_band_loss",
+        "worker_loss_clears_steady_correction",
+        "dead_worker_holds_cursor",
+        "foreign_epoch_and_replayed_action_rejected",
+        "legacy_force_action_packet_rejected",
+        "mode6_rejects_nonconstant_applied_action",
+        "fresh_action_resumes_bounded_scheduler",
+        "force_above_100N_latches_and_holds",
+        "new_trajectory_resets_policy_epoch_force_and_cursor"
+      ],
+      "private_domain": 229,
+      "actual_robot_connected": false,
+      "mode": 6,
+      "samples": 450,
+      "action_messages": 450,
+      "run": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/runtime_validation/mode6/1791980966542339451",
+      "checkpoint_sha256": "66ce218b8d4edd7387de31eca7855451ec247ce224e2b179de1da363d73fb8c0"
+    }
+  },
+  "full_artifacts": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014",
+  "preparation_attempt_excluded": {
+    "path": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/attempts/service_response_wait",
+    "reason": "Supervisor incorrectly expected TxtLoad to respond before processing completed; fixed before the primary pair."
+  },
+  "limits": [
+    "One completed GUI run per mode.",
+    "Depth and volume are uncalibrated Preston estimates.",
+    "CV is depth standard deviation divided by mean depth."
+  ]
+}

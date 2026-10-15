@@ -1,0 +1,12 @@
+{
+  "contact_face_fk_error_mm": [
+    0.0003127121308352798,
+    0.00033430333132855594,
+    0.0001954078470589593,
+    0.00022837264987174422
+  ],
+  "maximum_error_mm": 0.00033430333132855594,
+  "tolerance_mm": 0.05,
+  "runtime_robot_kinematics": "ur10e",
+  "runtime_tcp_length_mm": 146.0
+}

@@ -1,0 +1,181 @@
+{
+  "recorded_at": "2026-10-15T17:53:10.166694+09:00",
+  "checkpoint_update": 3,
+  "checkpoint_sha256": "b11661109b4e1c8d750c7ba6f40138630804c7cc5ee148eebfce3b114540e83e",
+  "checkpoint_path": "logs/adaptive_velocity/20261015/training/rpm_policy/actor.pt",
+  "robot_kinematics": "ur10e",
+  "tcp_length_mm": 146.0,
+  "target_force_n": 20.0,
+  "nominal_rpm": 1000.0,
+  "rpm_model": {
+    "nominal_rpm": 1000.0,
+    "log_action_scale": 3.0,
+    "response_tau_s": 0.016,
+    "slew_rpm_s": 200000.0,
+    "physics_dt_s": 0.008,
+    "policy_ticks": 2,
+    "target_force_n": 20.0,
+    "pad_radius_mm": 15.0,
+    "rate_error_weight": 20.0,
+    "tail_error_weight": 80.0,
+    "tail_error_threshold": 0.1,
+    "maximum_rate_loss_s": 100.0,
+    "invalid_contact_loss_s": 100.0,
+    "spatial_cv_weight": 100.0,
+    "incomplete_penalty": 100.0,
+    "target_rate_over_k": 20943.951023931953,
+    "rpm_range": [
+      49.787068367863945,
+      20085.53692318767
+    ],
+    "range_kind": "finite numerical exploration range, not a hardware limit",
+    "spindle_dynamics": "virtual first-order response plus slew; physical USD spindle is not actuated",
+    "rate_units": "V/K per second; uncalibrated estimate",
+    "target_scope": "all measured contact including entry; pre-contact excluded"
+  },
+  "headless_evaluation": {
+    "selection_seed": 5211,
+    "selection_passed": true,
+    "heldout_seed": 5212,
+    "heldout_passed": true,
+    "metrics": {
+      "constant": {
+        "temporal_rate_cv": 0.03094021986823195,
+        "contact_cv": 0.5105997424646457,
+        "contact_seconds": 116.76,
+        "spike_relative_rmse": 0.1711077997745173,
+        "contact_volume_over_k": 2443922.064399654,
+        "mean_rate_ratio": 0.999412652432467,
+        "maximum_positive_rate_error": 0.17515785794465066,
+        "rpm_min": 1000.0,
+        "rpm_max": 1000.0
+      },
+      "feed": {
+        "temporal_rate_cv": 0.029399675135884793,
+        "contact_cv": 0.4551225679355454,
+        "contact_seconds": 131.504,
+        "spike_relative_rmse": 0.1751363232018697,
+        "contact_volume_over_k": 2753003.9076776514,
+        "mean_rate_ratio": 0.9995936947028923,
+        "maximum_positive_rate_error": 0.20113317633385508,
+        "rpm_min": 1000.0,
+        "rpm_max": 1000.0
+      },
+      "feed_rpm": {
+        "temporal_rate_cv": 0.009320911939259643,
+        "contact_cv": 0.4549173267306201,
+        "contact_seconds": 131.368,
+        "spike_relative_rmse": 0.05587667252789434,
+        "contact_volume_over_k": 2754132.7883073976,
+        "mean_rate_ratio": 1.0010418933672875,
+        "maximum_positive_rate_error": 0.0831575052013076,
+        "rpm_min": 830.3680317489196,
+        "rpm_max": 5796.6545033480115
+      }
+    },
+    "comparison": {
+      "spike_rate_rmse_reduction_pct": 68.09532625422969,
+      "temporal_rate_cv_reduction_pct": 68.29586756935733,
+      "spatial_depth_cv_reduction_vs_parent_pct": 0.04509580921383538,
+      "spatial_depth_cv_reduction_vs_mode6_pct": 10.905296478460546,
+      "contact_time_increase_vs_parent_pct": -0.10341890740965809,
+      "estimated_volume_increase_vs_parent_pct": 0.041005413272321434,
+      "late_window_rate_rmse_reductions_pct": {
+        "path85_90pct": 90.89681456397751,
+        "path98p5_100pct": 95.68301961217867
+      },
+      "maximum_positive_rate_error_reduction_pct": 58.65550044151995
+    },
+    "archive": "logs/adaptive_velocity/20261015/training"
+  },
+  "gui_evaluation": {
+    "execution": "visible Isaac Sim GUI + live ROS control; one fresh original USD stage per condition",
+    "single_trial_per_condition": true,
+    "metrics": {
+      "constant": {
+        "temporal_rate_cv": 0.04573792322834919,
+        "contact_cv": 0.5054342630374029,
+        "contact_seconds": 117.928,
+        "spike_relative_rmse": 0.2263008936560902,
+        "contact_volume_over_k": 2458207.421468359,
+        "mean_rate_ratio": 0.9953250647630922,
+        "maximum_positive_rate_error": 0.16347054962844032,
+        "rpm_min": 1000.0,
+        "rpm_max": 1000.0
+      },
+      "feed": {
+        "temporal_rate_cv": 0.04229023588647467,
+        "contact_cv": 0.45002996357340996,
+        "contact_seconds": 134.66400000000002,
+        "spike_relative_rmse": 0.2375264791891265,
+        "contact_volume_over_k": 2808776.8304162147,
+        "mean_rate_ratio": 0.9959356013611761,
+        "maximum_positive_rate_error": 0.14365139313780229,
+        "rpm_min": 1000.0,
+        "rpm_max": 1000.0
+      },
+      "feed_rpm": {
+        "temporal_rate_cv": 0.010620208473037955,
+        "contact_cv": 0.44855072588725436,
+        "contact_seconds": 134.16,
+        "spike_relative_rmse": 0.05851058909022019,
+        "contact_volume_over_k": 2812468.916928857,
+        "mean_rate_ratio": 1.0010065090209341,
+        "maximum_positive_rate_error": 0.13091532442503673,
+        "rpm_min": 872.1494923197018,
+        "rpm_max": 7400.0
+      }
+    },
+    "comparison": {
+      "spike_rate_rmse_reduction_pct": 75.3667088865355,
+      "temporal_rate_cv_reduction_pct": 74.88732741631614,
+      "spatial_depth_cv_reduction_vs_parent_pct": 0.3286975992464747,
+      "spatial_depth_cv_reduction_vs_mode6_pct": 11.254388811772953,
+      "contact_time_increase_vs_parent_pct": -0.3742648369274737,
+      "estimated_volume_increase_vs_parent_pct": 0.13144819740253944,
+      "late_window_rate_rmse_reductions_pct": {
+        "path85_90pct": 89.05187068610724,
+        "path98p5_100pct": 89.72882116624335
+      },
+      "maximum_positive_rate_error_reduction_pct": 8.865955584954243,
+      "temporal_rate_cv_reduction_vs_constant_pct": 76.78030018980976
+    },
+    "all_audits_passed": true,
+    "archive": "logs/adaptive_velocity/20261015/gui_test"
+  },
+  "definitions": {
+    "temporal_rate_cv": "std of raw full-contact instantaneous rate / mean rate",
+    "spatial_depth_cv": "std of accumulated depth in full shared reference ROI / mean depth",
+    "spike_rate_rmse": "rate/target - 1 RMSE when abs(force-20)>=1 N or abs(filtered force slew)>=8 N/s",
+    "first_contact": "first measured normal force >=1.5 N; all subsequent samples until path completion",
+    "spindle": "causal virtual dynamics with held policy action; USD spindle is not physically rotated"
+  },
+  "physical_spindle_actuated": false,
+  "display": {
+    "png3_rate_y_limits": [
+      17000.0,
+      25000.0
+    ],
+    "all_contact_samples_included_in_cv": true,
+    "archive_layout": "logs/adaptive_velocity/YYYYMMDD/{training,gui_test}"
+  },
+  "sources_sha256": {
+    "logs/adaptive_velocity/20261015/training/rpm_policy/comparison.json": "85eff54d13d29b54642d9c8fe7b1eb0bdd8d609168988bfb6e871566690e4833",
+    "logs/adaptive_velocity/20261015/gui_test/comparison.json": "1d367aebbdf7d13f2bf5227e56847056d279fff29cbe8d923a5f852cb4fa6a9e",
+    "logs/adaptive_velocity/20261015/training/ckpt3_graph_manifest.json": "0e8446e304188fc1908fc622a0c360ae9890dfd87474a7c22536efb6f1253634"
+  },
+  "commit_validation": {
+    "unit_tests": 37,
+    "result": "passed",
+    "modules": [
+      "mdp.tests.test_feed_rpm",
+      "mdp.tests.test_robot_geometry",
+      "mdp.tests.test_spike_dose_reward",
+      "mdp.tests.test_spike_ppo_retry",
+      "mdp.tests.test_spike_ppo_selection",
+      "mdp.tests.test_control_action_repeat",
+      "mdp.tests.test_removal_reward_surface"
+    ]
+  },
+  "artifact_storage": "Checkpoints and raw results remain in the local logs archive, excluded from Git."
+}

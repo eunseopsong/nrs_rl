@@ -1,0 +1,189 @@
+{
+  "created_at": "2026-10-14T21:28:37.267985+09:00",
+  "checkpoint_sha256": "66ce218b8d4edd7387de31eca7855451ec247ce224e2b179de1da363d73fb8c0",
+  "comparison_baseline": "Mode 6 GUI at 20 N / 6 mm/s / virtual 1000 RPM",
+  "primary_mode5_selection": "Explicit --mode5 input; this analysis does not search for the best run",
+  "comparison": {
+    "processing": {
+      "mode5": {
+        "spatial_depth_cv": 0.45104394941332765,
+        "roi_volume_over_k": 2605621.4346782123,
+        "processing_time_s": 131.38400000000001,
+        "raw_rate_cv": 0.01165333835957161
+      },
+      "mode6": {
+        "spatial_depth_cv": 0.5084465097697439,
+        "roi_volume_over_k": 2283044.9729999714,
+        "processing_time_s": 114.648,
+        "raw_rate_cv": 0.015019182219565552
+      },
+      "change_percent_vs_mode6": {
+        "spatial_depth_cv": -11.289793371265688,
+        "roi_volume_over_k": 14.129220645810081,
+        "processing_time_s": 14.597725211080892,
+        "raw_rate_cv": -22.410300446380116
+      },
+      "spatial_cv_improvement_percent_vs_mode6": 11.289793371265688,
+      "removal_retention_percent_vs_mode6": 114.12922064581008,
+      "volume_at_least_half_mode6": true
+    },
+    "full": {
+      "mode5": {
+        "spatial_depth_cv": 0.4545548363712157,
+        "roi_volume_over_k": 2791998.2180227186,
+        "processing_time_s": 133.38399999997915
+      },
+      "mode6": {
+        "spatial_depth_cv": 0.5115407824790279,
+        "roi_volume_over_k": 2441405.9124156097,
+        "processing_time_s": 116.64799999997886
+      },
+      "change_percent_vs_mode6": {
+        "spatial_depth_cv": -11.140059221015974,
+        "roi_volume_over_k": 14.360262823326298,
+        "processing_time_s": 14.347438447297268
+      },
+      "spatial_cv_improvement_percent_vs_mode6": 11.140059221015974,
+      "removal_retention_percent_vs_mode6": 114.36026282332628,
+      "volume_at_least_half_mode6": true
+    }
+  },
+  "entry_protocol": {
+    "seconds": 2.0,
+    "reference_footprint_mm": 18.0,
+    "zero_depth_cells_retained": true
+  },
+  "matching": {
+    "configuration_and_pinned_files_match": true,
+    "pinned_files_verified": 33,
+    "measurement_model_and_grid_match": true,
+    "target_force_fixed_20n_both_modes": true,
+    "mode6_learned_actions_not_applied": true,
+    "home_position_delta_mm": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "home_position_distance_mm": 0.0,
+    "force_entry_position_distance_mm": 0.0,
+    "exact_initial_state_match_verified": false
+  },
+  "runs": {
+    "mode5": {
+      "run_directory": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01",
+      "session_directory": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/removal/session_20261014_211810_647571",
+      "command_log": "/home/eunseop/.ros/log/singleArm_cmd_461199_1791980286283.log",
+      "valid_completed_processing_run": true,
+      "home_return_completed": true,
+      "saved_home_mm_rad": [
+        873.191845,
+        340.27222,
+        161.692072,
+        0.000407,
+        0.001743,
+        1.570796
+      ],
+      "samples": 16673,
+      "missing_control_ticks": 0,
+      "policy_missing_samples": 0,
+      "hard_fault_samples": 0,
+      "reverse_mm": 0.0,
+      "target_force_min_max_n": [
+        20.0,
+        20.0
+      ],
+      "requested_feed_min_max_mm_s": [
+        1.505852222442627,
+        11.977097511291504
+      ],
+      "cursor_mm": 697.5332572808865,
+      "whole_active_duration_s": 133.38400000000001,
+      "force_entry_pose_mm": [
+        870.7185329529717,
+        339.91805004396343,
+        99.4956507637963
+      ],
+      "measured_force_mean_after_entry_n": 19.99804451162497,
+      "action_age_max_s": 0.08091954,
+      "action_age_over_250ms_samples": 0,
+      "worker_latency_p99_ms": 3.1266366419731506,
+      "raw_active_window_matches_telemetry": true,
+      "replayed_summary_matches": true,
+      "replayed_arrays_max_errors": {
+        "surface": 0.0,
+        "processing_surface": 0.0,
+        "derived_signals": 0.0
+      },
+      "source_hashes": {
+        "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/deployment.json": "2b01fed980f10e072cdb9f5b5bd6367514dbb8e84caf19c33a7752e2d50f9fd7",
+        "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/policy.csv": "1a22bcc90d05e819f1b7e867a157725b236bb096455071a17b70f8da16a288d7",
+        "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/removal/session_20261014_211810_647571/telemetry.csv": "109786f1d6f7b179795c96578d018970b16dea89c65122636f314214b9350257",
+        "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/removal/session_20261014_211810_647571/summary.json": "1750893110c241516bcfce23dc12aff38e1e70ec57254f3228217b7ad454e0ce",
+        "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/removal/session_20261014_211810_647571/surface.npz": "198579dc9b76bfad27c1eeeaef9719796e507c2e76897f9301e925a3abf5dd6c",
+        "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/removal/session_20261014_211810_647571/processing_surface.npz": "897ef5062c63c7dc7e065346885040d566422e528368bc0ecf3b6de4c0ff2aca",
+        "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01/removal/session_20261014_211810_647571/derived_signals.npz": "45084169602f8b6602d5b0cc44bb96efcdea588bd323abfae90130e6b5cfd980"
+      }
+    },
+    "mode6": {
+      "run_directory": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01",
+      "session_directory": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/removal/session_20261014_212352_156661",
+      "command_log": "/home/eunseop/.ros/log/singleArm_cmd_465095_1791980627355.log",
+      "valid_completed_processing_run": true,
+      "home_return_completed": true,
+      "saved_home_mm_rad": [
+        873.191845,
+        340.27222,
+        161.692072,
+        0.000407,
+        0.001743,
+        1.570796
+      ],
+      "samples": 14581,
+      "missing_control_ticks": 0,
+      "policy_missing_samples": 0,
+      "hard_fault_samples": 0,
+      "reverse_mm": 0.0,
+      "target_force_min_max_n": [
+        20.0,
+        20.0
+      ],
+      "requested_feed_min_max_mm_s": [
+        6.0,
+        6.0
+      ],
+      "cursor_mm": 697.5332572808865,
+      "whole_active_duration_s": 116.648,
+      "force_entry_pose_mm": [
+        870.7185329529717,
+        339.91805004396343,
+        99.4956507637963
+      ],
+      "measured_force_mean_after_entry_n": 19.997395144193174,
+      "action_age_max_s": 0.07678553,
+      "action_age_over_250ms_samples": 0,
+      "worker_latency_p99_ms": 2.9738630008068925,
+      "raw_active_window_matches_telemetry": true,
+      "replayed_summary_matches": true,
+      "replayed_arrays_max_errors": {
+        "surface": 0.0,
+        "processing_surface": 0.0,
+        "derived_signals": 0.0
+      },
+      "source_hashes": {
+        "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/deployment.json": "907a385c6db76f24d2e65206e1f4a711a2c91ce074b52b909d13295e98e9482b",
+        "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/policy.csv": "edd3a6cdb8b73ed3e8804b0e54ecd4ea437e8ce90f3cb95d42c1cab0459d92f5",
+        "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/removal/session_20261014_212352_156661/telemetry.csv": "196bccbb41bb642e1e006e55c01c3eff15ded9bf43209ebff996f136488dd1cd",
+        "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/removal/session_20261014_212352_156661/summary.json": "c92b8517f4ea63890fbf0f7c70970a4c2a9ec12c64a1ef10bdc5a11bff57ee0c",
+        "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/removal/session_20261014_212352_156661/surface.npz": "d0da407a1a8f543ba18b285b6e1e396a8bf99312ae43310b7d5cc106095bdda1",
+        "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/removal/session_20261014_212352_156661/processing_surface.npz": "2a18fd331e6be8bdc31fcb817962229b0ef514c19f8d9f9ed39f8c439f560329",
+        "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01/removal/session_20261014_212352_156661/derived_signals.npz": "b1bf4e0b0ec677bb661402c61cc32f017c47ae458cd3dcec686a48c5891f98c5"
+      }
+    }
+  },
+  "limits": [
+    "One primary GUI run per mode; repeated paired trials are not yet available.",
+    "Saved home positions match at recorded precision; exact scene/physics reset equality is not logged.",
+    "Removal is the uncalibrated rotating-disk Preston estimate, not physically measured volume.",
+    "Spatial final-depth CV and temporal instantaneous-rate CV are separate metrics."
+  ]
+}

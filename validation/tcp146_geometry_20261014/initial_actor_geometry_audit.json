@@ -1,0 +1,8 @@
+{
+  "parent_actor_weights_exact": true,
+  "initial_tcp_length_mm": 146.0,
+  "initial_robot_kinematics": "ur10e",
+  "tensor_count": 7,
+  "reference_actor": "/home/eunseop/nrs_rl/source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/mdp/saved_models/ppo_final_cv11p15/candidate/checkpoints/actor.pt",
+  "initial_actor": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_retrain_20261014/training/checkpoints/initial_actor.pt"
+}

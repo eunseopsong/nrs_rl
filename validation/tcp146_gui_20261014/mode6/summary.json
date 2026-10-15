@@ -1,0 +1,82 @@
+{
+  "valid_completed_run": true,
+  "completed": true,
+  "fault_samples": 0,
+  "interrupted": false,
+  "error": null,
+  "samples": 14581,
+  "epoch": 1,
+  "last_sequence": 14581,
+  "recording_source": "single controller telemetry snapshot; no independent latest-position/latest-force timer",
+  "force_basis": "absolute measured TCP-normal force in the same controller snapshot",
+  "clock": "control tick at 0.008 s; simulation timestamp also retained",
+  "physical_depth_validated": false,
+  "model": {
+    "law": "dh/K = p * relative_sliding_speed * dt",
+    "velocity_model": "rotating_disk",
+    "tool_diameter_mm": 30.0,
+    "contact_diameter_mm": 30.0,
+    "pressure_profile": "uniform",
+    "contact_assumption": "fixed circular footprint; full face unless contact diameter supplied",
+    "spindle_rpm": 1000.0,
+    "cell_size_mm": 0.5,
+    "depth_units": "h/K (uncalibrated)",
+    "volume_units": "V/K (uncalibrated)",
+    "roi": "reference swept contact footprint, all equal-area cells including zeros",
+    "plane_origin_mm": [
+      870.855,
+      339.969,
+      99.9998
+    ],
+    "plane_basis": [
+      [
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0
+      ]
+    ],
+    "plane_normal": [
+      0.0,
+      0.0,
+      1.0
+    ]
+  },
+  "target_force_n": 20.0,
+  "virtual_spindle_rpm": 1000.0,
+  "urdf_rotation_unchanged": true,
+  "entry_protocol": {
+    "seconds": 2.0,
+    "reference_footprint_mm": 18.0,
+    "zero_depth_cells_retained": true
+  },
+  "metrics": {
+    "spatial_depth_cv": 0.5115407824790279,
+    "equal_cell_volume_cv": 0.5115407824790279,
+    "mean_depth_over_k": 147.39674056905906,
+    "std_depth_over_k": 75.39944400555474,
+    "roi_volume_over_k": 2441405.9124156097,
+    "grid_volume_over_k": 2441458.4815096175,
+    "outside_roi_volume_over_k": 52.56909400814329,
+    "roi_cells": 66254,
+    "roi_area_mm2": 16563.5,
+    "zero_depth_fraction": 0.048736680049506445,
+    "processing_time_s": 116.64799999997886,
+    "tcp_full_footprint_volume_over_k": null
+  },
+  "processing_metrics": {
+    "spatial_depth_cv": 0.5084465097697439,
+    "roi_volume_over_k": 2283044.9729999714,
+    "mean_depth_over_k": 149.0311192127533,
+    "zero_depth_fraction": 0.052629861122443986,
+    "roi_cells": 61277,
+    "processing_time_s": 114.648,
+    "force_mean_n": 19.997395144193174,
+    "distance_mm": 819.592502870864,
+    "raw_rate_cv": 0.015019182219565552
+  }
+}

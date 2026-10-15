@@ -7,6 +7,7 @@ if not __package__:
                               if (p / 'source/nrs_rl/nrs_rl').is_dir())))
 
 import argparse
+import copy
 import csv
 import json
 import math
@@ -16,11 +17,15 @@ import shutil
 import time
 from datetime import datetime, timezone
 from isaaclab.app import AppLauncher
+from nrs_rl.tasks.manager_based.nrs_rl.mdp.robot_geometry import TRAINING_CONFIG, configure_training_robot
+from nrs_rl.tasks.manager_based.nrs_rl.mdp.spike_dose_reward import DEFAULT_CONFIG, SpikeDoseConfig
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--output', type=Path, required=True)
 p.add_argument('--native-dir', type=Path, required=True)
 p.add_argument('--control-snapshot', type=Path, required=True)
+p.add_argument('--robot-config', type=Path, default=TRAINING_CONFIG)
+p.add_argument('--steady-gain', type=float, choices=[0., .2], default=.2)
 p.add_argument('--gui-scene', type=Path)
 p.add_argument('--resume', type=Path, required=True)
 p.add_argument('--num-envs', type=int, default=4)
@@ -33,10 +38,16 @@ p.add_argument('--max-marginal-kl', type=float,
                help='Optional post-step old||new marginal Gaussian KL limit; disabled by default')
 p.add_argument('--gae-lambda', type=float, default=.98)
 p.add_argument('--entropy-coefficient', type=float, default=.0002)
+p.add_argument('--separate-gradient-clipping', action='store_true')
+p.add_argument('--reset-actor-optimizer', action='store_true')
+p.add_argument('--force-compensation-weight', type=float, default=0.)
+p.add_argument('--nominal-anchor-weight', type=float, default=0.)
 p.add_argument('--reward-cell-mm', type=float, choices=[.5, 1., 2.], default=1.)
 p.add_argument('--exploration-rho', type=float, default=0.)
 p.add_argument('--exploration-log-std', type=float)
 p.add_argument('--reward-forecast', type=Path)
+p.add_argument('--spike-reward-config', type=Path, nargs='?', const=DEFAULT_CONFIG,
+               help='Enable causal force-spike dose loss (optional JSON; default is the checked-in profile)')
 p.add_argument('--reset-critic-output', action='store_true')
 p.add_argument('--critic-potential-residual', action='store_true',
                help='Use V=100*removal potential+critic(obs); actor and reward stay unchanged')
@@ -71,17 +82,36 @@ if not math.isfinite(args.critic_residual_bias):
 if args.max_marginal_kl is not None and (not math.isfinite(args.max_marginal_kl)
                                         or args.max_marginal_kl <= 0.):
     p.error('Marginal KL limit must be finite and positive')
-os.environ['Y2_CONTROL_SOURCE_DIR'] = str(args.control_snapshot.resolve())
-os.environ['Y2_ROBOT_CONFIG'] = str(args.control_snapshot.resolve() / 'Y2RobMotion/config/ppo_fixed_force.yaml')
+if any(not math.isfinite(x) or x < 0. for x in
+       (args.force_compensation_weight, args.nominal_anchor_weight)):
+    p.error('Auxiliary loss weights must be finite and nonnegative')
+if (args.force_compensation_weight or args.nominal_anchor_weight) and args.spike_reward_config is None:
+    p.error('Force compensation auxiliary training requires the spike reward')
+if args.gui_scene is None:
+    p.error('Current training requires --gui-scene with the unchanged 146 mm contact geometry')
+spike_config = SpikeDoseConfig.load(args.spike_reward_config) if args.spike_reward_config else None
+spike_metadata = spike_config.metadata() if spike_config is not None else None
+robot_geometry = configure_training_robot(args.control_snapshot, args.robot_config)
 app = AppLauncher(args).app
 
 import numpy as np
 import torch
-from nrs_rl.tasks.manager_based.nrs_rl.mdp.agents.latest_force_ppo import CONTRACT, PPOActorCritic, export_actor
+from nrs_rl.tasks.manager_based.nrs_rl.mdp.agents.latest_force_ppo import CONTRACT, PPOActorCritic, export_actor as _export_actor
 from nrs_rl.tasks.manager_based.nrs_rl.mdp.agents.train_fixed_force_ppo import restore_training
 from nrs_rl.tasks.manager_based.nrs_rl.mdp.agents.ppo_exploration import action_value
+from nrs_rl.tasks.manager_based.nrs_rl.mdp.agents.spike_ppo_auxiliary import compensation_loss, clip_actor_critic
 from nrs_rl.tasks.manager_based.nrs_rl.mdp.isaac_latest_force_env import IsaacLatestForceEnv
 from nrs_rl.tasks.manager_based.nrs_rl.utils.removal_metrics import save, sha
+from nrs_rl.tasks.manager_based.nrs_rl.mdp.steady_postcore import experimental_contract
+
+
+def export_actor(model, path, metadata):
+    return _export_actor(model, path, {**metadata, 'robot_geometry': robot_geometry,
+        'training_spike_dose_reward': spike_metadata,
+        'training_force_compensation_weight': args.force_compensation_weight,
+        'training_nominal_anchor_weight': args.nominal_anchor_weight,
+        'controller_experiment': experimental_contract(args.steady_gain),
+        'requires_experimental_steady_v3_gain': args.steady_gain})
 
 
 def marginal_actor_kl(old_mean, old_std, new_mean, new_std):
@@ -101,18 +131,20 @@ def learn():
     model = PPOActorCritic()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, eps=1.e-5)
     parent = restore_training(model, optimizer, args.resume, args.learning_rate)
+    parent_actor = copy.deepcopy(model.actor).eval().requires_grad_(False)
     if args.exploration_log_std is not None:
         with torch.no_grad():
             model.log_std.fill_(args.exploration_log_std)
     resume_protocol = torch.load(args.resume, map_location='cpu', weights_only=False)['protocol']
     parent_residual = bool(resume_protocol.get('critic_potential_residual', False))
     critic_semantics_changed = parent_residual != args.critic_potential_residual
-    critic_reset = args.reset_critic_output or critic_semantics_changed
+    reward_changed = resume_protocol.get('reward', {}).get('spike_dose') != spike_metadata
+    critic_reset = args.reset_critic_output or critic_semantics_changed or reward_changed
     parent.update(parent_critic_potential_residual=parent_residual,
                   resumed_critic_potential_residual=args.critic_potential_residual,
-                  critic_semantics_changed=critic_semantics_changed)
+                  critic_semantics_changed=critic_semantics_changed, spike_reward_changed=reward_changed)
     if critic_reset:
-        # A legacy V critic cannot be reused as U (or vice versa). Preserve its
+        # Changed value semantics or a new reward require refitting V. Preserve its
         # feature layers, but reset the output and all critic Adam moments.
         critic_bias = args.critic_residual_bias if args.critic_potential_residual else 0.
         with torch.no_grad():
@@ -123,13 +155,25 @@ def learn():
         parent.update(optimizer_moments_restored=False, actor_optimizer_moments_restored=True,
                       critic_output_reset=True, critic_optimizer_moments_restored=False,
                       critic_reset_reason=('value_semantics_changed' if critic_semantics_changed
+                                           else 'spike_reward_changed' if reward_changed
                                            else 'explicit_reset'),
                       critic_output_initial_bias=critic_bias)
+    if args.reset_actor_optimizer:
+        for parameter in [*model.actor.parameters(), model.log_std]:
+            optimizer.state.pop(parameter, None)
+        parent.update(optimizer_moments_restored=False, actor_optimizer_moments_restored=False,
+                      actor_optimizer_reset_reason='explicit_new_objective_retry')
     initial = {k: v.detach().clone() for k, v in model.state_dict().items()}
     initial_hash = export_actor(model, output / 'checkpoints/initial_actor.pt', {'ppo_updates': 0})
     protocol = {**CONTRACT, 'algorithm': 'PPO-Clip', 'gamma': 1., 'gae_lambda': args.gae_lambda,
         'clip_range': .2, 'learning_rate': args.learning_rate, 'epochs': 4, 'minibatch_size': 1024,
         'max_grad_norm': .5, 'target_kl': .025, 'entropy_coefficient': args.entropy_coefficient,
+        'gradient_clipping': ('independent_actor_and_critic' if args.separate_gradient_clipping else 'joint'),
+        'auxiliary_training': {'force_compensation_weight': args.force_compensation_weight,
+            'nominal_anchor_weight': args.nominal_anchor_weight,
+            'reference': 'frozen resumed actor at counterfactual 20 N, using current rollout state',
+            'target': 'clip(nominal_parent_feed * F/20, 1.5, 12) at synthetic 16/24 N',
+            'scope': 'training only; nominal anchor at 20 N; no runtime authority changes'},
         'max_marginal_kl': args.max_marginal_kl,
         'marginal_kl_reference': 'actor before this update on the same rollout observations',
         'marginal_kl_stop_scope': 'after each optimizer step on the current full minibatch; no rollback',
@@ -153,6 +197,9 @@ def learn():
             'density': 'Autoregressive Gaussian; previous residual recomputed with each candidate actor',
             'evaluation_exploration': False},
         'parent_training': parent, 'initial_actor_sha256': initial_hash,
+        'robot_geometry': robot_geometry,
+        'controller_experiment': experimental_contract(args.steady_gain),
+        'requires_experimental_steady_v3_gain': args.steady_gain,
         'controller_snapshot': str(args.control_snapshot.resolve()),
         'native_validation': json.loads((args.native_dir / 'validation.json').read_text()),
         'scene_profile': (json.loads((args.gui_scene / 'manifest.json').read_text())
@@ -160,21 +207,32 @@ def learn():
         'reward_forecast': (json.loads(args.reward_forecast.with_name('calibration.json').read_text())
                             if args.reward_forecast is not None else None),
         'policy_scope': 'neural actor and critic only; no force, tracking or timing tuning',
-        'candidate_selection': 'Separate matched Mode 6 Isaac validation required',
+        'candidate_selection': ('Matched parent actor and Mode 6 Isaac validation: full-contact CV, '
+                                'transient dose error/time, completion, volume and safety; do not select on return alone'
+                                if spike_config is not None else 'Separate matched Mode 6 Isaac validation required'),
         'reward': {'cv_potential': '100*(previous predicted processing CV^2-current CV^2)',
+            'spike_dose': spike_metadata,
             'volume_floor': .5, 'volume_reference': 'ideal nominal geometry during training only',
-            'incomplete_penalty': 20., 'entry_seconds': 2., 'entry_footprint_mm': 18.},
+            'incomplete_penalty': spike_config.incomplete_penalty if spike_config is not None else 20.,
+            'entry_seconds': 2., 'entry_footprint_mm': 18.},
         'started_at_utc': datetime.now(timezone.utc).isoformat()}
     save(output / 'protocol.json', protocol)
     source = output / 'source_snapshot'
     source.mkdir()
     for file in [Path(__file__), Path(__file__).with_name('latest_force_ppo.py'),
                  Path(__file__).with_name('ppo_exploration.py'),
-                 Path(__file__).parent.parent / 'isaac_latest_force_env.py']:
+                 Path(__file__).with_name('spike_ppo_auxiliary.py'),
+                 Path(__file__).parent.parent / 'isaac_latest_force_env.py',
+                 Path(__file__).parent.parent / 'robot_geometry.py',
+                 Path(__file__).parent.parent / 'steady_postcore.py', args.robot_config]:
         shutil.copy2(file, source / file.name)
+    if spike_config is not None:
+        shutil.copy2(Path(__file__).parent.parent / 'spike_dose_reward.py', source / 'spike_dose_reward.py')
+        shutil.copy2(args.spike_reward_config, source / 'spike_dose_reward.json')
     env = IsaacLatestForceEnv(args.num_envs, args.seed, args.native_dir,
                              args.control_snapshot, output, args.reward_cell_mm, args.gui_scene,
-                             args.reward_forecast, args.nominal_sensors)
+                             args.reward_forecast, args.nominal_sensors, steady_gain=args.steady_gain,
+                             spike_reward_config=spike_config)
     shape = (args.rollout_steps, args.num_envs)
     observations = torch.zeros((*shape, 16))
     latent = torch.zeros(shape)
@@ -274,6 +332,7 @@ def learn():
                     old_marginal_std = model.log_std.clamp(-2.5, -.3).exp().clone()
                 before = torch.cat([v.detach().flatten() for v in model.actor.parameters()]).clone()
                 batches = []
+                auxiliary_batches = []
                 stop = False
                 marginal_kl_stopped = False
                 for epoch in range(args.critic_warmup_epochs if warmup else 4):
@@ -301,9 +360,20 @@ def learn():
                         value = value + data[9][ids]
                         value_loss = .5 * (value - data[4][ids]).square().mean()
                         loss = actor_loss + .5 * value_loss
+                        force_aux = anchor_aux = torch.zeros(())
+                        auxiliary_samples = 0
+                        if train_actor and (args.force_compensation_weight or args.nominal_anchor_weight):
+                            force_aux, anchor_aux, auxiliary_samples = compensation_loss(
+                                model.actor, parent_actor, data[0][ids], valid)
+                            loss = loss + args.force_compensation_weight * force_aux + args.nominal_anchor_weight * anchor_aux
                         optimizer.zero_grad(set_to_none=True)
                         loss.backward()
-                        grad = torch.nn.utils.clip_grad_norm_(model.parameters(), .5)
+                        if args.separate_gradient_clipping:
+                            actor_grad, critic_grad = clip_actor_critic(model)
+                            grad = torch.sqrt(actor_grad.square() + critic_grad.square())
+                        else:
+                            grad = torch.nn.utils.clip_grad_norm_(model.parameters(), .5)
+                            actor_grad = critic_grad = grad
                         if not torch.isfinite(loss) or not torch.isfinite(grad):
                             raise RuntimeError('Nonfinite PPO update')
                         optimizer.step()
@@ -316,6 +386,8 @@ def learn():
                                 if train_actor else torch.zeros(()))
                             batches.append([float(policy_loss), float(value_loss), float(kl),
                                 float(((ratio[valid] - 1.).abs() > .2).float().mean()) if train_actor else 0., float(grad)])
+                            auxiliary_batches.append([float(force_aux), float(anchor_aux), auxiliary_samples,
+                                                      float(actor_grad), float(critic_grad)])
                         marginal_kl_stopped = (args.max_marginal_kl is not None
                                                and float(marginal_kl) > args.max_marginal_kl)
                         if kl > .025 or marginal_kl_stopped:
@@ -342,6 +414,7 @@ def learn():
                 total_delta = float(torch.sqrt(sum((v.detach() - initial[k]).square().sum()
                     for k, v in model.state_dict().items() if k.startswith('actor.net.'))))
                 mean = np.mean(batches, axis=0)
+                auxiliary_mean = np.mean(auxiliary_batches, axis=0)
                 metrics = {'update': update, 'transitions': update * args.rollout_steps * args.num_envs,
                     'actor_updates': actor_updates, 'critic_only_warmup': warmup,
                     'actor_eligible_transitions': int(actor_valid.sum()) if not warmup else 0,
@@ -355,7 +428,15 @@ def learn():
                     'marginal_kl_early_stop': marginal_kl_stopped,
                     'actor_update_l2': float(torch.linalg.vector_norm(after - before)),
                     'actor_total_change_l2': total_delta, 'log_std': float(model.log_std.detach()),
+                    'force_compensation_loss': auxiliary_mean[0], 'nominal_anchor_loss': auxiliary_mean[1],
+                    'mean_auxiliary_samples': auxiliary_mean[2],
+                    'actor_gradient_norm_before_clip': auxiliary_mean[3],
+                    'critic_gradient_norm_before_clip': auxiliary_mean[4],
                     'mean_reward': float(rewards.mean()), 'wall_seconds': time.monotonic() - started}
+                if spike_config is not None:
+                    metrics.update(mean_episode_spike_reward=(float(np.mean([r['spike_dose']['reward'] for r in rows])) if rows else None),
+                                   mean_episode_spike_error_rms=(float(np.mean([r['spike_dose']['event_error_rms'] for r in rows])) if rows else None),
+                                   mean_episode_full_active_cv=(float(np.mean([r['full_active_cv'] for r in rows])) if rows else None))
                 if writer is None:
                     writer = csv.DictWriter(stream, fieldnames=list(metrics))
                     writer.writeheader()

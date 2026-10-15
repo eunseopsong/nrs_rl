@@ -1,0 +1,14 @@
+Isaac GUI 고정 힘 모델 비교: 모든 변화율은 이번 Mode 6 실증 대비.
+Mode 5: /home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_best/tcp146_mode5_pair01
+Mode 6: /home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014/recordings/rl_no_speed_modulation/tcp146_mode6_pair01
+양쪽 경로 완주, 제거량 저장, 홈 복귀 확인. 제어/정책 누락 및 fault 0.
+목표 힘 20 N 고정, 가상 회전 1000 RPM, 동일 경로/제어기/0.5 mm 격자.
+주 지표: 초반 2초의 제거량과 기준 첫 18 mm가 덮는 영역 제외, 깊이 0인 셀 포함.
+가공 구간 공간 CV 개선: 11.28979%
+가공 구간 제거량 유지: 114.12922%
+가공 구간 시간 변화: +14.59773%
+전체 경로 제거량 유지: 114.36026%
+시간축 순간 제거율 CV 변화: -22.41030%
+저장된 홈 위치 차이: 0.000000 mm; 완전한 초기 상태 일치는 확인하지 못함.
+각 모드 1회 주 비교. 제거량은 미교정 회전 공구 모델 추정치이며 실제 재료 측정값이 아님.
+모든 원시 제어 샘플을 재적분해 저장된 전체/가공 구간 깊이와 요약값의 일치를 검증함.

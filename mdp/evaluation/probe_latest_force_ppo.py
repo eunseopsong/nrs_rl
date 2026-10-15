@@ -17,6 +17,7 @@ import sys
 import time
 import traceback
 from isaaclab.app import AppLauncher
+from nrs_rl.tasks.manager_based.nrs_rl.mdp.robot_geometry import TRAINING_CONFIG, configure_training_robot
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--training-dir', type=Path, required=True)
@@ -27,6 +28,7 @@ parser.add_argument('--path-length-mm', type=float, default=698.)
 parser.add_argument('--max-steps', type=int, default=42000)
 parser.add_argument('--native-dir', type=Path, required=True)
 parser.add_argument('--control-snapshot', type=Path, required=True)
+parser.add_argument('--robot-config', type=Path, default=TRAINING_CONFIG)
 parser.add_argument('--gui-scene', type=Path)
 parser.add_argument('--nominal-sensors', action='store_true')
 parser.add_argument('--tracking-parameters', type=Path, help='Optional explicit per-candidate bounded tracking gains')
@@ -36,8 +38,9 @@ AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 if args.output.exists():
     parser.error('Use a new output directory')
-os.environ['Y2_CONTROL_SOURCE_DIR'] = str(args.control_snapshot.resolve())
-os.environ['Y2_ROBOT_CONFIG'] = str(args.control_snapshot.resolve() / 'Y2RobMotion/config/ppo_fixed_force.yaml')
+if args.gui_scene is None:
+    parser.error('Use --gui-scene with the unchanged UR10e / 146 mm contact geometry')
+robot_geometry = configure_training_robot(args.control_snapshot, args.robot_config)
 app = AppLauncher(args).app
 
 import gymnasium as gym
@@ -226,7 +229,7 @@ def run():
         tree = cKDTree(positions[:end, :2])
         fine = rotating_surface(positions[:end, :3], cell_mm=.5)
         summary = {'kind': 'isaac_neural_ppo_latest_force_with_virtual_rotation', 'controller_source': str(args.control_snapshot), 'native_validation': json.loads((native/'validation.json').read_text()), 'seed': args.seed, 'names': names,
-            'checkpoint_sha256': hashes, 'randomization': randomization,
+            'checkpoint_sha256': hashes, 'randomization': randomization, 'robot_geometry': robot_geometry,
             'path_length_mm': term.path_length_mm, 'normal_force_controller_weights_unchanged': True,
             'tangent_mdk': [damping, stiffness], 'rotation_contribution': True, 'assumed_spindle_rpm': SPINDLE_RPM,
             'rotation_applied_to': 'removal estimator only; URDF dynamics unchanged',

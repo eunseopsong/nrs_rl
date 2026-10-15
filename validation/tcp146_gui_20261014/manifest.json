@@ -1,0 +1,30 @@
+{
+  "source_full_artifacts": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_gui_20261014",
+  "checkpoint_sha256": "66ce218b8d4edd7387de31eca7855451ec247ce224e2b179de1da363d73fb8c0",
+  "files": {
+    "00_mode6_relative_comparison.png": "52bb699ecd4499a33dd87af4dc0fdfb864ef9e5893148c8948e6c45c0de5a857",
+    "01_processing_depth_maps.png": "005f1101f323b27757ae88120a6bcf22e3e36c2617824b4e87cff3c206ff667e",
+    "02_normalized_depth_maps.png": "a9904c80bdbde85acd73ee2837112f835a58ea7d702c975c76e35961776f7225",
+    "03_force_feed_removal_rate.png": "6abe030492a3062640dc58e886c1cb93a994f4fdce529c6dcd210918076c5ef1",
+    "comparison.csv": "0f1f3c0e6639a5e59f2732574e53d3d40f311f07f84dbc1e13bf1ca32eff3bb5",
+    "comparison.json": "0e99490d52a322480f98f76dfcb8a8056bc5672a627ba3494c9581b208a5b461",
+    "comparison.txt": "66c9efaad215abfc7587b7a1d43e9191fb03c6d75962045ce113dcabd8449c4c",
+    "gui_validation.json": "a411d7583822d56ed98ab3b8e01bb1a6891f5510ec3b0ead022fb99e55e07907",
+    "mode5/audit.json": "272b79ad44e191fa0fb553d9bc3c7e9e839965cc7fb5b57868bd9e340fa3119e",
+    "mode5/before_txtload.json": "3c24df37bbb8aa4bdd757e0b7ba0b928d147a7fa60c49d33fad969477de8b06d",
+    "mode5/gui_processing.png": "ddc73e6439411fbb5f1cf646db7f681d5764ea905f8a9a03b3cc274ce1bbd749",
+    "mode5/ready.json": "8125c68f2ebeebb50bc0af911f6b7f56cbede431ca40fbd124af916471b75a83",
+    "mode5/scene_provenance.json": "e2f17f67d0e74dbf4f3fbfe7060c12d6294f7d17b6c9716cb84d580574172f9d",
+    "mode5/summary.json": "1750893110c241516bcfce23dc12aff38e1e70ec57254f3228217b7ad454e0ce",
+    "mode6/audit.json": "2125dd55ebda86db5b48f85df2ae938d36ef07f078a7216739a4618bfb84cb85",
+    "mode6/before_txtload.json": "7f39402099902fdc79e58e7de657a04d842a815a7c327323286323a25607b655",
+    "mode6/gui_processing.png": "229d5bade6f651c2bb366646bb80be0a09d137547202ae5ffee65b778b5c5325",
+    "mode6/ready.json": "8125c68f2ebeebb50bc0af911f6b7f56cbede431ca40fbd124af916471b75a83",
+    "mode6/scene_provenance.json": "e2f17f67d0e74dbf4f3fbfe7060c12d6294f7d17b6c9716cb84d580574172f9d",
+    "mode6/summary.json": "c92b8517f4ea63890fbf0f7c70970a4c2a9ec12c64a1ef10bdc5a11bff57ee0c",
+    "run_pair.py": "8e2ab37d3abcf0862a2e985098b51e5b80b822bfc7ce9a5680167f4e2631df06",
+    "run_pair.sh": "1115441600a8bc3ae58ebd86e7e97b8c80e0431fd3d12945b74aae96e6d96f56",
+    "scene.py": "ceb90da2a44d7037256dccde8cda2100de9488cca4a100d36f4e2326f557ffad",
+    "validate_runtime.sh": "2fc89e5fe211ee4946ef202d37431c1fc3348f7e067750f0c01da655e936410f"
+  }
+}

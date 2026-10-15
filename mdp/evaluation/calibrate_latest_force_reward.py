@@ -22,7 +22,13 @@ def calibrate(source, output, cell_mm):
     row = summary['candidates']['constant']
     assert row['completed'] and row['fault_fraction'] == 0.
     assert summary['tangent_mdk'] == [6000., 2000.]
-    assert not any(summary['tracking_gains'].values())
+    if 'controller_experiment' in summary:
+        from nrs_rl.tasks.manager_based.nrs_rl.mdp.steady_postcore import experimental_contract
+        gain = summary['controller_experiment']['config']['gain']
+        assert summary['controller_experiment'] == experimental_contract(gain)
+        assert all(value == gain for value in summary['tracking_gains'].values())
+    else:
+        assert not any(summary['tracking_gains'].values())
     with np.load(source / 'constant_trace.npz') as archive:
         trace = dict(archive)
     with h5py.File(source / 'path.h5') as f:
@@ -79,6 +85,8 @@ def calibrate(source, output, cell_mm):
         'cell_mm': cell_mm, 'entry_seconds': 2., 'processing_roi_cells': int(mask.sum()),
         'reward_forecast': 'Actual fixed Mode 6 processing removal remaining at each reference cursor',
         'actor_teacher_used': False, 'terminal_objective_changed': False,
+        'robot_geometry': summary.get('probe_provenance', {}).get('robot_geometry'),
+        'controller_experiment': summary.get('controller_experiment'),
         'fixed_path_diagnostic': {'baseline_cv': baseline_cv, 'optimistic_cv': optimistic_cv,
             'optimistic_improvement_percent': 100. * (1. - optimistic_cv / baseline_cv),
             'solver_converged': bool(optimized.success), 'duration_scale_bounds': [.5, 4.],

@@ -4,9 +4,69 @@
 새 소스와 수정은 이 저장소 안에서 관리한다. 실제 신경망 강화학습은 `mdp/`,
 비강화학습 정책 최적화는 `model_based/`, 공통 계산·시각화·디버깅은 `utils/`에 둔다.
 
-## 현재 확정 버전과 GUI 검증 (2026-10-14)
+## 현재 Isaac 학습 설정: UR10e / TCP 146 mm (2026-10-14)
 
-현재 모델은 **`ppo_final_cv11p15` + steady v3 gain 0.2**다. Mode 5는 PPO의
+현재 학습 설정은 [mdp/config/isaac_robot.yaml](mdp/config/isaac_robot.yaml)이다.
+TCP는 `tool0`에서 공구 끝면까지 **146 mm**, 로봇 기구학은 **UR10e**다.
+원본 `~/isaac/isaac_save/ur10e_v6.usd`와 학습용 `robot.usdc`, 기준 가공 경로는 수정하지 않는다.
+최신 학습기와 검증기는 과거 제어기 스냅샷 안의 TCP 설정을 자동으로 사용하지 않는다.
+다른 TCP 길이나 UR10 CB3 기구학을 넘기면 실행 전에 오류로 중단한다.
+
+USD의 패드 중심은 `tool0` 기준 134 mm이며 원통 두께 24 mm의 절반을 더한 끝면이 146 mm다.
+USD 관절 치수도 UR10e와 일치한다. UR10 CB3 모델을 사용하면 같은 관절각의 끝점 계산이
+약 31.3 mm 어긋난다. 현재 검증기는 정적 USD와 실행 중 articulation의 실제 끝점을
+각각 FK와 비교하며, 실행 중 오차가 0.05 mm를 넘으면 중단한다.
+[기하 확인 및 재학습 전 기준 주행](validation/tcp146_geometry_20261014/manifest.json)에
+USD 치수, 실제 FK 일치 오차, 기존 actor의 가중치 보존 검사와 기준 주행 결과를 보관한다.
+
+재학습 실행:
+
+```bash
+cd ~/nrs_rl
+PYTHONDONTWRITEBYTECODE=1 ~/anaconda3/envs/env_isaaclab/bin/python \
+  source/nrs_rl/nrs_rl/tasks/manager_based/nrs_rl/mdp/evaluation/retrain_tcp146_ppo.py \
+  --study logs/experiments/ppo_tcp146_retrain_20261014 --updates 10
+```
+
+실험은 최신 `ppo_final_cv11p15` actor를 초기값으로 사용한다. 기하가 달라진 critic의
+출력층을 초기화하고 2회 warmup 뒤 PPO actor를 8회 갱신한다. 동일한 146 mm 조건의
+Mode 6 기준 주행으로 보상 예측 데이터를 다시 생성하고, 별도 후보 선정 및 검증을 수행한다.
+학습 상태는 실험 폴더의 `status.json`, 실제 갱신 진행은 `training/status.json`에 기록된다.
+이미 완료되었거나 부분 실행된 실험을 덮어쓰려 하지 말고 새 `--study` 경로를 사용한다.
+
+과거 체크포인트와 검증 기록은 재현을 위해 보존한다. 아래 9.90% GUI 결과는 **이전 기하
+설정에서 얻은 기록**이며 새 146 mm 학습의 성능으로 해석하지 않는다. ROS 배포는 별도이며
+이 학습 명령이 실증용 제어기나 배포 actor를 교체하지 않는다.
+
+## UR10e / TCP 146 mm GUI 검증 (2026-10-14)
+
+재학습 모델 `ppo_0010`을 실제 ROS 제어 경로와 표시되는 Isaac GUI에서 Mode 5/6
+각 1회 실행했다. 양쪽 모두 가공·제거량 저장·홈 복귀를 완료했고, 제어 및 정책
+순번 누락과 fault는 0이다. 원시 제어 기록을 재적분한 깊이맵과 저장된 결과가 일치한다.
+두 모드의 새 USD 로딩 후 초기 관절 위치·속도, 홈 위치 및 힘 제어 진입 위치는
+기록된 정밀도에서 일치한다. 모든 내부 물리 상태의 동일성까지 입증한 것은 아니다.
+
+| 지표 | Mode 5 | Mode 6 | Mode 5 변화 |
+| --- | ---: | ---: | ---: |
+| 제거 깊이 공간 CV | 0.45104395 | 0.50844651 | 11.28979% 감소 |
+| 추정 제거량 V/K | 2,605,621.43 | 2,283,044.97 | +14.12922% |
+| 가공 시간 | 131.384 s | 114.648 s | +14.59773% |
+| 목표 힘 대비 RMSE | 0.233007 N | 0.299829 N | 22.28664% 감소 |
+
+비교 결과는 날짜별 [logs/adaptive_velocity/20261014/gui_test](logs/adaptive_velocity/20261014/gui_test)에
+저장했다. [깊이 히트맵 PNG](logs/adaptive_velocity/20261014/gui_test/05_contact_inclusive_depth_maps.png),
+[평균으로 정규화한 히트맵 PNG](logs/adaptive_velocity/20261014/gui_test/06_contact_inclusive_normalized_depth_maps.png),
+원시 로그, 재적분 결과와 GUI 화면을 포함한다. 추적 가능한 검증 요약은
+[validation/tcp146_gui_20261014](validation/tcp146_gui_20261014)에도 보관한다.
+
+actor SHA-256은 `66ce218b8d4edd7387de31eca7855451ec247ce224e2b179de1da363d73fb8c0`이다.
+ROS의 `ppo_fixed_force.launch.py`와 `preston_d14.launch.py`는 이 actor와 UR10e/146 mm
+설정을 사용한다. CV는 평균 제거 깊이에 대한 상대 편차이며, 제거 깊이·제거량은
+미교정 Preston 추정값이다. 위 결과는 한 쌍의 GUI 실증이며 반복 검증 통계는 아니다.
+
+## 이전 확정 버전과 GUI 검증 (2026-10-14)
+
+이전 실증 모델은 **`ppo_final_cv11p15` + steady v3 gain 0.2**다. Mode 5는 PPO의
 전진 속도 조절을 적용하고, Mode 6는 같은 제어기로 6 mm/s 기준을 사용한다.
 목표 힘은 모두 20 N이다. 아래 과거 학습 기록의 11.13% 모델과 구분한다.
 
@@ -249,6 +309,66 @@ launch는 Idling에서 기다린다. `PPO cv11p13 ready`와 command server 준�
 확인한 후 별도 터미널에서 기존 `TxtLoad` 서비스를 호출하면 가공·기록·home 복귀가 진행된다.
 상세 명령과 로그 위치는 해당 배포 폴더의 `README.txt`를 참고한다.
 기존 비-PPO 배포는 그대로 유지하며 새 launch에서 PPO 체크포인트를 명시적으로 선택한다.
+
+## 힘 스파이크 보상 (2026-10-14)
+
+힘 스파이크에 대한 학습 보상은 `mdp/spike_dose_reward.py`에 구현했다.
+`mdp/agents/train_latest_force_ppo.py`에 `--spike-reward-config`를 추가하면
+기존 공간 CV 항에 측정 제거량/전진거리의 국소 오차와 지속 시간 벌점을 더한다.
+1000 RPM에서 이송의 보상 대상은 단위 경로 길이당 제거량이며, 힘 상승 시
+더 빨리 지나가는 방향이다. 설정은 `mdp/config/spike_dose_reward.json`,
+설계·범위·응답 한계와 오프라인 검증은
+`validation/spike_dose_reward_20261014/README.txt`에 기록했다.
+이 검증은 새 checkpoint의 학습 또는 GUI 성능 개선을 의미하지 않는다.
+
+## 이동속도·RPM 공동 정책 연구 (2026-10-15)
+
+`mdp/agents/train_feed_rpm_ppo.py`는 기존 146 mm TCP의 이송 정책을 이어받아
+두 출력(이동속도, RPM)의 정책을 학습한다. 기본 RPM은 1000이며 장비 상한을
+가정하지 않는다. `1000*exp(3*a1)`의 수치 탐색 범위는 약 50–20,086 RPM이다.
+힘에 반비례하는 RPM 신경망 초기 학습 후 실제 Isaac 접촉 경로로 PPO를 수행한다.
+`--initialization-kind dynamic`은 측정 힘의 변화율과 현재 RPM으로 다음 두
+물리 주기의 제거율을 예측하는 지연 보상 초기화를 사용한다. 이 초기화는
+합성 상태로 학습하며 평가 로그의 미래 힘을 입력하거나 학습 표적으로 쓰지 않는다.
+정책은 16 ms마다 판단하고, 8 ms 제어 주기마다 가상 스핀들 응답을 계산한다.
+RPM 응답은 시정수 16 ms와 200,000 RPM/s 변화율을 가정한다.
+
+`mdp/rpm_control.py`의 보상은 20 N·1000 RPM에 해당하는 고정 순간 제거율을
+유지하도록 한다. 힘 이벤트의 제거율 오차에 가중치를 더하고, 전체 접촉 공간
+깊이 CV, 접촉 유지 및 경로 완료도 평가한다. 최초 측정 접촉(1.5 N)부터
+초반 정지 접촉을 포함하며, 가공을 멈춰 CV만 낮추는 해법은 허용하지 않는다.
+공간 깊이 CV와 시간에 따른 순간 제거율 CV는 서로 다른 지표로 보고한다.
+
+RPM은 측정 힘·TCP를 사용하는 Preston 제거량 모델에 적용한다. USD 스핀들
+회전이나 회전에 따른 접촉 마찰을 실제로 구동하는 모델은 아니다.
+새 actor는 22차원 관측과 2차원 출력을 쓰며 기존 스칼라 Mode 5 런타임에
+직접 넣을 수 없다. `mdp/evaluation/probe_feed_rpm_ppo.py`가 전용 평가 진입점이다.
+기존 ROS 배포 정책은 이 학습으로 교체되지 않는다.
+
+실험·명령 기록은 `/home/eunseop/nrs_rl/logs/experiments/ppo_feed_rpm_20261015/`와
+`/home/eunseop/nrs_rl/logs/experiments/ppo_feed_rpm_dynamic_20261015/`,
+학습·headless 평가 그래프와 히트맵은 `logs/adaptive_velocity/20261015/training/`,
+checkpoint와 학습 기록은 그 안의 `rpm_policy/`,
+Isaac GUI + ROS 실증 결과는 `logs/adaptive_velocity/20261015/gui_test/`에 저장한다.
+날짜별 결과 폴더 구조는 `logs/adaptive_velocity/YYYYMMDD/{training,gui_test}/`를 사용한다.
+
+선택한 RPM 공동 정책은 **checkpoint 3**이며 actor SHA-256은
+`b11661109b4e1c8d750c7ba6f40138630804c7cc5ee148eebfce3b114540e83e`다.
+기존 이송속도만 가변하는 Mode 5와 비교한 결과는 다음과 같다.
+
+| 평가 | 순간 제거율 시간 CV (기존 → 공동 정책) | 시간 CV 감소율 | 힘 이벤트 제거율 RMSE 감소율 | 공간 깊이 CV 감소율 |
+| --- | ---: | ---: | ---: | ---: |
+| Isaac headless, 선정 seed 5211 | 2.93997% → 0.93209% | 68.29587% | 68.09533% | 0.04510% |
+| Isaac GUI + ROS, 각 조건 1회 | 4.22902% → 1.06202% | 74.88733% | 75.36671% | 0.32870% |
+
+고정 이송속도·1000 RPM인 Mode 6 대비 공간 깊이 CV 감소율은 headless에서
+10.90530%, GUI에서 11.25439%다. 시간 CV와 누적 공간 깊이 CV는 별도 지표다.
+GUI 결과는 표시되는 Isaac 장면과 실제 ROS 제어 경로에서 수집했으며,
+RPM과 제거량은 가상 스핀들 응답 및 미교정 Preston 모델로 계산했다.
+모든 전체 접촉 지표에는 최초 측정 접촉(1.5 N)부터 초반 접촉과 완료까지를 포함한다.
+PNG 3은 세로축만 17,000~25,000으로 확대하며 CV는 전체 원시 표본으로 계산한다.
+체크포인트 식별값, 원본 결과 해시와 비교 수치는
+[RPM 학습·GUI 실증 요약](validation/feed_rpm_ckpt3_20261015/summary.json)에 보관한다.
 
 ## Git과 산출물
 

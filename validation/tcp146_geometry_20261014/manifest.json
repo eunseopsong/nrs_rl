@@ -1,0 +1,13 @@
+{
+  "files_sha256": {
+    "baseline_summary.json": "70af7beec20cc4eb0c058579bb2a7339097e942d1fb650e4b78d32b5766ca89a",
+    "geometry_diagnosis.json": "6c4363cf5b2cd99e8915df0619fed4b82cd4cf1c9240b75dfb1393d61a2fc2a7",
+    "live_geometry_audit.json": "33c181182ba2b7ad159004a2abd7bdca0765384ae7daeabb9b910088078b13fe",
+    "usd_geometry_audit.json": "5c93b3410521213479ab721c927982363dfb9012f6b154686cfebf1cfe64ebf7",
+    "initial_actor_geometry_audit.json": "d929260546a6f884c309ac98611aa3e59aa698bf5807c4cf9cd5faa3fd93e1cc"
+  },
+  "training_status": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_retrain_20261014/status.json",
+  "training_progress": "/home/eunseop/nrs_rl/logs/experiments/ppo_tcp146_retrain_20261014/training/status.json",
+  "source_usd_modified": false,
+  "ros_deployment_changed": false
+}

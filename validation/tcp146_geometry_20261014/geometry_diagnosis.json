@@ -1,0 +1,23 @@
+{
+  "usd_robot": "UR10e",
+  "tcp_length_mm": 146.0,
+  "authored_joint_angles_rad": [
+    0.5601026580809877,
+    -2.088373029378254,
+    -1.5775981733770135,
+    -1.0472973531584484,
+    1.5707816794089011,
+    0.5601370128590497
+  ],
+  "usd_contact_face_mm": [
+    869.848399900265,
+    339.91125621091146,
+    164.33282814588895
+  ],
+  "ur10_cb3_fk_error_mm": 31.304497137665443,
+  "ur10e_fk_error_mm": 0.00029073971014924397,
+  "earlier_length_only_probe": "baseline_gpu",
+  "canonical_config": "isaac_ur10e_robot.yaml",
+  "source_usd_modified": false,
+  "reference_trajectory_modified": false
+}

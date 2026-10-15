@@ -1,0 +1,299 @@
+{
+  "scope": "offline reward behavior and old GUI log replay; no new trained-policy result",
+  "config": {
+    "version": "causal_spike_dose_v1",
+    "config": {
+      "sample_dt_s": 0.008,
+      "window_s": 0.08,
+      "force_filter_tau_s": 0.024,
+      "reference_tau_s": 1.0,
+      "warmup_s": 0.24,
+      "target_force_n": 20.0,
+      "warmup_force_band_n": 1.0,
+      "min_reference_feed_mm_s": 0.5,
+      "force_trigger_n": 1.0,
+      "slew_trigger_n_s": 8.0,
+      "confirm_s": 0.016,
+      "force_release_n": 0.5,
+      "slew_release_n_s": 3.0,
+      "release_s": 0.4,
+      "error_weight": 20.0,
+      "tail_weight": 80.0,
+      "tail_threshold": 0.1,
+      "max_severity": 4.0,
+      "max_loss_per_s": 20.0,
+      "invalid_contact_loss_per_s": 25.0,
+      "incomplete_penalty": 100.0,
+      "event_action_smoothness_scale": 0.1
+    },
+    "config_sha256": "5d4bc40fb96253bbb150a0eba4942abacfc9d7602e9ee4961ec6e96669d8f242",
+    "source_sha256": "e3c3b96ea54a4072275245dbe9c6087f7da73520b7245fddcdd4f74d09051d99",
+    "error": "(sum(dV/K) - frozen_dose_per_mm * sum(signed_TCP_advance_mm)) / (frozen_rate * observed_window_s)",
+    "reference": "last clean rolling-window moving-contact rate/feed; slow force baseline; frozen through event recovery",
+    "scope": "after stable moving contact; no fixed entry time or footprint exclusion",
+    "units": "uncalibrated Preston V/K; relative residual is dimensionless",
+    "changes_actor_observations_or_runtime_limits": false
+  },
+  "synthetic": {
+    "17.0": {
+      "fast": {
+        "event_count": 1,
+        "event_seconds": 1.9920000000000015,
+        "event_error_rms": 0.050332530839469786,
+        "event_abs_error_seconds": 0.052086789539603204,
+        "event_peak_abs_error": 0.14999999999999858,
+        "invalid_contact_seconds": 0.0,
+        "reward": -0.3642217528865006,
+        "reference_established": true
+      },
+      "delayed_320ms": {
+        "event_count": 1,
+        "event_seconds": 1.9920000000000015,
+        "event_error_rms": 0.07840804269811362,
+        "event_abs_error_seconds": 0.10007357384239643,
+        "event_peak_abs_error": 0.14999999999999858,
+        "invalid_contact_seconds": 0.0,
+        "reward": -0.9881724368294013,
+        "reference_established": true
+      },
+      "hold": {
+        "event_count": 1,
+        "event_seconds": 1.9920000000000015,
+        "event_error_rms": 0.1484376466391147,
+        "event_abs_error_seconds": 0.294479999999996,
+        "event_peak_abs_error": 0.14999999999999858,
+        "invalid_contact_seconds": 0.0,
+        "reward": -3.790842801300095,
+        "reference_established": true
+      },
+      "wrong_direction": {
+        "event_count": 1,
+        "event_seconds": 1.9920000000000015,
+        "event_error_rms": 0.29751742149994065,
+        "event_abs_error_seconds": 0.5796484828945838,
+        "event_peak_abs_error": 0.3264509265108906,
+        "invalid_contact_seconds": 0.0,
+        "reward": -29.832856296543582,
+        "reference_established": true
+      }
+    },
+    "23.0": {
+      "fast": {
+        "event_count": 1,
+        "event_seconds": 1.9920000000000015,
+        "event_error_rms": 0.0503325308394706,
+        "event_abs_error_seconds": 0.0520867895396036,
+        "event_peak_abs_error": 0.1500000000000014,
+        "invalid_contact_seconds": 0.0,
+        "reward": -0.364221752886518,
+        "reference_established": true
+      },
+      "delayed_320ms": {
+        "event_count": 1,
+        "event_seconds": 1.9920000000000015,
+        "event_error_rms": 0.07840804269811497,
+        "event_abs_error_seconds": 0.10007357384239791,
+        "event_peak_abs_error": 0.1500000000000014,
+        "invalid_contact_seconds": 0.0,
+        "reward": -0.9881724368294574,
+        "reference_established": true
+      },
+      "hold": {
+        "event_count": 1,
+        "event_seconds": 1.9920000000000015,
+        "event_error_rms": 0.14843764663911754,
+        "event_abs_error_seconds": 0.29448000000000296,
+        "event_peak_abs_error": 0.1500000000000014,
+        "invalid_contact_seconds": 0.0,
+        "reward": -3.790842801300317,
+        "reference_established": true
+      },
+      "wrong_direction": {
+        "event_count": 1,
+        "event_seconds": 1.9920000000000015,
+        "event_error_rms": 0.2581378664275817,
+        "event_abs_error_seconds": 0.505256704748171,
+        "event_peak_abs_error": 0.2804202500297883,
+        "invalid_contact_seconds": 0.0,
+        "reward": -20.3273215286714,
+        "reference_established": true
+      }
+    }
+  },
+  "synthetic_fraction_of_speed_change_reached_s": {
+    "0.1": 0.136,
+    "0.5": 0.296,
+    "0.9": 0.624,
+    "0.95": 0.76
+  },
+  "implementation_sha256": {
+    "mdp/spike_dose_reward.py": "e3c3b96ea54a4072275245dbe9c6087f7da73520b7245fddcdd4f74d09051d99",
+    "mdp/isaac_latest_force_env.py": "ae7c421c06ffb2d405ed75a520bffecfd9f50b9b71088c470d4b9cc7562614cd",
+    "mdp/agents/train_latest_force_ppo.py": "2c6aef3adc3a39fe06a2e872e76cf10dade0dc84f53369a3a53a7bbcc9a1b92a",
+    "mdp/config/spike_dose_reward.json": "ba66dfdb6292c5b7ec6984a5ede8c61bd1096e00f218569761d06c46d8647d00",
+    "mdp/tests/test_spike_dose_reward.py": "c10796cfc127b0d0d0f1af09271b6c120f7e6d1de240d2b2249cad9b6cca9894",
+    "mdp/evaluation/validate_spike_dose_reward.py": "158217697c096ee2a18d3fdad1fe868e5b5935a10ffcde35f387227b4e7c6fc3"
+  },
+  "synthetic_force_model": "prescribed 20->17/23 N step; Q/K=1000*force; unchanged 80ms policy/action filter and feed limits",
+  "replay_scope": "all force-control-active samples; stable moving contact establishes the transient reference",
+  "replay_comparison_limit": "each policy has its own pre-event dose reference; costs are diagnostics, not absolute quality ranking",
+  "reference_sha256": "80ffe36f526382802d2ee55759cff7b27d3895521e2c69a63f2982e9dc144ed6",
+  "replay": {
+    "mode5": {
+      "metrics": {
+        "event_count": 3,
+        "event_seconds": 4.840000000000003,
+        "event_error_rms": 1.7942625403294457,
+        "event_abs_error_seconds": 6.917849273137671,
+        "event_peak_abs_error": 3.490725120583843,
+        "invalid_contact_seconds": 0.0,
+        "reward": -77.68184186362978,
+        "reference_established": true
+      },
+      "reference_first_established_active_s": 1.192,
+      "regions": {
+        "quiet_reference": {
+          "progress_percent": [
+            5.0,
+            80.0
+          ],
+          "seconds": 94.136,
+          "event_seconds": 0.0,
+          "event_fraction": 0.0,
+          "reward": 0.0,
+          "peak_abs_error": 0.0
+        },
+        "large_spikes": {
+          "progress_percent": [
+            85.0,
+            90.0
+          ],
+          "seconds": 7.144,
+          "event_seconds": 2.8080000000000003,
+          "event_fraction": 0.393057110862262,
+          "reward": -54.76085114816329,
+          "peak_abs_error": 3.490725120583843
+        },
+        "terminal_spikes": {
+          "progress_percent": [
+            98.8,
+            100.0
+          ],
+          "seconds": 4.496,
+          "event_seconds": 2.032,
+          "event_fraction": 0.45195729537366547,
+          "reward": -22.92099071546725,
+          "peak_abs_error": 2.571633717348184
+        }
+      },
+      "events": [
+        {
+          "start_active_s": 110.672,
+          "end_active_s": 113.48,
+          "start_progress_pct": 85.91187734494586,
+          "end_progress_pct": 89.29648514823306,
+          "peak_abs_error": 3.490725120583843,
+          "reward": -54.7608511481633
+        },
+        {
+          "start_active_s": 129.048,
+          "end_active_s": 130.008,
+          "start_progress_pct": 98.86993651768896,
+          "end_progress_pct": 99.20966942362205,
+          "peak_abs_error": 2.571633717348184,
+          "reward": -9.220175473443181
+        },
+        {
+          "start_active_s": 130.072,
+          "end_active_s": 131.144,
+          "start_progress_pct": 99.22922845885472,
+          "end_progress_pct": 99.50198921317102,
+          "peak_abs_error": 2.054707186028793,
+          "reward": -13.700815242024072
+        }
+      ],
+      "source_sha256": {
+        "telemetry.csv": "109786f1d6f7b179795c96578d018970b16dea89c65122636f314214b9350257",
+        "derived_signals.npz": "45084169602f8b6602d5b0cc44bb96efcdea588bd323abfae90130e6b5cfd980"
+      }
+    },
+    "mode6": {
+      "metrics": {
+        "event_count": 3,
+        "event_seconds": 5.240000000000004,
+        "event_error_rms": 0.2528672123110185,
+        "event_abs_error_seconds": 0.9151609607946294,
+        "event_peak_abs_error": 1.1334158855748653,
+        "invalid_contact_seconds": 0.0,
+        "reward": -18.24650061978534,
+        "reference_established": true
+      },
+      "reference_first_established_active_s": 0.8240000000000001,
+      "regions": {
+        "quiet_reference": {
+          "progress_percent": [
+            5.0,
+            80.0
+          ],
+          "seconds": 87.19200000000001,
+          "event_seconds": 0.0,
+          "event_fraction": 0.0,
+          "reward": 0.0,
+          "peak_abs_error": 0.0
+        },
+        "large_spikes": {
+          "progress_percent": [
+            85.0,
+            90.0
+          ],
+          "seconds": 5.808,
+          "event_seconds": 3.96,
+          "event_fraction": 0.6818181818181818,
+          "reward": -12.663581026934816,
+          "peak_abs_error": 1.0242864422666231
+        },
+        "terminal_spikes": {
+          "progress_percent": [
+            98.8,
+            100.0
+          ],
+          "seconds": 1.4000000000000001,
+          "event_seconds": 1.28,
+          "event_fraction": 0.9142857142857143,
+          "reward": -5.582919592850521,
+          "peak_abs_error": 1.1334158855748653
+        }
+      },
+      "events": [
+        {
+          "start_active_s": 99.952,
+          "end_active_s": 101.568,
+          "start_progress_pct": 85.6462308806378,
+          "end_progress_pct": 87.0293907370739,
+          "peak_abs_error": 0.42928873173919474,
+          "reward": -5.350337845571206
+        },
+        {
+          "start_active_s": 102.08800000000001,
+          "end_active_s": 104.432,
+          "start_progress_pct": 87.48356263023202,
+          "end_progress_pct": 89.49292918784067,
+          "peak_abs_error": 1.0242864422666231,
+          "reward": -7.31324318136361
+        },
+        {
+          "start_active_s": 115.36800000000001,
+          "end_active_s": 116.648,
+          "start_progress_pct": 98.90667388239085,
+          "end_progress_pct": 100.0,
+          "peak_abs_error": 1.1334158855748653,
+          "reward": -5.582919592850522
+        }
+      ],
+      "source_sha256": {
+        "telemetry.csv": "196bccbb41bb642e1e006e55c01c3eff15ded9bf43209ebff996f136488dd1cd",
+        "derived_signals.npz": "b1bf4e0b0ec677bb661402c61cc32f017c47ae458cd3dcec686a48c5891f98c5"
+      }
+    }
+  }
+}

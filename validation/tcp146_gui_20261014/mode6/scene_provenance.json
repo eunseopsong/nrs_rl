@@ -1,0 +1,48 @@
+{
+  "source": "/home/eunseop/isaac/isaac_save/ur10e_v6.usd",
+  "source_sha256": "7314969427068562bf9cd8f1e9fa09962b8ae06b48b9a33af103ade0cbb30248",
+  "headless": false,
+  "ros_domain": 181,
+  "physics_dt_s": 0.008,
+  "render_every_physics_steps": 4,
+  "source_usd_modified": false,
+  "sensor_script": "/home/eunseop/isaac/isaac_save/ft_sensor/ft_sensor.py",
+  "sensor_script_sha256": "4b17c8b5be66cf3c8178d861198225ad33fecf2ae2e9da7b49ee0e8e64782c44",
+  "initial_state": {
+    "simulation_time_s": 0.01600000075995922,
+    "joint_names": [
+      "shoulder_pan_joint",
+      "shoulder_lift_joint",
+      "elbow_joint",
+      "wrist_1_joint",
+      "wrist_2_joint",
+      "wrist_3_joint"
+    ],
+    "joint_positions_rad": [
+      0.559123694896698,
+      -2.092350959777832,
+      -1.5735795497894287,
+      -1.047250747680664,
+      1.5707908868789673,
+      0.5591345429420471
+    ],
+    "joint_velocities_rad_s": [
+      -0.03711964935064316,
+      -0.1531686931848526,
+      0.15970124304294586,
+      0.0024427741300314665,
+      1.9440532923908904e-05,
+      -0.03776053711771965
+    ],
+    "contact_face_world_mm": [
+      871.173022989738,
+      340.11236583587345,
+      163.83402445425867
+    ],
+    "contact_face_dh_base_mm": [
+      871.173022989738,
+      340.11236583587356,
+      163.83402445425867
+    ]
+  }
+}
